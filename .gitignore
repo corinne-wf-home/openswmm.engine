@@ -144,3 +144,10 @@ docs/figures/cache/
 
 # Local testing questionnaires
 /*_User_Testing_Questionnaire.docx
+
+# Agent/session working state — never version-controlled
+.memory/
+.claude/
+CLAUDE.md
+MEMORY.md
+scratchpad/
