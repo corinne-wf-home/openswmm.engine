@@ -237,6 +237,7 @@ int SWMMEngine::open(const char* inp_path,
                                  surface_router_.pendingEdgeConveyanceRows(),
                                  surface_router_.pendingInitialQualityRows(),
                                  surface_router_.pendingBoundaryQualityRows(),
+                                 uncertainty_config_,
                                  dip->registry());
         // U4 (2026-09-07): the [GW_*] subsurface-transport authoring
         // sections. Parsed, validated and round-tripped; inert at run until
