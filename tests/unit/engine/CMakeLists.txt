@@ -101,6 +101,7 @@ add_gtest_unit(test_engine_filled_circular_offset_api test_filled_circular_offse
 add_gtest_unit(test_engine_timeseries_time_modes test_timeseries_time_modes.cpp)
 add_gtest_unit(test_engine_plugin_lifecycle      test_plugin_lifecycle.cpp)
 add_gtest_unit(test_engine_plugin_filter_invariant test_plugin_filter_invariant.cpp)
+add_gtest_unit(test_engine_rom_diag_trust    test_rom_diag_trust.cpp)
 # Slice RC.5 — GeoPackage explicit-builtin registration + is_builtin flag.
 add_gtest_unit(test_engine_pluginfactory_builtins test_pluginfactory_builtins.cpp)
 # Slice QA-01.4 — per-node summary stats read from a SWMM_Output handle.
