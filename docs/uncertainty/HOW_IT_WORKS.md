@@ -708,7 +708,9 @@ the marginal *shape*.
 Two caveats. First, per-family planes are a `COHERENCE FULL` feature:
 `COHERENCE CORR_LEN` carries one family per source by construction, so
 CORR_LEN × MIXED is refused with an explanatory error rather than approximated
-(see `VALIDATION.md`, "True per-family coefficient planes"). Second, the 2D grid
+(see `VALIDATION.md`, "True per-family coefficient planes"). Since PR SP3 that
+refusal is raised at initialization, for gages (mixed families on one network)
+and for grids (`family=MIXED` file), and `initialize()` returns the error. Second, the 2D grid
 `/spread` → ROM wiring that supplies the two planes is in place (PR SP2): the
 router maps `/spread` to the mesh, routes each cell to plane A (NORMAL/LOGNORMAL)
 or plane B (UNIFORM) by `/family_code`, and installs both on the 2D ROM each
