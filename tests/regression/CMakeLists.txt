@@ -153,8 +153,8 @@ if(OPENSWMM_BUILD_2D)
     # ---- PR 10 variant: Bellinge model coverage (fast saturation) ----
     # Real 1020-node network with K1d ≈ 0.123 (540× larger than Phase-9 chain).
     # Dominant mode τ_0 ≈ 100 s (vs 15 h), so 1-hour window reaches ~99% saturation.
-    # Rainfall file at /Users/corinnewiesner/Projects/SWMM_inp/Bellinge/7_SWMM/
-    # (absolute path injected by test).
+    # Model + rainfall paths come from OPENSWMM_BELLINGE_INP / _RAIN (defaults
+    # under $HOME); the test skips when they are absent. See the test header.
     add_executable(test_rom_coverage_bellinge test_rom_coverage_bellinge.cpp)
     target_link_libraries(test_rom_coverage_bellinge
         PRIVATE
@@ -171,7 +171,11 @@ if(OPENSWMM_BUILD_2D)
         CXX_STANDARD_REQUIRED ON
     )
     add_test(NAME regression_rom_coverage_bellinge COMMAND $<TARGET_FILE:test_rom_coverage_bellinge>)
-    set_tests_properties(regression_rom_coverage_bellinge PROPERTIES LABELS "regression")
+    # Full 24 h window is ~5 min (65,589 engine steps). Labelled "slow" so
+    # `ctest -LE slow` skips it; skips itself if the external data is absent.
+    set_tests_properties(regression_rom_coverage_bellinge PROPERTIES
+        LABELS "regression;slow"
+        TIMEOUT 1500)
     openswmm_stage_test_runtime_deps(test_rom_coverage_bellinge)
     # ---- CL-2a: correlation-length profile of the reduced spatial basis ----
     # Found dormant in the 2026-08-18 sweep: on disk since the mechanical port,
