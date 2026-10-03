@@ -800,12 +800,12 @@ endif()
 add_gtest_unit(test_engine_final_boundary_stall   test_engine_final_boundary_stall.cpp)
 add_gtest_unit(test_final_boundary_stall          test_final_boundary_stall.cpp)
 add_gtest_unit(test_engine_grid_mapping_weights   test_grid_mapping_weights.cpp)
-# RunoffEnsemble.cpp and SpdeSpatialBasis.cpp are NOT in the engine library --
-# src/engine/CMakeLists.txt lists uncertainty/*.cpp explicitly "as each lands",
-# and these two have no ported consumer yet. Compile them straight into their
-# own test target (the same pattern test_engine_spectral_rom1d used before its
-# source was wired) so the code is exercised without pre-empting the port
-# decision about whether to link them into the engine.
+# RunoffEnsemble.cpp is NOT in the engine library -- src/engine/CMakeLists.txt
+# lists uncertainty/*.cpp explicitly "as each lands", and it has no ported
+# consumer yet. Compile it straight into its own test target (the same pattern
+# test_engine_spectral_rom1d used before its source was wired) so the code is
+# exercised without pre-empting the port decision about whether to link it
+# into the engine. (SpdeSpatialBasis.cpp left this list in SP3.)
 add_gtest_unit(test_engine_runoff_ensemble        test_runoff_ensemble.cpp)
 target_sources(test_engine_runoff_ensemble PRIVATE
     ${PROJECT_SOURCE_DIR}/src/engine/uncertainty/RunoffEnsemble.cpp)
@@ -816,9 +816,9 @@ if(OPENSWMM_BUILD_2D)
     # undefined-reference at link time with -DOPENSWMM_BUILD_2D=OFF otherwise.
     add_gtest_unit(test_engine_soft_rain_grid_parser test_soft_rain_grid_parser.cpp)
 endif()
+# SpdeSpatialBasis.cpp is in the engine library since SP3; link it, don't
+# recompile it (ODR).
 add_gtest_unit(test_engine_spde_spatial_basis     test_spde_spatial_basis.cpp)
-target_sources(test_engine_spde_spatial_basis PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/engine/uncertainty/SpdeSpatialBasis.cpp)
 if(OPENSWMM_BUILD_2D)
     add_gtest_unit(test_engine_2d_rom_integration test_engine_2d_rom_integration.cpp)
 endif()

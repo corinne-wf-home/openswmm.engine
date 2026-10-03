@@ -68,6 +68,14 @@ list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/SpectralROM1D.cpp)
 # Manning/rainfall pair (e.g. a 1D INFLOW FORCING_VECTOR spec). Consumed by
 # SWMMEngine::buildROM1D().
 list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/UncertaintyEnsemble.cpp)
+# SP3 (2026-10-03): CL-2b analytic SPDE (Whittle-Matern nu=2) reduced spatial
+# basis. Consumer: COHERENCE CORR_LEN soft rainfall on both ROMs (SWMMEngine::
+# buildRom1DSoftField, SurfaceRouter2D::buildGridSoftField). 2D-independent, so
+# it lives in the base list like SpectralROM1D.cpp. Until SP3 it was compiled
+# only into its own test targets; those direct compilations were removed when
+# it landed here (two definitions of one class in one process is the ODR
+# hazard this file's test notes already warn about).
+list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/SpdeSpatialBasis.cpp)
 
 file(GLOB_RECURSE OPENSWMM_ENGINE_HEADERS
     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}

@@ -70,6 +70,8 @@
 #include "../uncertainty/RomSurchargeAttenuation.hpp"
 #include "../uncertainty/RomPhaseCoordinate.hpp"
 #include "../uncertainty/UncertaintyEnsemble.hpp"
+#include "../uncertainty/SoftSpatialField.hpp"
+#include "../uncertainty/SpdeSpatialBasis.hpp"
 namespace openswmm::twoD { class Default2DOutputPlugin; }
 #endif
 
@@ -494,6 +496,21 @@ private:
     bool soft_rain_1d_has_a_  = false;         ///< Any NORMAL/LOGNORMAL contribution exists
     bool soft_rain_1d_has_b_  = false;         ///< Any UNIFORM contribution exists
     uncertainty::DistType soft_rain_1d_family_a_ = uncertainty::DistType::NORMAL; ///< Plane A family (NORMAL or LOGNORMAL)
+
+    // ---- SP3: COHERENCE CORR_LEN for the gage path (CL-1c/CL-2c re-port) ----
+    // One correlation length per network (max over contributing CORR_LEN gages,
+    // the pre-port v1 policy). The per-member coefficient field depends only on
+    // the fixed c_i, node geometry and corr_len, so it is built ONCE on the
+    // first soft-forcing step. K_s < M -> reduced projection (psi/a, CL-2c);
+    // K_s >= M -> materialized SoftSpatialField (CL-1c shape, SPDE-generated).
+    double rom1d_soft_corr_len_ = 0.0;        ///< 0 => comonotone (FULL)
+    uncertainty::SoftSpatialField rom1d_soft_field_; ///< Materialized M x n_active field (K_s >= M only)
+    uncertainty::SpdeSpatialBasis rom1d_soft_basis_; ///< Whittle-Matern nu=2 basis over active nodes
+    std::vector<double> rom1d_soft_psi_;      ///< psi_m(t), K_s x n_active row-major (ROM holds a pointer)
+    std::vector<double> rom1d_soft_a_;        ///< a_im, M x K_s row-major (ROM holds a pointer)
+    bool rom1d_soft_field_built_ = false;     ///< Build attempted (success or fallback) -- never retried
+    bool rom1d_soft_reduced_ = false;         ///< Reduced path active (K_s < M)
+    bool rom1d_soft_corr_warned_ = false;     ///< One-shot "no [COORDINATES]" fallback warning
     uncertainty::SurchargeAttenuationConfig rom1d_surcharge_cfg_; ///< PR H5 ramp band (defaults [0.9,1.1]); not
                                             ///< parser-exposed in this PR, internal knob only
     // ---- PR H11: per-member phase coordinate ------------------------------
@@ -538,6 +555,8 @@ private:
     void buildROM1D() noexcept;
     /// SP1: build the per-active-node gage CSR for gage-level soft rainfall.
     void initSoftRain1D(const std::vector<int>& active_map) noexcept;
+    /// SP3: build the SPDE spatial basis / coefficient field for CORR_LEN gages.
+    void buildRom1DSoftField() noexcept;
 
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
     double computeK1d() noexcept;

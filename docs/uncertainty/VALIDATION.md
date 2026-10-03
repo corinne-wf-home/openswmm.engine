@@ -359,6 +359,67 @@ ctest --test-dir build/darwin-tests-local -R "test_engine_spde_spatial_basis|tes
 
 ---
 
+# Correlated soft rainfall re-port on the marcher line (PR SP3)
+
+Measured 2026-10-03. SP3 re-homes CL-1c/CL-2c (`COHERENCE CORR_LEN`) onto
+`port/v2-on-marcher` for both the gage path (SP1) and the grid path (SP2), using
+the CL-2b analytic SPDE basis, which SP3 added to the engine library. The CL-1e
+gate (`tests/regression/test_soft_rain_corr_coverage.cpp`) was registered and run
+**with no expectation edits**.
+
+## 1. Results (measured)
+
+| Metric | July (pre-port line, CL-1e) | SP3 re-port |
+|---|---|---|
+| Coverage, ROM [q05,q95] ∋ correlated-MC median | ≥ 0.90 floor | **1.000** (60/60) |
+| Width ratio in [0.3, 3.0], saturated regime | ≥ 0.80 floor | **1.000** (35/35) |
+| Width ratio min / median / max | see CL-1e section | **0.436 / 0.659 / 0.806** |
+| J5 band, correlated (ℓ = 30 m) ÷ comonotone | < 1 required | **0.563** |
+
+The MC reference is built from `CorrelatedFieldGenerator` (the CL-1 rank/copula
+field) while the engine now uses the SPDE Matérn ν = 2 basis, so this is a
+cross-method comparison, not a self-check. The ROM median band is about 0.66 of
+the correlated MC band, narrower than the comonotone case's 0.82 (SR-5), which
+is consistent with the delta-linearization under-prediction compounding with
+spatial cancellation.
+
+## 2. Findings
+
+- **The 2D correlated path WIDENS the band on the 4-cell test mesh (2.02×).**
+  On the SP2 live-ROM fixture, `CORR_LEN 0.1 m` (far below the ~1.5 m centroid
+  spacing) gives band 9.73e-4 against 4.82e-4 comonotone. Comonotone rainfall
+  uncertainty on a tiny, nearly flat patch is mostly a uniform depth shift, which
+  lives in the discarded constant eigenmode; independent per-cell coefficients
+  project more onto the retained zero-mean modes. The 1D chain narrows downstream
+  (0.563 above) because uncertainty accumulates along the flow path. The two are
+  not in conflict; the test records the direction rather than asserting it. No
+  2D correlated MC exists on this line, so the 2D band magnitude under CORR_LEN
+  is unvalidated.
+- **Reduced vs materialized is decided by K_s against M.** On 4 points the SPDE
+  basis retained K_s = 64 ≥ M = 20, so the 2D fixture takes the materialized
+  field branch; the 1D chain and the CL-2a profile mesh take the reduced one.
+  Both are the correlated path.
+- **`initialize()` used to swallow init-time hard errors.** `set_error()` puts
+  the engine in ERROR_STATE, but `initialize()` then overwrote that with
+  INITIALIZED and returned OK, so `start()` proceeded. This affected the
+  pre-existing 2D-init failure path too. SP3 makes `initialize()` return the
+  error instead. Behaviour change, deliberate, called out in the checklist.
+- **"No coordinates" cannot be detected by emptiness** on this line:
+  `PostParseResolver` zero-fills `spatial.node_x/y` whether or not
+  `[COORDINATES]` was present. Detected as a zero-extent point set instead;
+  falls back to FULL with one warning and reproduces the FULL output exactly
+  (test `CorrLenWithoutCoordinatesWarnsAndFallsBackToFull`).
+- **CL-2a profile after SP3** (`regression_corr_len_profile`, same 9.8k-triangle
+  mesh): comonotone advance 1.52 ms/step, correlated advance 14.82 ms/step,
+  quantile reconstruction 18.81 ms/step, projection delta 13.31 ms/step. The gate
+  passes; the quantile phase is no longer the dominant term after H4.
+
+## 3. Reproduction
+
+    ctest --test-dir build/<dir> -R 'regression_soft_rain_corr_coverage|test_engine_soft_rain_gage_engine|test_engine_soft_rain_grid_2d'
+
+---
+
 # Solver-mode compatibility: 2D ROM vs the explicit local-inertial marcher (W3)
 
 Measured 2026-08-02. Harness: `tests/regression/test_2d_rom_marcher_coverage.cpp`

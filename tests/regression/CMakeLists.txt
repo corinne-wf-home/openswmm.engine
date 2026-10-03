@@ -178,8 +178,9 @@ if(OPENSWMM_BUILD_2D)
     # never registered. Drives the ROM's setSoftForcing() directly (no
     # [SOFT_RAINGAGES] parser dependency), so unlike its two SR-5 siblings it
     # runs on this base as-is.
-    add_executable(test_corr_len_profile test_corr_len_profile.cpp
-        ${PROJECT_SOURCE_DIR}/src/engine/uncertainty/SpdeSpatialBasis.cpp)
+    # SpdeSpatialBasis.cpp is in the engine library since SP3 (not recompiled
+    # here: ODR).
+    add_executable(test_corr_len_profile test_corr_len_profile.cpp)
     target_link_libraries(test_corr_len_profile
         PRIVATE
             GTest::gtest GTest::gtest_main
@@ -222,9 +223,25 @@ if(OPENSWMM_BUILD_2D)
     set_tests_properties(regression_soft_rain_coverage PROPERTIES LABELS "regression")
     openswmm_stage_test_runtime_deps(test_soft_rain_coverage)
 
-    # ---- Deliberately NOT registered: SR-5 correlated coverage --------------
-    # test_soft_rain_corr_coverage.cpp exercises COHERENCE CORR_LEN against MC.
-    # That wiring is SP3 (CL-1c/CL-2c); SP1 runs CORR_LEN gages as comonotone
-    # with a warning, so this gate would measure the wrong thing. Register it
-    # in SP3, not before.
+    # ---- SP3: correlated soft-rain ROM vs correlated MC (CL-1e / SR-5b) ------
+    # Needs CorrelatedFieldGenerator (2D-only compiled) for its MC reference, so
+    # it stays inside this 2D block.
+    add_executable(test_soft_rain_corr_coverage test_soft_rain_corr_coverage.cpp)
+    target_link_libraries(test_soft_rain_corr_coverage
+        PRIVATE
+            GTest::gtest GTest::gtest_main
+            openswmm_engine
+    )
+    target_include_directories(test_soft_rain_corr_coverage
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src/engine
+    )
+    set_target_properties(test_soft_rain_corr_coverage PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+    add_test(NAME regression_soft_rain_corr_coverage COMMAND $<TARGET_FILE:test_soft_rain_corr_coverage>)
+    set_tests_properties(regression_soft_rain_corr_coverage PROPERTIES LABELS "regression")
+    openswmm_stage_test_runtime_deps(test_soft_rain_corr_coverage)
 endif()

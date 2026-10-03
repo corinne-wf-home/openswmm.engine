@@ -1670,10 +1670,16 @@ a defect.
 - `SD` and `HALFRANGE` spreads are in the gage's rain units (the units of the
   rainfall series), so they are compared with the gage's current intensity
   without any conversion. `CV` is dimensionless.
-- `COHERENCE CORR_LEN <m>` is accepted by the parser, but spatially correlated
-  coherence is **not yet wired** on this line (planned: PR SP3). A gage that
-  carries it runs with `COHERENCE FULL` (comonotone, the widest band) and the
-  run report gets a warning saying so.
+- `COHERENCE CORR_LEN <m>` (PR SP3) makes member coefficients vary across the
+  network with a Whittle–Matérn (ν = 2) correlation of length `<m>` instead of
+  one rank everywhere. It needs node `[COORDINATES]`; without them (all nodes
+  coincide) the gage falls back to `COHERENCE FULL` with a one-time warning. One
+  correlation length applies per network, the largest among `CORR_LEN` gages.
+  `CORR_LEN` cannot be combined with mixed families on one network: the run is
+  refused at initialization with a message naming the cause. Validated against
+  a correlated Monte Carlo on the test chain (`NORMAL CV 0.40`, ℓ = 120 m):
+  coverage 1.000, width ratio 0.44 / 0.66 / 0.81; the downstream band at ℓ = 30 m
+  is 0.56× the comonotone band, which is the point of the feature.
 - Validated against brute-force Monte Carlo on the test chain (21 members,
   `NORMAL CV 0.20`): coverage 1.000, ROM-to-MC band-width ratio 0.73 / 0.82 /
   0.87 (min / median / max). That is a small, free-surface network; band
@@ -1706,9 +1712,10 @@ INFLOWS node_grid.h5  CENTROID  FORCE_LOCATION  NODES  nodes.txt
 (`[2D_ROM] ENABLE YES`), **with or without `FORCE_LOCATION`**; without it the
 gages remain the deterministic rainfall. `RUNOFF` and `INFLOWS` targets are
 parsed and recorded but nothing consumes them yet (their runtime, SR-2d, is not
-ported). `COHERENCE CORR_LEN` on a grid is parsed but not wired (PR SP3): the
-grid runs with `COHERENCE FULL` and the run report carries a warning. The grid's
-last time plane is held for the rest of the run. A `CV` spread is converted to an
+ported). `COHERENCE CORR_LEN` on a grid (PR SP3) is wired: the correlation acts over the
+triangle centroids. It cannot be combined with a `family=MIXED` file; that is
+refused at initialization. The grid's last time plane is held for the rest of
+the run. A `CV` spread is converted to an
 absolute rate with whatever rainfall is in force that step (grid `/location` when
 forced, otherwise the gages).
 

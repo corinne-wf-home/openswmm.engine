@@ -1364,6 +1364,7 @@ double SurfaceRouter2D::totalExchangeFlow() const {
 
 bool SurfaceRouter2D::initGridRainfall(const uncertainty::SoftGridSourceSpec& spec,
                                        const std::string& inp_dir) {
+    grid_init_error_.clear();
     std::string path = spec.file_path;
     if (!path.empty() && path[0] != '/' && !inp_dir.empty())
         path = inp_dir + "/" + path;
@@ -1438,9 +1439,31 @@ bool SurfaceRouter2D::initGridRainfall(const uncertainty::SoftGridSourceSpec& sp
     grid_spread_a_.assign(static_cast<std::size_t>(nt), 0.0);
     grid_spread_b_.assign(static_cast<std::size_t>(nt), 0.0);
     grid_soft_warned_ = false;
-    grid_corr_len_requested_ =
-        (spec.coherence == uncertainty::Coherence::CORR_LEN);
-    grid_corr_len_warned_ = false;
+
+    // SP3: correlated coherence. The field is built lazily on the first spread
+    // step (it needs the ROM's coefficient column). H7 scope guard: CORR_LEN x
+    // MIXED is refused here, where the file's family is first known, as a hard
+    // error surfaced by the engine (see gridInitError()).
+    grid_soft_corr_len_ = (spec.coherence == uncertainty::Coherence::CORR_LEN)
+                              ? spec.corr_len : 0.0;
+    grid_soft_field_built_ = false;
+    grid_soft_reduced_ = false;
+    grid_soft_corr_warned_ = false;
+    grid_soft_field_.clear();
+    grid_soft_basis_.clear();
+    grid_soft_psi_.clear();
+    grid_soft_a_.clear();
+    if (grid_soft_corr_len_ > 0.0 && grid_reader_.family() == GridFamily::MIXED) {
+        grid_init_error_ =
+            "[SOFT_RAINFALL_GRID]: COHERENCE CORR_LEN cannot be combined with a "
+            "family=MIXED grid: the correlated field carries one coefficient "
+            "family per source. Use COHERENCE FULL for MIXED grids, or a single "
+            "family with CORR_LEN. (CORR_LEN x MIXED is additive future work -- "
+            "PR H7 scope guard.)";
+        grid_reader_.close();
+        grid_reader_opened_ = false;
+        return false;
+    }
 
     grid_2d_active_ = true;
     return true;
@@ -1670,7 +1693,22 @@ void SurfaceRouter2D::updateGridSoftSpread(SimulationContext& ctx,
                                                           : DistType::NORMAL;
     const double* loc_ptr = state_.rainfall.empty() ? nullptr : state_.rainfall.data();
 
-    if (rom_) {
+    if (rom_ && grid_soft_corr_len_ > 0.0) {
+        // SP3: correlated coherence. Single family by construction (MIXED was
+        // refused at init), so exactly one plane is live.
+        const double* sp_plane = has_b ? grid_spread_b_.data() : grid_spread_a_.data();
+        const DistType fam = has_b ? DistType::UNIFORM : fam_a;
+        if (!grid_soft_field_built_) buildGridSoftField(ctx, fam, sp_plane);
+        if (grid_soft_reduced_) {
+            rom_->setSoftForcingReduced(loc_ptr, sp_plane, fam,
+                                        grid_soft_psi_.data(), grid_soft_a_.data(),
+                                        grid_soft_basis_.n_modes());
+        } else {
+            const SpatialUncertaintyField* sf =
+                grid_soft_field_.is_spatial() ? &grid_soft_field_ : nullptr;
+            rom_->setSoftForcing(loc_ptr, sp_plane, fam, sf);
+        }
+    } else if (rom_) {
         if (has_a && has_b) {
             // MIXED: both planes, each with its own family.
             rom_->setSoftForcing(loc_ptr, grid_spread_a_.data(), fam_a, nullptr,
@@ -1694,14 +1732,62 @@ void SurfaceRouter2D::updateGridSoftSpread(SimulationContext& ctx,
             + (mixed ? " (MIXED family)" : "") + ".");
         grid_soft_warned_ = true;
     }
+}
 
-    // SP3 placeholder: CORR_LEN is parsed and recorded but not yet wired.
-    if (grid_corr_len_requested_ && !grid_corr_len_warned_) {
-        ctx.warnings.push_back(
-            "WARNING: [SOFT_RAINFALL_GRID] COHERENCE CORR_LEN is parsed but not "
-            "yet wired into the 2D ROM; the grid runs with COHERENCE FULL "
-            "(comonotone, the widest band).");
-        grid_corr_len_warned_ = true;
+
+// ============================================================================
+// buildGridSoftField (SP3) -- SPDE reduced spatial basis for CORR_LEN (2D)
+// ============================================================================
+//
+// Re-home of the pre-port CL-2c block. Once, lazily: the per-member coefficient
+// field depends only on c_i, triangle geometry and corr_len. Marks itself
+// attempted first so a fallback never retries per step.
+//
+void SurfaceRouter2D::buildGridSoftField(SimulationContext& ctx,
+                                         uncertainty::DistType family,
+                                         const double* spread) {
+    grid_soft_field_built_ = true;
+    grid_soft_field_.clear();
+    grid_soft_basis_.clear();
+    grid_soft_psi_.clear();
+    grid_soft_a_.clear();
+    grid_soft_reduced_ = false;
+    if (!rom_ || grid_soft_corr_len_ <= 0.0) return;
+
+    const int M  = rom_->n_ensemble;
+    const int nt = mesh_.n_triangles();
+    if (M < 2 || nt <= 0) return;
+
+    // Populate the ROM's family-selected coefficients first.
+    const double* loc_ptr = state_.rainfall.empty() ? nullptr : state_.rainfall.data();
+    rom_->setSoftForcing(loc_ptr, spread, family);
+    const std::vector<double> coeff = rom_->softCoeff();  // copy
+    if (static_cast<int>(coeff.size()) != M) return;
+
+    try {
+        grid_soft_basis_.build(mesh_.tri_cx.data(), mesh_.tri_cy.data(), nt,
+                               grid_soft_corr_len_);
+        grid_soft_basis_.sampleCoefficients(coeff, family,
+                                            UINT64_C(0x2d50f7c0de5eed02), grid_soft_a_);
+        const int Ks = grid_soft_basis_.n_modes();
+        if (Ks < M) {
+            grid_soft_basis_.normalizedModes(grid_soft_a_, M, grid_soft_psi_);
+            grid_soft_reduced_ = true;
+        } else {
+            grid_soft_basis_.materializeField(grid_soft_a_, M, grid_soft_field_.values);
+            grid_soft_field_.n_members = M;
+            grid_soft_field_.n_cells   = nt;
+            grid_soft_reduced_ = false;
+        }
+    } catch (const std::exception& e) {
+        grid_soft_field_.clear(); grid_soft_psi_.clear(); grid_soft_a_.clear();
+        grid_soft_reduced_ = false;
+        if (!grid_soft_corr_warned_) {
+            ctx.warnings.push_back(std::string(
+                "WARNING: [SOFT_RAINFALL_GRID] COHERENCE CORR_LEN spatial basis could "
+                "not be built (") + e.what() + "); falling back to comonotone (FULL).");
+            grid_soft_corr_warned_ = true;
+        }
     }
 }
 

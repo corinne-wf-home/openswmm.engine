@@ -260,13 +260,7 @@ TEST(SoftRainGageEngine, LargeCorrLenApproachesComonotone) {
 }
 
 TEST(SoftRainGageEngine, SmallCorrLenNarrowsDownstreamBands) {
-    // SP3 gate, NOT an SP1 defect. SP1 re-ports FULL (comonotone) coherence
-    // only: a gage carrying COHERENCE CORR_LEN is parsed and then run as FULL
-    // with a one-time warning. This test needs the correlated reduced-basis
-    // wiring (CL-1c/CL-2c) that SP3 restores. Remove this skip in SP3.
-    // NOTE the neighbouring LargeCorrLenApproachesComonotone passes TRIVIALLY
-    // until then (both runs are FULL), so it proves nothing about CORR_LEN yet.
-    GTEST_SKIP() << "needs SP3: COHERENCE CORR_LEN is not wired on this line";
+    // Skipped in SP1 (CORR_LEN was parsed but run as FULL); live since SP3.
     // corr_len ≪ node spacing (200 m) ⇒ each node ranks independently ⇒ the
     // most-downstream node's band narrows vs comonotone (spatial cancellation).
     const std::string inp_a = g_pfx + "cmono2.inp";
@@ -402,14 +396,67 @@ TEST(SoftRainGageEngine, SingleFamilyLeavesSecondPlaneUnarmed) {
     EXPECT_GT(pu.band, 1.0e-6);
 }
 
-TEST(SoftRainGageEngine, CorrLenGageWarnsThatItRunsComonotone) {
-    // Until SP3 a CORR_LEN gage must not be silently reinterpreted.
-    const std::string inp = g_pfx + "cl_warn.inp";
+TEST(SoftRainGageEngine, CorrLenGageIsWiredAndDoesNotWarn) {
+    // SP1 emitted a "not yet wired" warning for CORR_LEN gages; SP3 wires them,
+    // so the warning must be gone and the fixture ([COORDINATES] present) must
+    // produce a band without any fallback warning either.
+    const std::string inp = g_pfx + "cl_live.inp";
     writeChainInp(inp, "RG1 NORMAL CV 0.30 COHERENCE CORR_LEN 200");
-    const PlaneProbe pr = runPlaneProbe(inp, g_pfx + "cl_warn.rpt",
-                                        g_pfx + "cl_warn.uncertainty.csv");
+    const PlaneProbe pr = runPlaneProbe(inp, g_pfx + "cl_live.rpt",
+                                        g_pfx + "cl_live.uncertainty.csv");
     ASSERT_TRUE(pr.ran);
-    EXPECT_EQ(pr.corr_len_warnings, 1);
+    EXPECT_EQ(pr.corr_len_warnings, 0) << "no 'not wired' / fallback warning expected";
+    EXPECT_GT(pr.band, 1.0e-6);
+}
+
+TEST(SoftRainGageEngine, CorrLenWithMixedFamiliesIsRefusedAtInitialize) {
+    // H7 scope guard: the correlated field carries one coefficient family per
+    // source, so CORR_LEN x mixed families is a hard error, not an
+    // approximation. Per-line parsing cannot see it; initialize() can.
+    const std::string inp = g_pfx + "cl_mixed.inp";
+    writeTwoGageInp(inp, "RG1 NORMAL CV 0.30 COHERENCE CORR_LEN 200\nRG2 UNIFORM HALFRANGE 1.8");
+    SWMM_Engine handle = swmm_engine_create();
+    ASSERT_NE(handle, nullptr);
+    ASSERT_EQ(swmm_engine_open(handle, inp.c_str(), (g_pfx + "cl_mixed.rpt").c_str(),
+                               nullptr, nullptr), SWMM_OK);
+    // Raised inside initialize() via set_error -> ERROR_STATE. Before SP3,
+    // initialize() overwrote that state with INITIALIZED and returned SWMM_OK,
+    // so init-time hard errors were swallowed; SP3 made initialize() honour it.
+    EXPECT_NE(swmm_engine_initialize(handle), SWMM_OK)
+        << "CORR_LEN x mixed families must be refused";
+    const std::string msg = swmm_get_last_error_msg(handle);   // read before start() overwrites it
+    EXPECT_NE(msg.find("CORR_LEN"), std::string::npos) << msg;
+    EXPECT_NE(swmm_engine_start(handle, 0), SWMM_OK)
+        << "an engine in ERROR_STATE must not start";
+    swmm_engine_close(handle);
+    swmm_engine_destroy(handle);
+}
+
+TEST(SoftRainGageEngine, CorrLenWithoutCoordinatesWarnsAndFallsBackToFull) {
+    // Same chain, [COORDINATES] stripped: no geometry => comonotone fallback,
+    // said once, and the band equals the FULL band byte-for-byte.
+    const std::string inp_a = g_pfx + "cl_nocoord_full.inp";
+    const std::string inp_b = g_pfx + "cl_nocoord_cl.inp";
+    const std::string csv_a = g_pfx + "cl_nocoord_full.uncertainty.csv";
+    const std::string csv_b = g_pfx + "cl_nocoord_cl.uncertainty.csv";
+    auto strip = [](const std::string& path) {
+        std::ifstream in(path); std::stringstream buf; buf << in.rdbuf(); in.close();
+        std::string t = buf.str();
+        const auto a = t.find("[COORDINATES]");
+        const auto b = t.find("[REPORT]");
+        if (a != std::string::npos && b != std::string::npos && b > a) t.erase(a, b - a);
+        std::ofstream out(path); out << t;
+    };
+    writeChainInp(inp_a, "RG1 NORMAL CV 0.30"); strip(inp_a);
+    writeChainInp(inp_b, "RG1 NORMAL CV 0.30 COHERENCE CORR_LEN 50"); strip(inp_b);
+    bool fa = false;
+    runCase(inp_a, g_pfx + "cl_nocoord_full.rpt", csv_a, fa);
+    const PlaneProbe pb = runPlaneProbe(inp_b, g_pfx + "cl_nocoord_cl.rpt", csv_b);
+    ASSERT_TRUE(fa);
+    ASSERT_TRUE(pb.ran);
+    EXPECT_EQ(pb.corr_len_warnings, 1);
+    EXPECT_TRUE(filesIdentical(csv_a, csv_b))
+        << "fallback must reproduce the FULL path exactly";
 }
 
 } // anonymous namespace

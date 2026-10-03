@@ -737,6 +737,15 @@ int SWMMEngine::initialize() noexcept {
         }
     }
 
+    // SP3 (2026-10-03): a hard error raised during module init (set_error ->
+    // ERROR_STATE inside init_modules: the CORR_LEN x mixed-families refusal,
+    // the 2D-init failure path, initHydrology/initQuality error pushes) used to
+    // be overwritten by INITIALIZED here and swallowed -- initialize() returned
+    // SWMM_OK, start() saw INITIALIZED, and the run proceeded with whatever
+    // partial state the failing step left behind. Honour it instead.
+    if (ctx_.state == EngineState::ERROR_STATE)
+        return (ctx_.error_code != 0) ? ctx_.error_code : SWMM_ERR_PARSE;
+
     ctx_.state = EngineState::INITIALIZED;
     return SWMM_OK;
 }
@@ -2846,7 +2855,26 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                 rom1d_soft_spread_a_[uai] = (tot > 0.0) ? dh * numer_a / tot : 0.0;
                 rom1d_soft_spread_b_[uai] = (tot > 0.0) ? dh * numer_b / tot : 0.0;
             }
-            if (soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
+            if (rom1d_soft_corr_len_ > 0.0) {
+                // SP3: correlated coherence. Single family by construction (mixed
+                // was refused at init). Field built once; the spread magnitude
+                // enters per step through the projection.
+                if (!rom1d_soft_field_built_) buildRom1DSoftField();
+                const double* spread = soft_rain_1d_has_b_ ? rom1d_soft_spread_b_.data()
+                                                           : rom1d_soft_spread_a_.data();
+                const uncertainty::DistType fam = soft_rain_1d_has_b_
+                    ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
+                if (rom1d_soft_reduced_) {
+                    rom1d_->setSoftForcingReduced(rom1d_soft_loc_.data(), spread, fam,
+                                                  rom1d_soft_psi_.data(),
+                                                  rom1d_soft_a_.data(),
+                                                  rom1d_soft_basis_.n_modes());
+                } else {
+                    const uncertainty::SoftSpatialField* sf =
+                        rom1d_soft_field_.is_spatial() ? &rom1d_soft_field_ : nullptr;
+                    rom1d_->setSoftForcing(rom1d_soft_loc_.data(), spread, fam, sf);
+                }
+            } else if (soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
                 // MIXED: both planes, each with its own family.
                 rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
                                        rom1d_soft_spread_a_.data(),
@@ -4793,6 +4821,10 @@ void SWMMEngine::initHydraulics() noexcept {
             if (!ctx_.inp_file_path.empty())
                 inp_dir = std::filesystem::path(ctx_.inp_file_path).parent_path().string();
             surface_router_.initGridRainfall(gs, inp_dir);
+            if (!surface_router_.gridInitError().empty()) {
+                ctx_.errors.push_back(surface_router_.gridInitError());
+                set_error(SWMM_ERR_PARSE, ctx_.errors.back().c_str());
+            }
             break;
         }
     }
@@ -6011,6 +6043,13 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     soft_rain_1d_has_a_ = false;
     soft_rain_1d_has_b_ = false;
     soft_rain_1d_family_a_ = uncertainty::DistType::NORMAL;
+    rom1d_soft_corr_len_ = 0.0;
+    rom1d_soft_field_built_ = false;
+    rom1d_soft_reduced_ = false;
+    rom1d_soft_field_.clear();
+    rom1d_soft_basis_.clear();
+    rom1d_soft_psi_.clear();
+    rom1d_soft_a_.clear();
 
     const auto& sr = ctx_.soft_rain;
     if (sr.count() == 0) return;
@@ -6027,7 +6066,6 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     // each node's total drained area (ALL subcatchments, configured or not).
     std::vector<int> counts(n_active, 0);
     const int n_sub = ctx_.subcatches.count();
-    bool corr_len_seen = false;
     bool lognormal_seen = false;
     for (int s = 0; s < n_sub; ++s) {
         const int node = ctx_.subcatches.outlet_node[static_cast<std::size_t>(s)];
@@ -6046,7 +6084,11 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
             soft_rain_1d_has_a_ = true;
             if (sr.family[ug] == uncertainty::DistType::LOGNORMAL) lognormal_seen = true;
         }
-        if (sr.coherence[ug] == uncertainty::GageCoherence::CORR_LEN) corr_len_seen = true;
+        // SP3 (CL-1c v1 policy): one correlation length for the whole 1D field,
+        // the max over contributing CORR_LEN gages.
+        if (sr.coherence[ug] == uncertainty::GageCoherence::CORR_LEN &&
+            sr.corr_len[ug] > rom1d_soft_corr_len_)
+            rom1d_soft_corr_len_ = sr.corr_len[ug];
     }
 
     // CSR offsets.
@@ -6083,13 +6125,113 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     soft_rain_1d_family_a_ = (lognormal_seen && !soft_rain_1d_has_a_)
         ? uncertainty::DistType::LOGNORMAL : uncertainty::DistType::NORMAL;
 
-    if (corr_len_seen) {
-        ctx_.warnings.push_back(
-            "WARNING: [SOFT_RAINGAGES] COHERENCE CORR_LEN is parsed but not yet "
-            "wired into the 1D ROM; the affected gage(s) run with COHERENCE FULL "
-            "(comonotone, the widest band).");
+    // H7 scope guard, enforced at the earliest point the network-wide fact is
+    // known: the correlated paths carry ONE coefficient family per source, so
+    // CORR_LEN x mixed families is refused, not approximated. (Per-line parsing
+    // cannot see this; init is the first place that can.)
+    if (rom1d_soft_corr_len_ > 0.0 && soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
+        ctx_.errors.push_back(
+            "[SOFT_RAINGAGES]: COHERENCE CORR_LEN cannot be combined with mixed "
+            "distribution families (UNIFORM together with NORMAL/LOGNORMAL) on one "
+            "network: the correlated field carries one coefficient family per "
+            "source. Use COHERENCE FULL for mixed families, or a single family with "
+            "CORR_LEN. (CORR_LEN x MIXED is additive future work -- PR H7 scope guard.)");
+        set_error(SWMM_ERR_PARSE, ctx_.errors.back().c_str());
+        soft_rain_1d_active_ = false;
+        return;
     }
     soft_rain_1d_active_ = true;
+}
+
+// ============================================================================
+// buildRom1DSoftField() -- SP3: SPDE reduced spatial basis for CORR_LEN (1D)
+// ============================================================================
+//
+// Re-home of the pre-port CL-2c builder. Called once, lazily, from the first
+// soft-forcing step (it needs the ROM's coefficient column, which setSoftForcing
+// fills). Marks itself attempted up front so a fallback never retries per step.
+//
+void SWMMEngine::buildRom1DSoftField() noexcept {
+    rom1d_soft_field_built_ = true;
+    rom1d_soft_field_.clear();
+    rom1d_soft_basis_.clear();
+    rom1d_soft_psi_.clear();
+    rom1d_soft_a_.clear();
+    rom1d_soft_reduced_ = false;
+
+    if (!rom1d_ || !soft_rain_1d_active_ || rom1d_soft_corr_len_ <= 0.0) return;
+    const int n_active = static_cast<int>(rom1d_active_map_.size());
+    const int M = rom1d_->n_ensemble;
+    if (n_active <= 0 || M < 2) return;
+
+    // Mixed families were refused at init, so exactly one plane is live.
+    const double* spread = soft_rain_1d_has_b_ ? rom1d_soft_spread_b_.data()
+                                               : rom1d_soft_spread_a_.data();
+    const uncertainty::DistType fam = soft_rain_1d_has_b_
+        ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
+
+    // Populate the ROM's family-selected per-member coefficients c_i.
+    rom1d_->setSoftForcing(rom1d_soft_loc_.data(), spread, fam);
+    const std::vector<double> coeff = rom1d_->softCoeff();  // copy: setSoftForcing rebinds
+    if (static_cast<int>(coeff.size()) != M) return;
+
+    // Node [COORDINATES] give the geometry the correlation length acts over.
+    // The SPDE basis is analytic (cosine eigenpairs) and 2D-independent.
+    // NOTE: PostParseResolver zero-fills spatial.node_x/y to n_nodes whether or
+    // not [COORDINATES] was present, so "no coordinates" cannot be detected by
+    // emptiness on this line; detect it as a degenerate (zero-extent) point set.
+    std::vector<double> nx(static_cast<std::size_t>(n_active));
+    std::vector<double> ny(static_cast<std::size_t>(n_active));
+    double xmin = 0.0, xmax = 0.0, ymin = 0.0, ymax = 0.0;
+    for (int ai = 0; ai < n_active; ++ai) {
+        const auto uai = static_cast<std::size_t>(ai);
+        const auto ui  = static_cast<std::size_t>(rom1d_active_map_[uai]);
+        nx[uai] = (ui < ctx_.spatial.node_x.size()) ? ctx_.spatial.node_x[ui] : 0.0;
+        ny[uai] = (ui < ctx_.spatial.node_y.size()) ? ctx_.spatial.node_y[ui] : 0.0;
+        if (ai == 0) { xmin = xmax = nx[0]; ymin = ymax = ny[0]; }
+        xmin = std::min(xmin, nx[uai]); xmax = std::max(xmax, nx[uai]);
+        ymin = std::min(ymin, ny[uai]); ymax = std::max(ymax, ny[uai]);
+    }
+    if (!(xmax > xmin) && !(ymax > ymin)) {
+        if (!rom1d_soft_corr_warned_) {
+            ctx_.warnings.push_back(
+                "WARNING: COHERENCE CORR_LEN for soft raingages requires node "
+                "[COORDINATES]; none found (all active nodes coincide) -- falling "
+                "back to comonotone (FULL).");
+            rom1d_soft_corr_warned_ = true;
+        }
+        return;
+    }
+
+    try {
+        rom1d_soft_basis_.build(nx.data(), ny.data(), n_active, rom1d_soft_corr_len_);
+        rom1d_soft_basis_.sampleCoefficients(coeff, fam, UINT64_C(0x1d50f7c0de5eed01),
+                                             rom1d_soft_a_);
+        const int Ks = rom1d_soft_basis_.n_modes();
+        if (Ks < M) {
+            // CL-2c reduced projection: fold g(t) into the mode fields (the
+            // "seam", SPDE_SPATIAL_BASIS.md s4) and let the ROM assemble
+            // R_ij = sum_m a_im (P^T (spread . psi_m))_j per step.
+            rom1d_soft_basis_.normalizedModes(rom1d_soft_a_, M, rom1d_soft_psi_);
+            rom1d_soft_reduced_ = true;
+        } else {
+            // K_s >= M: a materialized field is cheaper than the reduced path.
+            rom1d_soft_basis_.materializeField(rom1d_soft_a_, M, rom1d_soft_field_.values);
+            rom1d_soft_field_.n_members = M;
+            rom1d_soft_field_.n_cells   = n_active;
+            rom1d_soft_reduced_ = false;
+        }
+    } catch (const std::exception& e) {
+        // Invalid geometry etc. -> comonotone fallback, said once.
+        rom1d_soft_field_.clear(); rom1d_soft_psi_.clear(); rom1d_soft_a_.clear();
+        rom1d_soft_reduced_ = false;
+        if (!rom1d_soft_corr_warned_) {
+            ctx_.warnings.push_back(std::string(
+                "WARNING: COHERENCE CORR_LEN spatial basis could not be built (")
+                + e.what() + "); falling back to comonotone (FULL).");
+            rom1d_soft_corr_warned_ = true;
+        }
+    }
 }
 
 // ============================================================================

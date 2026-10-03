@@ -452,16 +452,41 @@ TEST(SoftRainGrid2D, LastPlaneIsHeldAfterItsTimestamp) {
     std::remove(path.c_str());
 }
 
-TEST(SoftRainGrid2D, CorrLenGridWarnsOnceThatItRunsComonotone) {
-    RouterFixture fx;
+// CL-1c (restored from the pre-port file, SP3): initGridRainfall records the
+// coherence correlation length; FULL / default leaves it at 0 (comonotone).
+TEST(SoftRainGrid2D, InitRecordsCoherenceCorrLen) {
     GridSpec g; g.loc = {10, 20, 30, 40}; g.spread = {0, 4, 6, 0};
-    const std::string path = writeGrid("/tmp/sp2_corrlen.h5", g);
-    ASSERT_TRUE(fx.init(path, true, openswmm::uncertainty::Coherence::CORR_LEN));
-    fx.router.updateRainfall(fx.ctx);
-    ASSERT_EQ(fx.ctx.warnings.size(), 1u);
-    EXPECT_NE(fx.ctx.warnings[0].find("CORR_LEN"), std::string::npos);
-    fx.router.updateRainfall(fx.ctx);
-    EXPECT_EQ(fx.ctx.warnings.size(), 1u) << "warning must be one-shot";
+    const std::string path = writeGrid("/tmp/sp3_corrlen_init.h5", g);
+    {
+        RouterFixture fx;
+        ASSERT_TRUE(fx.init(path, true));
+        EXPECT_DOUBLE_EQ(fx.router.gridSoftCorrLen(), 0.0);
+    }
+    {
+        RouterFixture fx;
+        ASSERT_TRUE(fx.init(path, true, openswmm::uncertainty::Coherence::CORR_LEN));
+        EXPECT_DOUBLE_EQ(fx.router.gridSoftCorrLen(), 100.0);
+        fx.router.updateRainfall(fx.ctx);
+        EXPECT_TRUE(fx.ctx.warnings.empty()) << "no 'not wired' warning since SP3: "
+                                             << (fx.ctx.warnings.empty() ? "" : fx.ctx.warnings[0]);
+    }
+    std::remove(path.c_str());
+}
+
+TEST(SoftRainGrid2D, CorrLenWithMixedGridIsRefusedAtInit) {
+    // H7 scope guard at the first point the file's family is known.
+    RouterFixture fx;
+    GridSpec g; g.family = "MIXED"; g.loc = {10, 20, 30, 40}; g.spread = {0, 4, 6, 0};
+    g.fcode = {0, 0, 2, 0};
+    const std::string path = writeGrid("/tmp/sp3_corrlen_mixed.h5", g);
+    EXPECT_FALSE(fx.init(path, true, openswmm::uncertainty::Coherence::CORR_LEN));
+    EXPECT_FALSE(fx.router.gridRainfallActive());
+    EXPECT_NE(fx.router.gridInitError().find("CORR_LEN"), std::string::npos)
+        << fx.router.gridInitError();
+    // Same file under FULL is fine.
+    RouterFixture fy;
+    EXPECT_TRUE(fy.init(path, true));
+    EXPECT_TRUE(fy.router.gridInitError().empty());
     std::remove(path.c_str());
 }
 
@@ -705,6 +730,61 @@ TEST(SoftRainGrid2DRom, MixedGridArmsBothPlanesWithNoFallback) {
     EXPECT_TRUE(pr.planes_error.empty()) << pr.planes_error;
     EXPECT_EQ(pr.mixed_family_warnings, 0);
     EXPECT_GT(pr.band, 1.0e-9);
+    std::remove(path.c_str());
+}
+
+TEST(SoftRainGrid2DRom, CorrLenGridTakesTheReducedPathAndChangesTheBand) {
+    namespace fs = std::filesystem;
+    // Same NORMAL grid under FULL and under CORR_LEN <<< centroid spacing
+    // (~1.5 m): the correlated path must engage and give a band that differs
+    // from comonotone. On 4 points the SPDE basis retains K_s >= M = 20 modes,
+    // so this takes the MATERIALIZED branch, not the reduced one -- both are
+    // the correlated path. Direction is MEASURED, not asserted: here the band
+    // WIDENS (2.02x, 2026-10-03). Comonotone forcing on a tiny flat patch is
+    // mostly a uniform shift, which lives in the discarded constant mode;
+    // per-cell independent coefficients project more onto the zero-mean modes.
+    // The 1D chain narrows downstream (CL-1e); the two are not in conflict.
+    const std::string path = writeGrid("/tmp/sp3_rom_cl.h5", romGrid("NORMAL", "SD"));
+    const RomProbe full = runRomModel("rom_cl_full", path, true);
+    ASSERT_TRUE(full.ok);
+    // Rewrite the .inp with COHERENCE CORR_LEN 0.1 appended to the grid line.
+    const fs::path dir = fs::current_path() / "soft_rain_grid_2d_out";
+    const fs::path inp = dir / "rom_cl_corr.inp";
+    { std::ofstream f(inp);
+      std::string m = buildRomGridModel(path, true);
+      m.replace(m.rfind("\n"), 1, "  COHERENCE CORR_LEN 0.1\n");
+      f << m; }
+    SWMM_Engine eng = swmm_engine_create();
+    ASSERT_EQ(swmm_engine_open(eng, inp.string().c_str(), (dir / "rom_cl_corr.rpt").string().c_str(),
+                               (dir / "rom_cl_corr.out").string().c_str(), nullptr), SWMM_OK)
+        << swmm_get_last_error_msg(eng);
+    ASSERT_EQ(swmm_engine_initialize(eng), SWMM_OK) << swmm_get_last_error_msg(eng);
+    ASSERT_EQ(swmm_engine_start(eng, 0), SWMM_OK);
+    double elapsed = 1.0;
+    for (int n = 0; elapsed > 0.0 && n < 2000; ++n)
+        if (swmm_engine_step(eng, &elapsed) != SWMM_OK) break;
+    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+    const auto& router = impl->surfaceRouter2D();
+    EXPECT_DOUBLE_EQ(router.gridSoftCorrLen(), 0.1);
+    EXPECT_TRUE(router.gridSoftCorrelatedActive())
+        << "correlated path never engaged (neither reduced nor materialized)";
+    const int ks = router.gridSoftBasisModes();
+    const bool reduced = router.gridSoftReduced();
+    double band_corr = 0.0;
+    const auto* rom = router.rom();
+    ASSERT_NE(rom, nullptr);
+    for (std::size_t i = 0; i < rom->q95.size(); ++i)
+        band_corr = std::max(band_corr, rom->q95[i] - rom->q05[i]);
+    int fallback_warnings = 0;
+    for (const auto& w : impl->context().warnings)
+        if (w.find("CORR_LEN") != std::string::npos) ++fallback_warnings;
+    swmm_engine_end(eng); swmm_engine_close(eng); swmm_engine_destroy(eng);
+
+    std::printf("[SP3 2D] band FULL=%.6e  CORR_LEN(0.1 m)=%.6e  ratio=%.3f  K_s=%d reduced=%d\n",
+                full.band, band_corr, band_corr / full.band, ks, reduced ? 1 : 0);
+    EXPECT_EQ(fallback_warnings, 0);
+    EXPECT_GT(band_corr, 1.0e-9);
+    EXPECT_NE(band_corr, full.band) << "CORR_LEN had no effect on the band";
     std::remove(path.c_str());
 }
 

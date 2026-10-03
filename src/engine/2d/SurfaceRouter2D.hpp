@@ -30,6 +30,8 @@
 #include "coupling/NodeCoupling.hpp"
 #include "mesh/RainfallInterpolator.hpp"
 #include "../uncertainty/GridFileReader.hpp"
+#include "../uncertainty/SpdeSpatialBasis.hpp"
+#include "uncertainty/SpatialUncertaintyField.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -224,6 +226,22 @@ public:
 
     /// True once initGridRainfall() has succeeded.
     bool gridRainfallActive() const noexcept { return grid_2d_active_; }
+
+    /// SP3: non-empty when initGridRainfall() refused the spec for a reason the
+    /// engine must report as a hard error (CORR_LEN x MIXED). Empty on success
+    /// and on the soft "file failed to open" fallback.
+    const std::string& gridInitError() const noexcept { return grid_init_error_; }
+
+    /// SP3 diagnostics: correlation length in force for the grid source (0 =>
+    /// comonotone) and whether the reduced (K_s < M) projection is active.
+    double gridSoftCorrLen() const noexcept { return grid_soft_corr_len_; }
+    bool   gridSoftReduced() const noexcept { return grid_soft_reduced_; }
+    /// True when the correlated path is engaged in either form (reduced K_s < M
+    /// projection, or materialized field when K_s >= M).
+    bool   gridSoftCorrelatedActive() const noexcept {
+        return grid_soft_reduced_ || grid_soft_field_.is_spatial();
+    }
+    int    gridSoftBasisModes() const noexcept { return grid_soft_basis_.n_modes(); }
 
     /// SP2 diagnostics: the per-triangle soft-spread planes (m/s) most recently
     /// installed on the ROM, split by coefficient family. Plane A is
@@ -499,6 +517,11 @@ private:
     /// `state_.rainfall` (already final for this step) is the ROM's location.
     void updateGridSoftSpread(SimulationContext& ctx, const float* spread);
 
+    /// SP3: build the SPDE basis / coefficient field over triangle centroids for
+    /// a CORR_LEN grid source. Called once, lazily, from updateGridSoftSpread.
+    void buildGridSoftField(SimulationContext& ctx,
+                            uncertainty::DistType family, const double* spread);
+
     // --- SR-2c: deterministic gridded rainfall forcing (/location plane) ---
     bool   grid_2d_active_     = false;  ///< True once initGridRainfall() has succeeded.
     bool   grid_reader_opened_ = false;  ///< True after grid_reader_.open() succeeded.
@@ -520,8 +543,17 @@ private:
     std::vector<double> grid_spread_a_;
     std::vector<double> grid_spread_b_;
     bool grid_soft_warned_ = false;      ///< SR-3c one-shot LOGNORMAL-CV warning issued.
-    bool grid_corr_len_requested_ = false; ///< Spec carried COHERENCE CORR_LEN (SP3, not wired).
-    bool grid_corr_len_warned_    = false; ///< One-shot warning issued.
+    std::string grid_init_error_;        ///< See gridInitError().
+
+    // --- SP3: COHERENCE CORR_LEN for the grid source (CL-1c/CL-2c re-port) ---
+    double grid_soft_corr_len_ = 0.0;    ///< 0 => comonotone (FULL)
+    SpatialUncertaintyField grid_soft_field_; ///< Materialized M x n_tri field (K_s >= M only)
+    uncertainty::SpdeSpatialBasis grid_soft_basis_; ///< Whittle-Matern nu=2 basis over centroids
+    std::vector<double> grid_soft_psi_;  ///< psi_m(t), K_s x n_tri row-major (ROM holds a pointer)
+    std::vector<double> grid_soft_a_;    ///< a_im, M x K_s row-major (ROM holds a pointer)
+    bool grid_soft_field_built_ = false; ///< Build attempted -- never retried
+    bool grid_soft_reduced_ = false;     ///< Reduced path active (K_s < M)
+    bool grid_soft_corr_warned_ = false; ///< One-shot fallback warning
 
     /// Static per-cell rainfall-interpolation weights. Built once in
     /// initialize() (gage positions are fixed for a run); applied each step in
