@@ -1432,30 +1432,58 @@ bool SurfaceRouter2D::initGridRainfall(const uncertainty::SoftGridSourceSpec& sp
         }
     }
 
+    // SP2: spread planes for the ROM's soft-forcing channel. Sized exactly once
+    // (the ROM holds raw pointers into them) and zeroed here.
+    grid_force_location_ = spec.force_location;
+    grid_spread_a_.assign(static_cast<std::size_t>(nt), 0.0);
+    grid_spread_b_.assign(static_cast<std::size_t>(nt), 0.0);
+    grid_soft_warned_ = false;
+    grid_corr_len_requested_ =
+        (spec.coherence == uncertainty::Coherence::CORR_LEN);
+    grid_corr_len_warned_ = false;
+
     grid_2d_active_ = true;
     return true;
 }
 
 
 void SurfaceRouter2D::updateRainfall(SimulationContext& ctx) {
-    // SR-2c: the grid's /location plane, when active, overrides the gage path
-    // entirely for this step — deterministic gridded rainfall is a complete
-    // replacement for the gage forcing, not a blend with it.
+    // SR-2c: with FORCE_LOCATION the grid's /location plane, when present,
+    // overrides the gage path entirely for this step -- deterministic gridded
+    // rainfall is a complete replacement for the gage forcing, not a blend.
+    // SP2: the /spread plane is independent of that choice. It is mapped every
+    // step the grid is active and handed to the ROM, using whatever rainfall
+    // was finally decided (grid or gages) as the location.
+    const float* spread_plane = nullptr;
+    bool location_from_grid   = false;
+
     if (grid_2d_active_ && grid_reader_opened_) {
         const double t_now = ctx.current_time;
         const bool grid_ready = grid_reader_.has_current() || grid_reader_.advance();
         if (grid_ready) {
+            // Advance only while a NEXT plane exists and has become valid.
+            // GridFileReader::time_next() returns the CURRENT plane's own time
+            // when there is no next plane, so without the spread_next() guard
+            // this loop runs off the end once t_now passes the last plane's
+            // timestamp: advance() then marks the reader exhausted and the
+            // grid silently stops forcing for the rest of the run. The last
+            // plane is held, as for any step function of time. (The pre-port
+            // code had this guard; the SR-2c re-port dropped it. A single-plane
+            // grid therefore only worked at t = 0.)
             while (grid_reader_.has_current()
+                   && grid_reader_.spread_next() != nullptr
                    && grid_reader_.time_next() < t_now) {
                 if (!grid_reader_.advance()) break;
             }
 
             const float* loc = grid_reader_.location_now();
-            if (loc) {
+            spread_plane = grid_reader_.spread_now();
+
+            if (grid_force_location_ && loc) {
                 const double to_ms =
                     (ucf::getUnitSystem(static_cast<int>(ctx.options.flow_units)) == 0)
-                        ? (0.0254 / 3600.0)   // US: in/hr → m/s
-                        : (0.001  / 3600.0);  // SI: mm/hr → m/s
+                        ? (0.0254 / 3600.0)   // US: in/hr -> m/s
+                        : (0.001  / 3600.0);  // SI: mm/hr -> m/s
                 const int      nx   = grid_reader_.nx();
                 const int      ny   = grid_reader_.ny();
                 const uint32_t npix = static_cast<uint32_t>(nx * ny);
@@ -1481,13 +1509,27 @@ void SurfaceRouter2D::updateRainfall(SimulationContext& ctx) {
                     }
                     state_.rainfall[static_cast<std::size_t>(i)] = v * to_ms;
                 }
-                return;   // grid /location fully determines rainfall this step
+                location_from_grid = true;
             }
         }
-        // No /location plane at this time (or the file has no current plane
-        // yet) — fall through to the gage path for this step.
+        // No current plane (or no /location while forced) -- the gage path
+        // decides the location for this step.
     }
 
+    if (!location_from_grid) updateRainfallFromGages(ctx);
+
+    // SP2: soft forcing from /spread. Only meaningful with a live 2D ROM; the
+    // deterministic rainfall above is never altered by it.
+    // The mapping and the SR-3c warning run whenever a spread plane exists;
+    // only the ROM calls inside need a ROM.
+    if (grid_2d_active_ && grid_reader_opened_) {
+        if (spread_plane)  updateGridSoftSpread(ctx, spread_plane);
+        else if (rom_)     rom_->clearSoftForcing();
+    }
+}
+
+
+void SurfaceRouter2D::updateRainfallFromGages(SimulationContext& ctx) {
     const int n_gages = ctx.n_gages();
 
     if (n_gages <= 0 || options_.rainfall_mode == RainfallMode::NONE) {
@@ -1516,6 +1558,150 @@ void SurfaceRouter2D::updateRainfall(SimulationContext& ctx) {
         for (double r : rain_si_) mean += r;
         mean /= static_cast<double>(n_gages);
         std::fill(state_.rainfall.begin(), state_.rainfall.end(), mean);
+    }
+}
+
+
+// ============================================================================
+// updateGridSoftSpread (SP2) -- grid /spread -> 2D ROM, two coefficient planes
+// ============================================================================
+//
+// Re-home of SR-4b/SR-3c onto H7's two-plane API. Differences from the pre-port
+// block, all deliberate:
+//   * Cells are routed to one of two DISJOINT planes by coefficient family:
+//     UNIFORM cells -> plane B (2u-1), NORMAL/LOGNORMAL cells -> plane A
+//     (probit). The pre-port `sp *= 3.0` pre-scale of UNIFORM cells under a
+//     shared NORMAL column is gone; each cell meets its own family's
+//     coefficient. The planes sum to the original spread field.
+//   * A CV spread is converted with the rainfall actually in force this step
+//     (grid /location when forced, otherwise the gages), so a grid that carries
+//     no /location plane still yields a nonzero absolute spread. The pre-port
+//     block multiplied by the /location value and so produced zero there.
+//   * COHERENCE CORR_LEN is not wired (SP3): the grid runs with FULL coherence
+//     and a one-time warning says so.
+//
+void SurfaceRouter2D::updateGridSoftSpread(SimulationContext& ctx,
+                                           const float* spread) {
+    using uncertainty::DistType;
+    using openswmm::GridFamily;
+    using openswmm::GridSpreadKind;
+
+    const int      nt   = mesh_.n_triangles();
+    const int      nx   = grid_reader_.nx();
+    const int      ny   = grid_reader_.ny();
+    const uint32_t npix = static_cast<uint32_t>(nx * ny);
+    const double to_ms =
+        (ucf::getUnitSystem(static_cast<int>(ctx.options.flow_units)) == 0)
+            ? (0.0254 / 3600.0)   // US: in/hr -> m/s
+            : (0.001  / 3600.0);  // SI: mm/hr -> m/s
+
+    // Gather one grid field value for triangle i under the active mapping.
+    // Out-of-range pixels contribute zero.
+    auto gather = [&](const float* field, int i) -> double {
+        if (grid_mapping_ == uncertainty::GridMapping::BILINEAR
+            && !grid_bilin_idx_.empty()) {
+            const auto base = static_cast<std::size_t>(4 * i);
+            double acc = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                const uint32_t px = grid_bilin_idx_[base + static_cast<std::size_t>(k)];
+                if (px < npix)
+                    acc += static_cast<double>(grid_bilin_w_[base + static_cast<std::size_t>(k)])
+                           * static_cast<double>(field[px]);
+            }
+            return acc;
+        }
+        const uint32_t px = grid_px_[static_cast<std::size_t>(i)];
+        return (px >= npix) ? 0.0 : static_cast<double>(field[px]);
+    };
+
+    const uint8_t*       fcodes = grid_reader_.family_code_now();
+    const GridFamily     gf     = grid_reader_.family();
+    const GridSpreadKind sk     = grid_reader_.spread_kind();
+    const bool           mixed  = (gf == GridFamily::MIXED) && fcodes;
+
+    bool has_a = false, has_b = false, any_normal = false, any_lognormal = false;
+    double max_cv_lognormal = 0.0;
+
+    for (int i = 0; i < nt; ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        const double loc_i = state_.rainfall[ui];   // m/s, final for this step
+
+        // SD / HALFRANGE are absolute rates converted like the location field;
+        // CV is relative and becomes an absolute rate via the location rate.
+        const double sp = (sk == GridSpreadKind::CV)
+            ? gather(spread, i) * loc_i
+            : gather(spread, i) * to_ms;
+
+        // Family is categorical: take it from the CENTROID pixel even when the
+        // value mapping is BILINEAR.
+        DistType fam;
+        if (mixed) {
+            const uint32_t px = grid_px_[ui];
+            const uint8_t code = (px < npix) ? fcodes[px] : uint8_t{0};
+            fam = (code == 2) ? DistType::UNIFORM
+                : (code == 1) ? DistType::LOGNORMAL : DistType::NORMAL;
+        } else {
+            fam = (gf == GridFamily::UNIFORM)   ? DistType::UNIFORM
+                : (gf == GridFamily::LOGNORMAL) ? DistType::LOGNORMAL
+                                                : DistType::NORMAL;
+        }
+
+        if (fam == DistType::UNIFORM) {
+            grid_spread_b_[ui] = sp;
+            grid_spread_a_[ui] = 0.0;
+            has_b = true;
+        } else {
+            grid_spread_a_[ui] = sp;
+            grid_spread_b_[ui] = 0.0;
+            has_a = true;
+            if (fam == DistType::LOGNORMAL) {
+                any_lognormal = true;
+                if (loc_i > 1.0e-30)
+                    max_cv_lognormal = std::max(max_cv_lognormal, std::abs(sp / loc_i));
+            } else {
+                any_normal = true;
+            }
+        }
+    }
+
+    // NORMAL and LOGNORMAL share the probit coefficient, so one plane serves
+    // both; the family label only matters for naming.
+    const DistType fam_a = (!any_normal && any_lognormal) ? DistType::LOGNORMAL
+                                                          : DistType::NORMAL;
+    const double* loc_ptr = state_.rainfall.empty() ? nullptr : state_.rainfall.data();
+
+    if (rom_) {
+        if (has_a && has_b) {
+            // MIXED: both planes, each with its own family.
+            rom_->setSoftForcing(loc_ptr, grid_spread_a_.data(), fam_a, nullptr,
+                                 grid_spread_b_.data(), DistType::UNIFORM);
+        } else if (has_b) {
+            // UNIFORM only: plane B is the sole plane, passed as the primary.
+            rom_->setSoftForcing(loc_ptr, grid_spread_b_.data(), DistType::UNIFORM);
+        } else {
+            // NORMAL/LOGNORMAL only: single plane + null second plane, so this
+            // is bit-identical to the pre-H7 single-family call.
+            rom_->setSoftForcing(loc_ptr, grid_spread_a_.data(), fam_a);
+        }
+    }
+
+    // SR-3c: warn once when the lognormal delta-linearization is likely weak.
+    if (!grid_soft_warned_ && any_lognormal && max_cv_lognormal > 0.5) {
+        ctx.warnings.push_back(
+            "WARNING: soft rainfall LOGNORMAL delta approximation has CV > 0.5 "
+            "(max CV = " + std::to_string(max_cv_lognormal)
+            + ") for the active 2D grid source"
+            + (mixed ? " (MIXED family)" : "") + ".");
+        grid_soft_warned_ = true;
+    }
+
+    // SP3 placeholder: CORR_LEN is parsed and recorded but not yet wired.
+    if (grid_corr_len_requested_ && !grid_corr_len_warned_) {
+        ctx.warnings.push_back(
+            "WARNING: [SOFT_RAINFALL_GRID] COHERENCE CORR_LEN is parsed but not "
+            "yet wired into the 2D ROM; the grid runs with COHERENCE FULL "
+            "(comonotone, the widest band).");
+        grid_corr_len_warned_ = true;
     }
 }
 

@@ -708,11 +708,12 @@ the marginal *shape*.
 Two caveats. First, per-family planes are a `COHERENCE FULL` feature:
 `COHERENCE CORR_LEN` carries one family per source by construction, so
 CORR_LEN × MIXED is refused with an explanatory error rather than approximated
-(see `VALIDATION.md`, "True per-family coefficient planes"). Second, on this
-branch the *ROM* accepts two planes but the grid `/spread` → ROM wiring that
-would supply them has not been ported to the marcher line yet — only the
-deterministic `/location` plane is read. See VALIDATION.md §5 of that section
-for what a future port should call.
+(see `VALIDATION.md`, "True per-family coefficient planes"). Second, the 2D grid
+`/spread` → ROM wiring that supplies the two planes is in place (PR SP2): the
+router maps `/spread` to the mesh, routes each cell to plane A (NORMAL/LOGNORMAL)
+or plane B (UNIFORM) by `/family_code`, and installs both on the 2D ROM each
+step. Single-family files pass a null second plane and are bit-identical to the
+pre-H7 call.
 
 **Deprecation note**: the scalar `RAINFALL` parameter in `[UNCERTAINTY]`
 (which applies a single multiplier to all rainfall) is superseded by soft

@@ -198,12 +198,20 @@ public:
      * initialize(), so mesh_ is built) when uncertainty_config_.grid_sources
      * has a TWO_D-target spec with force_location.
      *
-     * Only the /location plane is consumed — it overrides the deterministic
-     * gage rainfall path entirely for every step while active. AREA_MEAN
-     * mapping and the /spread plane (soft, uncertain gridded rainfall,
-     * consumed by the ROM) are recorded in the spec but not implemented on
-     * this path; a spec requesting either still opens deterministically
-     * under the CENTROID/BILINEAR mapping actually built.
+     * Two independent roles, set by the spec:
+     *  - /location (deterministic rainfall): with `force_location` it
+     *    overrides the gage rainfall path entirely for every step while
+     *    active. Without it the model's own rainfall (the gages) stays the
+     *    location.
+     *  - /spread (soft, uncertain rainfall, SP2): when the 2D ROM is active
+     *    the spread plane drives its soft-forcing channel in either case,
+     *    split into two disjoint planes by coefficient family (H7) so a MIXED
+     *    grid needs no pre-scale. It never alters the deterministic rainfall.
+     *
+     * AREA_MEAN mapping is recorded in the spec but not implemented; a spec
+     * requesting it still opens under the CENTROID/BILINEAR mapping actually
+     * built. COHERENCE CORR_LEN is recorded but not wired (SP3): the grid runs
+     * with comonotone (FULL) coherence and a one-time warning says so.
      *
      * @param spec     The parsed grid source specification.
      * @param inp_dir  Directory of the parent .inp file, for resolving a
@@ -216,6 +224,13 @@ public:
 
     /// True once initGridRainfall() has succeeded.
     bool gridRainfallActive() const noexcept { return grid_2d_active_; }
+
+    /// SP2 diagnostics: the per-triangle soft-spread planes (m/s) most recently
+    /// installed on the ROM, split by coefficient family. Plane A is
+    /// NORMAL/LOGNORMAL cells, plane B is UNIFORM cells; disjoint, zero
+    /// elsewhere. Empty until initGridRainfall() has succeeded.
+    const std::vector<double>& gridSoftSpreadPlaneA() const noexcept { return grid_spread_a_; }
+    const std::vector<double>& gridSoftSpreadPlaneB() const noexcept { return grid_spread_b_; }
 
     /**
      * @brief Per-row buffer for `[2D_BOUNDARY_CONDITIONS]` parse output.
@@ -474,6 +489,16 @@ private:
     /// (which then skips the gage path for that step entirely).
     void updateRainfall(SimulationContext& ctx);
 
+    /// The gage rainfall path of updateRainfall() (natural-neighbour or SYSTEM
+    /// mean), factored out so the grid's soft-spread step can run after the
+    /// location rainfall has been decided, whichever path decided it.
+    void updateRainfallFromGages(SimulationContext& ctx);
+
+    /// SP2: map the grid's /spread plane (and /family_code for MIXED) onto the
+    /// mesh and install it on the 2D ROM through the two-plane soft-forcing API.
+    /// `state_.rainfall` (already final for this step) is the ROM's location.
+    void updateGridSoftSpread(SimulationContext& ctx, const float* spread);
+
     // --- SR-2c: deterministic gridded rainfall forcing (/location plane) ---
     bool   grid_2d_active_     = false;  ///< True once initGridRainfall() has succeeded.
     bool   grid_reader_opened_ = false;  ///< True after grid_reader_.open() succeeded.
@@ -485,6 +510,18 @@ private:
     uncertainty::GridMapping grid_mapping_{};
     std::vector<uint32_t> grid_bilin_idx_;  ///< 4 pixel indices per triangle (row-major: [4*i+k]).
     std::vector<float>    grid_bilin_w_;    ///< 4 bilinear weights per triangle (sum to 1).
+
+    // --- SP2: soft-forcing planes from the grid's /spread ---------------------
+    bool grid_force_location_ = false;   ///< Spec asked for /location to override the gages.
+    /// Per-triangle spread (m/s), split by coefficient family (H7). Plane A =
+    /// NORMAL/LOGNORMAL cells (probit coefficient); plane B = UNIFORM cells
+    /// (2u-1). Disjoint, zero elsewhere. Bound BY POINTER inside the ROM, so
+    /// sized once in initGridRainfall() and never resized.
+    std::vector<double> grid_spread_a_;
+    std::vector<double> grid_spread_b_;
+    bool grid_soft_warned_ = false;      ///< SR-3c one-shot LOGNORMAL-CV warning issued.
+    bool grid_corr_len_requested_ = false; ///< Spec carried COHERENCE CORR_LEN (SP3, not wired).
+    bool grid_corr_len_warned_    = false; ///< One-shot warning issued.
 
     /// Static per-cell rainfall-interpolation weights. Built once in
     /// initialize() (gage positions are fixed for a run); applied each step in

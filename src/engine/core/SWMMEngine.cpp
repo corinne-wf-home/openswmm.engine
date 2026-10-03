@@ -4780,12 +4780,15 @@ void SWMMEngine::initHydraulics() noexcept {
         set_error(SWMM_ERR_PARSE, ctx_.errors.back().c_str());
     }
 
-    // 1a-i. SR-2c: initialize deterministic 2D gridded rainfall when a
-    //       TWO_D-target [SOFT_RAINFALL_GRID] source with FORCE_LOCATION is
-    //       configured. Opens the grid file and precomputes the per-triangle
-    //       pixel mapping once. v1: one 2D grid source.
+    // 1a-i. SR-2c/SP2: initialize 2D gridded rainfall when a TWO_D-target
+    //       [SOFT_RAINFALL_GRID] source is configured. Opens the grid file and
+    //       precomputes the per-triangle pixel mapping once. v1: one 2D grid
+    //       source. FORCE_LOCATION no longer gates opening the grid: it only
+    //       decides whether the /location plane overrides the gages (SR-2c).
+    //       The /spread plane drives the 2D ROM's soft forcing (SP2) either way,
+    //       which is what the USER_GUIDE has always said a spread-only grid does.
     for (const auto& gs : uncertainty_config_.grid_sources) {
-        if (gs.target == uncertainty::GridTarget::TWO_D && gs.force_location) {
+        if (gs.target == uncertainty::GridTarget::TWO_D) {
             std::string inp_dir;
             if (!ctx_.inp_file_path.empty())
                 inp_dir = std::filesystem::path(ctx_.inp_file_path).parent_path().string();
