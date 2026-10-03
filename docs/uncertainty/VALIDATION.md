@@ -861,6 +861,68 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# Bellinge baseline correction — the "24 h" window was truncated (PR P6)
+
+**Measured 2026-10-02. This supersedes every Bellinge band-width number quoted
+before it, including the per-cell table in the P4 section below.**
+
+`tests/regression/test_rom_coverage_bellinge.cpp` was documented as the 24 h
+saturation baseline (coverage 0.990, max width ratio ≈ 0.007). Its stepping
+loop stopped at 20,000 engine steps. Reaching 24 h on this model takes
+**65,589 steps**, so the run ended roughly a third of the way in — before the
+29 Jun 2012 rain burst (04:26–08:04). The test now terminates on simulated
+time and **asserts the clock reached 24.00 h**, so a truncated window can no
+longer pass silently.
+
+| Quantity (1,011 junctions × 288 report times) | Old (truncated) | Complete 24 h run |
+|---|---|---|
+| Fraction of samples with nonzero spread | 0.990 | **0.988** |
+| Band ÷ absolute head, max | 0.007 | **0.277** |
+| Band ÷ absolute head, p50 / p90 / p99 | not recorded | 0.0002 / 0.0013 / 0.0118 |
+| Band ÷ local depth (depth ≥ 0.05 ft), p50 / p90 / p99 / max | not recorded | **0.153 / 0.73 / 2.00 / 10.7** |
+| Absolute band, p50 / p90 / p99 / max (ft) | not recorded | 0.019 / 0.095 / 0.58 / 22.4 |
+
+**Read the ratios correctly.** The harness's "width ratio" divides by
+*absolute head* (about 328 ft on this model, internal feet), which mostly
+measures how high the network sits above datum, not how uncertain the water
+level is. Band ÷ local depth is the quantity that compares a metres-deep trunk
+with centimetre-deep laterals; its median (0.153) agrees with the independent
+peak-instant analysis (0.117), which samples each node only at its own flow
+peak.
+
+**What this test is and is not.** It runs the ROM once; there is no brute-force
+Monte Carlo in it. Its assertions are a regression lock around the measured
+values, not a coverage validation, and the harness's "coverage" is the fraction
+of samples with nonzero spread, not MC bracketing. Band magnitude on Bellinge
+at storm peak remains **unvalidated**: 113 nodes have a band wider than their
+own water column, and only 14% of those are at crown, so the documented
+surcharge over-prediction (H5) does not explain them.
+
+**What this does and does not invalidate.**
+- H5's and H11's gates are *not* affected: H5's 0.990 / 1.031 come from its own
+  dedicated surcharged-chain fixture, and H11 built its own front-passage
+  fixture. Neither measured on Bellinge. (Checked 2026-10-02.)
+- The **P4 per-cell Bellinge table below is almost certainly truncated too**:
+  its EXPLICIT/off cell reports max ratio 0.0068, the same value the truncated
+  baseline gave. It was produced by a scratch harness copying this test's
+  methodology and was not re-run. Its *structural* conclusion (all four
+  solver-mode cells behave consistently) is not in doubt, since that rests on
+  the gated `test_rom_solver_mode_compat`, but its magnitudes should be treated
+  as pre-storm numbers until re-run on the full window.
+
+**Reproduction.** The test needs the model and rainfall record, which live
+outside the repository and not in the same directory. Set
+`OPENSWMM_BELLINGE_INP` and `OPENSWMM_BELLINGE_RAIN` (defaults:
+`~/Projects/SWMM_inp/Bellinge/7_SWMM/BellingeSWMM_v021_nopervious.inp` and
+`~/Downloads/article/runs/bellinge/rg_bellinge_Jun2010_Aug2021.dat`); the test
+skips if either is missing. Rainfall format is
+`gage year month day hour minute value`. Runtime is 5–10 minutes, so the test
+carries a `slow` label (`ctest -LE slow` skips it).
+
+    ctest --test-dir build/<dir> -R regression_rom_coverage_bellinge
+
+---
+
 # Solver-mode compatibility: 1D ROM vs NODE_CONTINUITY × Anderson (PR P4)
 
 Measured 2026-08-04. Two complementary harnesses, both registered:
@@ -884,7 +946,8 @@ perturbation; (c) ROM band width at matched (node, time) within 2× across
 every pair of the four cells.
 
 **Bellinge self-consistency rerun** (validation-only, not a permanent ctest
-target — see §3): the same 1020-node, 24 h Bellinge fixture as the main
+target — see §3). **⚠ Likely truncated at ~1/3 of 24 h; see the P6 correction
+above — magnitudes below are pre-storm until re-run:** the same 1020-node, 24 h Bellinge fixture as the main
 Bellinge baseline (`docs/uncertainty` cross-reference: `.memory/current.md`,
 "BELLINGE FIXTURE COMPLETE"), rerun once per cell with `NODE_CONTINUITY` /
 `ANDERSON_ACCEL` injected into `[OPTIONS]`. "Coverage" here is the Bellinge
@@ -971,7 +1034,7 @@ ever suspected there.
     # Structural invariants (gated, ~0.2 s):
     ctest --test-dir build/<dir> -R regression_rom_solver_mode_compat
 
-    # Bellinge self-consistency baseline (gated, default EXPLICIT/off, ~110 s):
+    # Bellinge full-window regression lock (gated, label `slow`, 5-10 min; see the P6 section):
     ctest --test-dir build/<dir> -R regression_rom_coverage_bellinge
 
     # Bellinge per-solver-mode rerun (validation-only, not a ctest target,
