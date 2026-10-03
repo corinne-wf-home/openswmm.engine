@@ -132,6 +132,26 @@ expected mild under-prediction of the delta-linearized location-scale forcing
 response — but comfortably inside the [0.3×, 3×] band. This is the soft-rainfall
 analog of the PR-10 credibility check and closes Wave SR-E.
 
+### 2a. Re-port check on the marcher line (PR SP1, 2026-10-03)
+
+The gage-level path was re-ported onto `port/v2-on-marcher` (two-plane API,
+`[SOFT_RAINGAGES]` parser and 1D wiring restored), and this same test was
+registered and run **with no expectation edits**:
+
+| Metric | July (pre-port line) | SP1 re-port |
+|---|---|---|
+| Coverage | 1.000 (60/60) | **1.000** (60/60) |
+| Width ratio in [0.3, 3.0] | 1.000 (35/35) | **1.000** (35/35) |
+| Width ratio min / median / max | 0.754 / 0.821 / 0.872 | **0.731 / 0.822 / 0.869** |
+
+The median reproduces to three digits. The min and max moved by about 0.02 and
+0.003, so the run is close to but **not bit-identical** with July's. The base
+line changed underneath (explicit marcher era, NODE_CONTINUITY, Anderson fixes),
+and I did not isolate which change moves the extremes; the acceptance floors are
+cleared with wide margin either way. Scope is unchanged: single `NORMAL` gage,
+free-surface chain. Mixed-family networks are covered by structural tests
+(both coefficient planes reach the ROM, no fallback), not by an MC comparison.
+
 ## 3. Reproduction
 
 ```

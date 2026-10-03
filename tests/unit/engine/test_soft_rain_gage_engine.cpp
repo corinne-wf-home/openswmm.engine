@@ -12,8 +12,11 @@
 #include <gtest/gtest.h>
 
 #include <openswmm/engine/openswmm_engine.h>
+#include "core/SWMMEngine.hpp"
+#include "uncertainty/SpectralROM1D.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -257,6 +260,13 @@ TEST(SoftRainGageEngine, LargeCorrLenApproachesComonotone) {
 }
 
 TEST(SoftRainGageEngine, SmallCorrLenNarrowsDownstreamBands) {
+    // SP3 gate, NOT an SP1 defect. SP1 re-ports FULL (comonotone) coherence
+    // only: a gage carrying COHERENCE CORR_LEN is parsed and then run as FULL
+    // with a one-time warning. This test needs the correlated reduced-basis
+    // wiring (CL-1c/CL-2c) that SP3 restores. Remove this skip in SP3.
+    // NOTE the neighbouring LargeCorrLenApproachesComonotone passes TRIVIALLY
+    // until then (both runs are FULL), so it proves nothing about CORR_LEN yet.
+    GTEST_SKIP() << "needs SP3: COHERENCE CORR_LEN is not wired on this line";
     // corr_len ≪ node spacing (200 m) ⇒ each node ranks independently ⇒ the
     // most-downstream node's band narrows vs comonotone (spatial cancellation).
     const std::string inp_a = g_pfx + "cmono2.inp";
@@ -279,6 +289,127 @@ TEST(SoftRainGageEngine, SmallCorrLenNarrowsDownstreamBands) {
     ASSERT_GT(dn_a, 1.0e-6);
     EXPECT_LT(dn_b, dn_a)
         << "small corr_len should narrow the downstream (J5) band vs comonotone";
+}
+
+// ---------------------------------------------------------------------------
+// SP1 / H7: two gages with DIFFERENT families feed the two coefficient planes
+// ---------------------------------------------------------------------------
+
+// Same chain, but S1-S2 use RG1 and S3-S5 use RG2 (both on TS0).
+void writeTwoGageInp(const std::string& path, const char* soft_lines) {
+    writeChainInp(path, nullptr);
+    std::ifstream in(path);
+    std::stringstream buf;
+    buf << in.rdbuf();
+    std::string txt = buf.str();
+    in.close();
+    auto replaceAll = [&](const std::string& from, const std::string& to) {
+        for (std::size_t pos = 0; (pos = txt.find(from, pos)) != std::string::npos;
+             pos += to.size())
+            txt.replace(pos, from.size(), to);
+    };
+    replaceAll("[RAINGAGES]\nRG1 INTENSITY 0:05 1.0 TIMESERIES TS0\n",
+               "[RAINGAGES]\nRG1 INTENSITY 0:05 1.0 TIMESERIES TS0\n"
+               "RG2 INTENSITY 0:05 1.0 TIMESERIES TS0\n");
+    for (int i = 3; i <= 5; ++i)
+        replaceAll("S" + std::to_string(i) + " RG1 ", "S" + std::to_string(i) + " RG2 ");
+    std::ofstream out(path);
+    out << txt;
+    if (soft_lines && soft_lines[0] != '\0')
+        out << "[SOFT_RAINGAGES]\n" << soft_lines << "\n\n";
+}
+
+struct PlaneProbe {
+    bool   ran = false;
+    bool   has_coeff_b = false;     // second coefficient plane armed
+    bool   has_coeff_a = false;
+    std::string planes_error;
+    int    mixed_family_warnings = 0;
+    int    corr_len_warnings = 0;
+    double band = 0.0;
+};
+
+PlaneProbe runPlaneProbe(const std::string& inp, const std::string& rpt,
+                         const std::string& csv) {
+    PlaneProbe pr;
+    SWMM_Engine handle = swmm_engine_create();
+    if (!handle) return pr;
+    if (swmm_engine_open(handle, inp.c_str(), rpt.c_str(), nullptr, nullptr) != SWMM_OK ||
+        swmm_engine_initialize(handle) != SWMM_OK ||
+        swmm_engine_start(handle, 0) != SWMM_OK) {
+        swmm_engine_destroy(handle);
+        return pr;
+    }
+    runToEnd(handle);
+    auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    if (const auto* rom = eng->rom1d()) {
+        pr.has_coeff_a = !rom->softCoeff().empty();
+        pr.has_coeff_b = !rom->softCoeffB().empty();
+        pr.planes_error = rom->softPlanesError();
+    }
+    for (const auto& w : eng->context().warnings) {
+        if (w.find("mixed distribution families") != std::string::npos)
+            ++pr.mixed_family_warnings;
+        if (w.find("CORR_LEN") != std::string::npos) ++pr.corr_len_warnings;
+    }
+    swmm_engine_end(handle);
+    swmm_engine_close(handle);
+    swmm_engine_destroy(handle);
+    bool found = false;
+    pr.band = maxBandWidth(csv, found);
+    pr.ran = found;
+    return pr;
+}
+
+TEST(SoftRainGageEngine, MixedFamiliesArmBothPlanesWithNoFallback) {
+    // NORMAL gage + UNIFORM gage on one network. The pre-port engine used the
+    // first gage's family for both and warned; the two-plane API gives each
+    // gage its own family's coefficient. HALFRANGE 1.8 on a 6.0 in/hr rain is
+    // a relative spread of 0.30, matching the NORMAL gage's CV.
+    const std::string inp = g_pfx + "mixed.inp";
+    const std::string rpt = g_pfx + "mixed.rpt";
+    const std::string csv = g_pfx + "mixed.uncertainty.csv";
+    writeTwoGageInp(inp, "RG1 NORMAL CV 0.30\nRG2 UNIFORM HALFRANGE 1.8");
+    const PlaneProbe pr = runPlaneProbe(inp, rpt, csv);
+    ASSERT_TRUE(pr.ran);
+    EXPECT_TRUE(pr.has_coeff_a);
+    EXPECT_TRUE(pr.has_coeff_b) << "second (UNIFORM) coefficient plane was never armed";
+    EXPECT_TRUE(pr.planes_error.empty()) << pr.planes_error;
+    EXPECT_EQ(pr.mixed_family_warnings, 0)
+        << "the first-family fallback and its warning must not exist";
+    EXPECT_GT(pr.band, 1.0e-6);
+}
+
+TEST(SoftRainGageEngine, SingleFamilyLeavesSecondPlaneUnarmed) {
+    // One family only => null second plane => the bit-identical single-family
+    // call (H7's regression lock), for each of the two plane classes.
+    const std::string inp_n = g_pfx + "one_normal.inp";
+    const std::string inp_u = g_pfx + "one_uniform.inp";
+    writeTwoGageInp(inp_n, "RG1 NORMAL CV 0.30\nRG2 LOGNORMAL CV 0.30");
+    writeTwoGageInp(inp_u, "RG1 UNIFORM HALFRANGE 1.8\nRG2 UNIFORM HALFRANGE 1.8");
+    const PlaneProbe pn = runPlaneProbe(inp_n, g_pfx + "one_normal.rpt",
+                                        g_pfx + "one_normal.uncertainty.csv");
+    const PlaneProbe pu = runPlaneProbe(inp_u, g_pfx + "one_uniform.rpt",
+                                        g_pfx + "one_uniform.uncertainty.csv");
+    ASSERT_TRUE(pn.ran);
+    ASSERT_TRUE(pu.ran);
+    // NORMAL + LOGNORMAL share the probit coefficient: one plane, no warning.
+    EXPECT_FALSE(pn.has_coeff_b);
+    EXPECT_EQ(pn.mixed_family_warnings, 0);
+    EXPECT_GT(pn.band, 1.0e-6);
+    // All-UNIFORM: the UNIFORM plane is the primary and the only plane.
+    EXPECT_FALSE(pu.has_coeff_b);
+    EXPECT_GT(pu.band, 1.0e-6);
+}
+
+TEST(SoftRainGageEngine, CorrLenGageWarnsThatItRunsComonotone) {
+    // Until SP3 a CORR_LEN gage must not be silently reinterpreted.
+    const std::string inp = g_pfx + "cl_warn.inp";
+    writeChainInp(inp, "RG1 NORMAL CV 0.30 COHERENCE CORR_LEN 200");
+    const PlaneProbe pr = runPlaneProbe(inp, g_pfx + "cl_warn.rpt",
+                                        g_pfx + "cl_warn.uncertainty.csv");
+    ASSERT_TRUE(pr.ran);
+    EXPECT_EQ(pr.corr_len_warnings, 1);
 }
 
 } // anonymous namespace

@@ -2002,6 +2002,13 @@ void resolve_cross_references(SimulationContext& ctx) {
             !ctx.gages.ts_name[ug].empty()) {
             ctx.gages.ts_index[ug] = ctx.find_timeseries(ctx.gages.ts_name[ug]);
         }
+
+        // SR-1a: late resolution for [SOFT_RAINGAGES] TIMESERIES spread names.
+        if (ug < ctx.soft_rain.spread_ts.size() &&
+            ctx.soft_rain.spread_ts[ug] < 0 &&
+            !ctx.soft_rain.spread_ts_name[ug].empty()) {
+            ctx.soft_rain.spread_ts[ug] = ctx.find_timeseries(ctx.soft_rain.spread_ts_name[ug]);
+        }
     }
 
     // -------------------------------------------------------------------------

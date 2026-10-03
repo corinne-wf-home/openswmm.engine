@@ -12,6 +12,7 @@
 #include "uncertainty/SoftRainData.hpp"
 
 using openswmm::SimulationContext;
+using openswmm::TableType;
 using openswmm::uncertainty::DistType;
 using openswmm::uncertainty::GageCoherence;
 using openswmm::uncertainty::SoftSpreadKind;
@@ -37,7 +38,7 @@ TEST(SoftRainParser, ParsesConstantCvLognormal) {
 TEST(SoftRainParser, ParsesTimeseriesSpread) {
     SimulationContext ctx;
     ctx.gage_names.add("RG2");
-    ctx.table_names.add("sd_rg2");
+    ctx.tables.add("sd_rg2", TableType::TIMESERIES);
     ctx.soft_rain.grow_to(1);
 
     std::string err = parseSoftRaingagesLine(ctx, {"RG2", "NORMAL", "SD", "TIMESERIES", "sd_rg2"});
@@ -140,7 +141,7 @@ TEST(SoftRainParser, ParsesCoherenceCorrLen) {
 TEST(SoftRainParser, ParsesCorrLenWithTimeseriesSpread) {
     SimulationContext ctx;
     ctx.gage_names.add("RG2");
-    ctx.table_names.add("sd_rg2");
+    ctx.tables.add("sd_rg2", TableType::TIMESERIES);
     ctx.soft_rain.grow_to(1);
 
     std::string err = parseSoftRaingagesLine(

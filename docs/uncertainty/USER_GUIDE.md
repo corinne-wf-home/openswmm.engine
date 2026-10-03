@@ -1652,6 +1652,33 @@ A `[SOFT_RAINGAGES]` entry activates the 1D network ROM on its own. The ROM's
 forcing field is the dh/dt head-rate buffer, so the gage-level spread is
 mapped as `spread_now[n] = dh/dt[n] · area-weighted relative spread`.
 
+**Mixed families across gages.** Different gages may use different families.
+Each gage's spread is multiplied by *its own* family's member coefficient: the
+engine splits the node spread into two disjoint planes, one for `NORMAL` and
+`LOGNORMAL` gages (probit coefficient `z_i`) and one for `UNIFORM` gages
+(`2u_i − 1`). Both coefficients come from the same per-member rank `u_i`, so one
+member is high or low everywhere at once (`COHERENCE FULL`). `NORMAL` and
+`LOGNORMAL` share one plane because they share a coefficient. There is no
+"first family wins" fallback and no mixed-family warning. Because the planes
+share a rank, gages on complementary parts of a network can partly cancel and
+the combined band can be narrower than either gage alone; this is expected, not
+a defect.
+
+**Rules and limits on this line.**
+- `[SOFT_RAINGAGES]` must come after `[RAINGAGES]` in the file, because gage
+  names are resolved when each line is read.
+- `SD` and `HALFRANGE` spreads are in the gage's rain units (the units of the
+  rainfall series), so they are compared with the gage's current intensity
+  without any conversion. `CV` is dimensionless.
+- `COHERENCE CORR_LEN <m>` is accepted by the parser, but spatially correlated
+  coherence is **not yet wired** on this line (planned: PR SP3). A gage that
+  carries it runs with `COHERENCE FULL` (comonotone, the widest band) and the
+  run report gets a warning saying so.
+- Validated against brute-force Monte Carlo on the test chain (21 members,
+  `NORMAL CV 0.20`): coverage 1.000, ROM-to-MC band-width ratio 0.73 / 0.82 /
+  0.87 (min / median / max). That is a small, free-surface network; band
+  magnitude in surcharged flow is not validated for this input path.
+
 ### 11.2 `[SOFT_RAINFALL_GRID]` — Gridded Soft Rainfall
 
 ```
