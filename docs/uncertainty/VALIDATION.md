@@ -1130,7 +1130,16 @@ entirely. This is a concrete demonstration of how badly the removed fallback
 could misreport a multi-gage source, and the reason the regression test uses
 unequal spreads (an equal-spread fixture would prove less than it appears).
 
-## 5. Port status — the ROM half is live, the caller half is not on this line
+## 5. Port status — ROM half live; callers ported in PR SP1 (gages) and PR SP2 (grid)
+
+> **Update 2026-10-03.** Both callers described below are now ported against the
+> two-plane API: gage-level soft rainfall in SP1 and the 2D grid `/spread` in
+> SP2 (`SurfaceRouter2D::updateGridSoftSpread`). Neither carries the `×3.0`
+> pre-scale or the first-family fallback. The text that follows is the original
+> H7-time record of what was missing and is kept as history. Still not ported:
+> `COHERENCE CORR_LEN` for gages and grids (SP3) and the `RUNOFF` / `INFLOWS`
+> grid targets (SR-2d, no runtime on this line).
+
 
 The `port/v2-on-marcher` line deliberately ported the ROM-side soft-forcing API
 but **not** the SR-1a/SR-1b gage consumption or the SR-4b/CL-1c grid `/spread`
@@ -1149,6 +1158,31 @@ the gage path should group gages by family into the same two planes instead of
 warning and collapsing onto the first. Grids with more than two distinct
 families in one file still need a third plane — the API extends the same way,
 and nothing about the current shape blocks it.
+
+### 5a. SP2 findings (2026-10-03)
+
+- **The SR-2c re-port had silently broken gridded rainfall past its first
+  timestamp.** `GridFileReader::time_next()` returns the *current* plane's own
+  time when there is no next plane. The pre-port advance loop guarded on
+  `spread_next() != nullptr`; the SR-2c re-port dropped that guard. Once
+  simulation time passed the last plane's timestamp the loop ran off the end,
+  the reader was marked exhausted, and the grid stopped forcing for the rest of
+  the run, with the gages taking over silently. A single-plane grid worked only
+  at t = 0. Every existing test ran at t = 0 and only checked that the grid was
+  "active", so none noticed. Fixed by restoring the guard (the last plane is
+  held); regression test `LastPlaneIsHeldAfterItsTimestamp`, which fails without
+  the fix.
+- **A 2D grid without `FORCE_LOCATION` was never opened**, on either branch,
+  even though the USER_GUIDE said it would supply spread only. It is now opened
+  whenever it has a `TWO_D` target; `FORCE_LOCATION` only decides whether
+  `/location` overrides the gages.
+- **CV spread without a `/location` plane** was zero before (it multiplied by the
+  absent plane). It now uses the rainfall actually in force that step.
+- **Not validated against Monte Carlo.** SP2 is checked structurally: exact plane
+  mapping and conversion at router level, and that the planes reach a live 2D ROM
+  (zero-perturbation baseline band is exactly 0; a spread grid makes it nonzero).
+  There is no brute-force MC comparison for gridded soft rain on this line, so
+  band *magnitude* from this path is unvalidated.
 
 ## 6. Reproduction
 

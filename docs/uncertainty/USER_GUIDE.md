@@ -1693,12 +1693,24 @@ INFLOWS node_grid.h5  CENTROID  FORCE_LOCATION  NODES  nodes.txt
 - **Target**: `2D` (per-cell surface rainfall), `RUNOFF` (per-subcatchment),
   or `INFLOWS` (per-node lateral inflow).
 - **File**: path to an HDF5 grid file (§11.3).
-- **Mapping**: `CENTROID` (nearest cell center). `BILINEAR` and `AREA_MEAN`
-  are planned (SR-4a).
+- **Mapping**: `CENTROID` (nearest cell center) or `BILINEAR` (4-pixel weighted
+  gather; falls back to `CENTROID` on a grid smaller than 2×2). `AREA_MEAN` is
+  planned (SR-4a).
 - **Options**: `FORCE_LOCATION` (the grid's `/location` plane overrides the
   deterministic rainfall; without it, the model's existing rain is the location
   and the grid supplies spread only). `NODES <file>` (for INFLOWS target only:
   a text file listing node names, one per line).
+
+**What is wired on this line (PR SP2).** Only the `2D` target is. The 2D grid's
+`/spread` plane drives the 2D ROM's soft forcing whenever the 2D ROM is enabled
+(`[2D_ROM] ENABLE YES`), **with or without `FORCE_LOCATION`**; without it the
+gages remain the deterministic rainfall. `RUNOFF` and `INFLOWS` targets are
+parsed and recorded but nothing consumes them yet (their runtime, SR-2d, is not
+ported). `COHERENCE CORR_LEN` on a grid is parsed but not wired (PR SP3): the
+grid runs with `COHERENCE FULL` and the run report carries a warning. The grid's
+last time plane is held for the rest of the run. A `CV` spread is converted to an
+absolute rate with whatever rainfall is in force that step (grid `/location` when
+forced, otherwise the gages).
 
 ### 11.3 HDF5 Grid File Layout
 
@@ -1724,10 +1736,10 @@ INFLOWS node_grid.h5  CENTROID  FORCE_LOCATION  NODES  nodes.txt
   member-rank stream, so comonotone coherence still holds across families.
   Restrictions: per-family planes require `COHERENCE FULL` (CORR_LEN × MIXED is
   refused with an explanatory error — see `VALIDATION.md`, "True per-family
-  coefficient planes"), and two families per file are supported today. Note
-  also that on this branch the grid `/spread` → ROM path itself is not yet
-  wired (only `/location` is read); the per-family capability lives in the ROM
-  ahead of that wiring.
+  coefficient planes"), and two families per file are supported today. The grid
+  `/spread` → 2D ROM path is wired (PR SP2): UNIFORM cells go to one plane and
+  NORMAL/LOGNORMAL cells to the other, with no pre-scale. A MIXED file must
+  carry `/family_code`.
 
 ### 11.4 pybme Round-Trip Example
 
