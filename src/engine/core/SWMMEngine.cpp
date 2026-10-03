@@ -175,6 +175,12 @@ int SWMMEngine::open(const char* inp_path,
         // general LAYER-aware one above (this file never calls it).
         uncertainty::registerSoftRainfallGridSection(uncertainty_config_,
                                                      dip->registry());
+
+        // [SOFT_RAINGAGES] (SR-1a): gage-level soft rainfall -> ctx_.soft_rain.
+        // Consumed by initSoftRain1D() (SP1) to feed the 1D ROM's soft-forcing
+        // channel. Needs [RAINGAGES] to appear earlier in the file (gage names
+        // are resolved at parse time), same as the pre-port line.
+        uncertainty::registerSoftRaingagesSection(dip->registry());
     }
 
     // Scan the inline .inp for `;; UNITS: SI (m)` so SurfaceRouter2D::initialize
@@ -2795,6 +2801,72 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
             refreshRom1dTravelTime();
         }
 
+        // SP1: gage-level soft rainfall spread. loc = dh/dt head-rate, so the
+        // deterministic projection is unchanged; spread = loc * the
+        // area-weighted relative spread of the contributing gages, SPLIT into
+        // two disjoint planes by coefficient family (H7). Under deviation form
+        // member i's field is loc + c_i*spread_A + c_i^B*spread_B
+        // (SOFT_RAINFALL_DESIGN.md §4.3), each plane meeting its own family's
+        // coefficient, both drawn from one shared rank u_i (COHERENCE FULL).
+        if (soft_rain_1d_active_ && !rom1d_soft_spread_a_.empty()) {
+            const auto& sr = ctx_.soft_rain;
+            auto relSpread1D = [&](int g) -> double {
+                const auto ug = static_cast<std::size_t>(g);
+                const double sval = (sr.spread_ts[ug] >= 0)
+                    ? table_tseries_lookup_cursor(ctx_.tables[sr.spread_ts[ug]],
+                                                  ctx_.current_date)
+                    : sr.spread_const[ug];
+                if (sval <= 0.0) return 0.0;
+                switch (sr.spread_kind[ug]) {
+                    case uncertainty::SoftSpreadKind::CV:
+                        return sval;                       // already relative
+                    case uncertainty::SoftSpreadKind::SD:
+                    case uncertainty::SoftSpreadKind::HALFRANGE: {
+                        // Gage rainfall is in project rain units, the same
+                        // units the spread is entered in, so the ratio is
+                        // dimensionless with no conversion.
+                        const double rain = std::abs(ctx_.gages.rainfall[ug]);
+                        return (rain > 1.0e-12) ? sval / rain : 0.0;
+                    }
+                }
+                return 0.0;
+            };
+            for (int ai = 0; ai < n_active; ++ai) {
+                const auto uai = static_cast<std::size_t>(ai);
+                const double dh = rom1d_dh_buf_[uai];
+                rom1d_soft_loc_[uai] = dh;
+                double numer_a = 0.0, numer_b = 0.0;
+                for (int k = rom1d_soft_off_[uai]; k < rom1d_soft_off_[uai + 1]; ++k) {
+                    const auto uk = static_cast<std::size_t>(k);
+                    const double w = rom1d_soft_area_[uk]
+                                     * relSpread1D(rom1d_soft_gage_[uk]);
+                    (rom1d_soft_is_b_[uk] ? numer_b : numer_a) += w;
+                }
+                const double tot = rom1d_soft_node_area_[uai];
+                rom1d_soft_spread_a_[uai] = (tot > 0.0) ? dh * numer_a / tot : 0.0;
+                rom1d_soft_spread_b_[uai] = (tot > 0.0) ? dh * numer_b / tot : 0.0;
+            }
+            if (soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
+                // MIXED: both planes, each with its own family.
+                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
+                                       rom1d_soft_spread_a_.data(),
+                                       soft_rain_1d_family_a_, nullptr,
+                                       rom1d_soft_spread_b_.data(),
+                                       uncertainty::DistType::UNIFORM);
+            } else if (soft_rain_1d_has_b_) {
+                // UNIFORM only: plane B is the sole plane, passed as primary.
+                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
+                                       rom1d_soft_spread_b_.data(),
+                                       uncertainty::DistType::UNIFORM);
+            } else {
+                // NORMAL/LOGNORMAL only: single plane, null second plane, so
+                // this is bit-identical to the pre-H7 single-family call.
+                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
+                                       rom1d_soft_spread_a_.data(),
+                                       soft_rain_1d_family_a_);
+            }
+        }
+
         rom1d_->advance(dt_routing, K1d, rom1d_h_buf_.data(),
                         rom1d_dh_buf_.empty() ? nullptr : rom1d_dh_buf_.data(),
                         rom1d_sens_buf_.data(), rom1d_alpha_buf_.data());
@@ -4727,7 +4799,13 @@ void SWMMEngine::initHydraulics() noexcept {
     //        active (a coupled 1D+2D uncertainty run needs both sides, and
     //        SpectralROM::applyCouplingFlux already reads per-member 1D
     //        heads whenever setROM1D() has registered one — see buildROM1D).
-    if (uncertainty_config_.has_1d() || surface_router_.options().enable_rom) {
+    bool need_rom1d = uncertainty_config_.has_1d() || surface_router_.options().enable_rom;
+    // Gage-level soft rainfall (SR-1a/1b) is itself a 1D uncertainty source:
+    // any configured soft gage should activate the network ROM.
+    for (int g = 0; g < ctx_.soft_rain.count() && !need_rom1d; ++g)
+        if (ctx_.soft_rain.configured[static_cast<std::size_t>(g)])
+            need_rom1d = true;
+    if (need_rom1d) {
         buildROM1D();
     }
 #endif
@@ -5901,6 +5979,117 @@ void SWMMEngine::initMassBalance() noexcept {
 
 #ifdef OPENSWMM_HAS_2D
 // ============================================================================
+// initSoftRain1D() -- per-active-node gage-level soft rainfall CSR (SP1)
+// ============================================================================
+//
+// Re-home of SR-1b onto the H7 two-plane API. Differences from the pre-port
+// version, all deliberate:
+//   * Contributions are tagged by coefficient family: UNIFORM gages feed plane
+//     B (2u-1 coefficient), NORMAL/LOGNORMAL gages feed plane A (probit
+//     coefficient). The two planes are disjoint and sum to the single-plane
+//     spread, so there is NO first-family fallback and NO mixed-family warning.
+//   * COHERENCE CORR_LEN is parsed but not wired on this line (SP3). A gage
+//     carrying it is run with comonotone (FULL) coherence and a one-time
+//     warning says so, rather than silently dropping the option.
+//
+void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
+    const auto n_active = active_map.size();
+    // NOTE: these vectors are bound by pointer inside SpectralROM1D::
+    // setSoftForcing; they are sized exactly once here and never resized.
+    rom1d_soft_loc_.assign(n_active, 0.0);
+    rom1d_soft_spread_a_.assign(n_active, 0.0);
+    rom1d_soft_spread_b_.assign(n_active, 0.0);
+    rom1d_soft_node_area_.assign(n_active, 0.0);
+    rom1d_soft_off_.assign(n_active + 1, 0);
+    rom1d_soft_gage_.clear();
+    rom1d_soft_area_.clear();
+    rom1d_soft_is_b_.clear();
+    soft_rain_1d_active_ = false;
+    soft_rain_1d_has_a_ = false;
+    soft_rain_1d_has_b_ = false;
+    soft_rain_1d_family_a_ = uncertainty::DistType::NORMAL;
+
+    const auto& sr = ctx_.soft_rain;
+    if (sr.count() == 0) return;
+
+    // Reverse map: full node index -> active index (-1 if not in the active set).
+    std::vector<int> full_to_active(static_cast<std::size_t>(ctx_.nodes.count()), -1);
+    for (std::size_t ai = 0; ai < n_active; ++ai) {
+        const auto ui = static_cast<std::size_t>(active_map[ai]);
+        if (ui < full_to_active.size())
+            full_to_active[ui] = static_cast<int>(ai);
+    }
+
+    // Pass 1: count configured contributions per active node and accumulate
+    // each node's total drained area (ALL subcatchments, configured or not).
+    std::vector<int> counts(n_active, 0);
+    const int n_sub = ctx_.subcatches.count();
+    bool corr_len_seen = false;
+    bool lognormal_seen = false;
+    for (int s = 0; s < n_sub; ++s) {
+        const int node = ctx_.subcatches.outlet_node[static_cast<std::size_t>(s)];
+        if (node < 0 || node >= ctx_.nodes.count()) continue;
+        const int ai = full_to_active[static_cast<std::size_t>(node)];
+        if (ai < 0) continue;
+        rom1d_soft_node_area_[static_cast<std::size_t>(ai)] +=
+            ctx_.subcatches.area[static_cast<std::size_t>(s)];
+        const int g = ctx_.subcatches.gage[static_cast<std::size_t>(s)];
+        if (g < 0 || g >= sr.count()) continue;
+        const auto ug = static_cast<std::size_t>(g);
+        if (!sr.configured[ug]) continue;
+        ++counts[static_cast<std::size_t>(ai)];
+        if (sr.family[ug] == uncertainty::DistType::UNIFORM) soft_rain_1d_has_b_ = true;
+        else {
+            soft_rain_1d_has_a_ = true;
+            if (sr.family[ug] == uncertainty::DistType::LOGNORMAL) lognormal_seen = true;
+        }
+        if (sr.coherence[ug] == uncertainty::GageCoherence::CORR_LEN) corr_len_seen = true;
+    }
+
+    // CSR offsets.
+    for (std::size_t ai = 0; ai < n_active; ++ai)
+        rom1d_soft_off_[ai + 1] = rom1d_soft_off_[ai] + counts[ai];
+    const auto nnz = static_cast<std::size_t>(rom1d_soft_off_[n_active]);
+    if (nnz == 0) return;
+    rom1d_soft_gage_.assign(nnz, -1);
+    rom1d_soft_area_.assign(nnz, 0.0);
+    rom1d_soft_is_b_.assign(nnz, 0);
+
+    // Pass 2: fill the CSR (counts reused as a running cursor).
+    std::vector<int> cursor(rom1d_soft_off_.begin(),
+                            rom1d_soft_off_.begin() + static_cast<std::ptrdiff_t>(n_active));
+    for (int s = 0; s < n_sub; ++s) {
+        const int node = ctx_.subcatches.outlet_node[static_cast<std::size_t>(s)];
+        if (node < 0 || node >= ctx_.nodes.count()) continue;
+        const int ai = full_to_active[static_cast<std::size_t>(node)];
+        if (ai < 0) continue;
+        const int g = ctx_.subcatches.gage[static_cast<std::size_t>(s)];
+        if (g < 0 || g >= sr.count()) continue;
+        const auto ug = static_cast<std::size_t>(g);
+        if (!sr.configured[ug]) continue;
+        const auto k = static_cast<std::size_t>(cursor[static_cast<std::size_t>(ai)]++);
+        rom1d_soft_gage_[k] = g;
+        rom1d_soft_area_[k] = ctx_.subcatches.area[static_cast<std::size_t>(s)];
+        rom1d_soft_is_b_[k] = (sr.family[ug] == uncertainty::DistType::UNIFORM) ? 1 : 0;
+    }
+
+    // NORMAL and LOGNORMAL share the same probit member coefficient (the
+    // lognormal difference lives in the caller's spread scaling), so one
+    // plane serves both. Name the plane after LOGNORMAL only when no NORMAL
+    // gage exists -- purely a label, the coefficient is identical.
+    soft_rain_1d_family_a_ = (lognormal_seen && !soft_rain_1d_has_a_)
+        ? uncertainty::DistType::LOGNORMAL : uncertainty::DistType::NORMAL;
+
+    if (corr_len_seen) {
+        ctx_.warnings.push_back(
+            "WARNING: [SOFT_RAINGAGES] COHERENCE CORR_LEN is parsed but not yet "
+            "wired into the 1D ROM; the affected gage(s) run with COHERENCE FULL "
+            "(comonotone, the widest band).");
+    }
+    soft_rain_1d_active_ = true;
+}
+
+// ============================================================================
 // buildROM1D() — build + seed the 1D spectral ROM
 // ============================================================================
 
@@ -6053,6 +6242,13 @@ void SWMMEngine::buildROM1D() noexcept {
         auto ui = static_cast<std::size_t>(active_map[static_cast<std::size_t>(ai)]);
         rom1d_invert_buf_[static_cast<std::size_t>(ai)] = ctx_.nodes.invert_elev[ui];
     }
+
+    // SP1: gage-level soft rainfall -> 1D ROM. Build a per-active-node CSR of
+    // the subcatchments draining to that node whose gage carries a soft-rain
+    // spread, plus the node's total drained area, so the per-step relative
+    // spread is the area-weighted fraction of the node's runoff that is
+    // uncertain. See SOFT_RAINFALL_DESIGN.md §1 (Move 2) and §4.3.
+    initSoftRain1D(active_map);
 
     // Generic registered-parameter path (PARAMETER_REGISTRY.md §6). MANNINGS_N/
     // RAINFALL are the built-in path handled above; every other active 1D spec

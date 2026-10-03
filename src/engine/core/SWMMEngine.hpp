@@ -472,6 +472,28 @@ private:
     std::vector<double> rom1d_dh_buf_;     ///< per-active-node dh/dt forcing buffer (reused each step; also the field
                                             ///< for any registered FORCING_VECTOR 1D param, e.g. INFLOW)
     std::vector<double> rom1d_alpha_buf_;  ///< per-active-node PR H5 surcharge-attenuation factor (reused each step)
+
+    // ---- SP1: gage-level soft rainfall -> 1D ROM forcing (SR-1a/1b re-port) ----
+    // loc = dh/dt head-rate (so the deterministic projection is unchanged; under
+    // deviation form its runoff_pert=0 scaling contributes nothing). The spread
+    // is split into TWO disjoint planes by coefficient family (H7): plane A is
+    // NORMAL/LOGNORMAL gages (probit coefficient), plane B is UNIFORM gages
+    // (2u-1 coefficient). They sum to the single-plane spread, so each gage's
+    // spread meets exactly its own family's member coefficient and there is no
+    // first-family fallback. These buffers are bound by POINTER inside
+    // SpectralROM1D::setSoftForcing, so they must never be resized after build.
+    std::vector<double> rom1d_soft_loc_;       ///< per-active-node soft location (= dh_buf)
+    std::vector<double> rom1d_soft_spread_a_;  ///< plane A: NORMAL/LOGNORMAL gages' spread
+    std::vector<double> rom1d_soft_spread_b_;  ///< plane B: UNIFORM gages' spread
+    std::vector<double> rom1d_soft_node_area_; ///< total subcatchment area draining to each active node
+    std::vector<int>    rom1d_soft_off_;       ///< CSR offsets (n_active+1)
+    std::vector<int>    rom1d_soft_gage_;      ///< CSR gage index per configured subcatchment contribution
+    std::vector<double> rom1d_soft_area_;      ///< CSR area per contribution
+    std::vector<char>   rom1d_soft_is_b_;      ///< CSR: 1 when the contribution's gage is UNIFORM (plane B)
+    bool soft_rain_1d_active_ = false;         ///< True when any configured gage feeds an active node
+    bool soft_rain_1d_has_a_  = false;         ///< Any NORMAL/LOGNORMAL contribution exists
+    bool soft_rain_1d_has_b_  = false;         ///< Any UNIFORM contribution exists
+    uncertainty::DistType soft_rain_1d_family_a_ = uncertainty::DistType::NORMAL; ///< Plane A family (NORMAL or LOGNORMAL)
     uncertainty::SurchargeAttenuationConfig rom1d_surcharge_cfg_; ///< PR H5 ramp band (defaults [0.9,1.1]); not
                                             ///< parser-exposed in this PR, internal knob only
     // ---- PR H11: per-member phase coordinate ------------------------------
@@ -514,6 +536,8 @@ private:
 
     /** @brief Build + seed the 1D spectral ROM from conduit connectivity and node heads. */
     void buildROM1D() noexcept;
+    /// SP1: build the per-active-node gage CSR for gage-level soft rainfall.
+    void initSoftRain1D(const std::vector<int>& active_map) noexcept;
 
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
     double computeK1d() noexcept;

@@ -823,6 +823,16 @@ if(OPENSWMM_BUILD_2D)
     add_gtest_unit(test_engine_2d_rom_integration test_engine_2d_rom_integration.cpp)
 endif()
 
+# SP1 (gage-level soft rainfall re-port). Both were ready-made acceptance gates
+# for exactly this port: the parser test needs ctx.soft_rain +
+# parseSoftRaingagesLine, and the gage-engine test drives [SOFT_RAINGAGES]
+# end to end through the 1D ROM. Both live in the 2D-only QualityUncertainty
+# handler and the 2D-gated 1D-ROM block, so they are gated the same way.
+if(OPENSWMM_BUILD_2D)
+    add_gtest_unit(test_engine_soft_rain_parser      test_soft_rain_parser.cpp)
+    add_gtest_unit(test_engine_soft_rain_gage_engine test_soft_rain_gage_engine.cpp)
+endif()
+
 # ---- Deliberately NOT registered: these do not build on this base ----------
 # Each was compile-checked during the 2026-08-18 sweep; the blocker is a
 # genuinely un-ported feature, not a broken test.
@@ -830,22 +840,6 @@ endif()
 #   test_engine_wq_uncertainty.cpp  -- needs SWMMEngine::wq_unc_active /
 #       wq_conc_prev_ (post-reform PR 13b, the WQ QUALITY uncertainty layer).
 #       Never ported to this line.
-#
-#   test_soft_rain_parser.cpp       -- needs SimulationContext::soft_rain and
-#       parseSoftRaingagesLine (SR-1a/SR-1b gage-level soft rainfall). The R0
-#       port deliberately excluded both; see the note at the removal site in
-#       src/engine/uncertainty/QualityUncertaintyHandler.cpp.
-#
-#   test_soft_rain_gage_engine.cpp  -- COMPILES and RUNS on this base, but all
-#       6 tests fail for one reason: they write a [SOFT_RAINGAGES] section into
-#       a .inp and drive the engine end to end, and that section has no
-#       registered parser here, so it is silently ignored and no gage spread
-#       ever reaches the ROM. Left unregistered on purpose: this is a
-#       feature-ABSENT red, not a defect red, and a permanently red target
-#       would erode what a red gate means on this line (contrast
-#       regression_rom_coverage, which is deliberately red over a real
-#       NUMERICAL question and must stay registered). It is a ready-made
-#       acceptance gate for the SR-1a/SR-1b port -- turn it on then.
 #
 #   test_spectral_correction.cpp    -- needs hydraulics/SpectralCoarse.cpp,
 #       which src/engine/CMakeLists.txt EXCLUDES on purpose (the DW

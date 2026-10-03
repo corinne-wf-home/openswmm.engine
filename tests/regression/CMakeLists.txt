@@ -200,12 +200,31 @@ if(OPENSWMM_BUILD_2D)
         ENVIRONMENT "OPENSWMM_2D_BACKEND=cpu")
     openswmm_stage_test_runtime_deps(test_corr_len_profile)
 
-    # ---- Deliberately NOT registered (2026-08-18 sweep) --------------------
-    # test_soft_rain_coverage.cpp and test_soft_rain_corr_coverage.cpp (SR-5)
-    # both write a [SOFT_RAINGAGES] section into a .inp and drive the engine
-    # end to end. That parser was deliberately not ported to this base (see
-    # src/engine/uncertainty/QualityUncertaintyHandler.cpp), so the section is
-    # silently ignored, no gage spread reaches the ROM, and every assertion
-    # fails for that one reason. They are ready-made acceptance gates for
-    # whoever ports SR-1a/SR-1b -- register them then, not before.
+    # ---- SP1: soft-rainfall ROM bands vs brute-force MC (SR-5) --------------
+    # Was a ready-made acceptance gate for the [SOFT_RAINGAGES] re-port; the
+    # section now parses and reaches the 1D ROM (SP1), so it runs for real.
+    add_executable(test_soft_rain_coverage test_soft_rain_coverage.cpp)
+    target_link_libraries(test_soft_rain_coverage
+        PRIVATE
+            GTest::gtest GTest::gtest_main
+            openswmm_engine
+    )
+    target_include_directories(test_soft_rain_coverage
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src/engine
+    )
+    set_target_properties(test_soft_rain_coverage PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+    add_test(NAME regression_soft_rain_coverage COMMAND $<TARGET_FILE:test_soft_rain_coverage>)
+    set_tests_properties(regression_soft_rain_coverage PROPERTIES LABELS "regression")
+    openswmm_stage_test_runtime_deps(test_soft_rain_coverage)
+
+    # ---- Deliberately NOT registered: SR-5 correlated coverage --------------
+    # test_soft_rain_corr_coverage.cpp exercises COHERENCE CORR_LEN against MC.
+    # That wiring is SP3 (CL-1c/CL-2c); SP1 runs CORR_LEN gages as comonotone
+    # with a warning, so this gate would measure the wrong thing. Register it
+    # in SP3, not before.
 endif()
