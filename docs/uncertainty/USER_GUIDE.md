@@ -1683,6 +1683,13 @@ a defect.
 - `SD` and `HALFRANGE` spreads are in the gage's rain units (the units of the
   rainfall series), so they are compared with the gage's current intensity
   without any conversion. `CV` is dimensionless.
+- The spread is propagated through the **rain-to-runoff response**, not applied
+  to the rain directly: the engine carries two perturbed copies of each
+  subcatchment's runoff state (rain × 0.9 and × 1.1) and scales the spread by
+  the measured elasticity of runoff to rain, which exceeds 1 on the rising limb
+  of overland flow. This costs two extra runoff-kernel evaluations per runoff
+  step (not per routing step) and only runs when `[SOFT_RAINGAGES]` is present.
+  LID surface runoff and subcatchment cascading are not perturbed.
 - `COHERENCE CORR_LEN <m>` (PR SP3) makes member coefficients vary across the
   network with a Whittle–Matérn (ν = 2) correlation of length `<m>` instead of
   one rank everywhere. It needs node `[COORDINATES]`; without them (all nodes
@@ -1694,13 +1701,14 @@ a defect.
   band contains the MC median at every sample, its width is 0.38 / 0.57 / 0.70 of
   the MC 5–95 span, and it contains **0.68** of MC outcomes against a nominal
   0.90, so correlated bands run narrow. The downstream band at ℓ = 30 m is 0.56×
-  the comonotone band, which is the point of the feature.
+  the comonotone band, which is the point of the feature. *(Updated with SR-6:
+  width 0.54 / 0.80 / 0.94 of the MC span, member coverage **0.83** — calibrated.)*
 - Compared against brute-force Monte Carlo on the test chain (21 members,
-  `NORMAL CV 0.20`): the ROM band contains the MC median at every sample, its
-  width is 0.63 / 0.71 / 0.75 (min / median / max) of the MC 5–95 span, and it
-  contains **0.76** of MC outcomes against a nominal 0.90. Read the band as
-  somewhat narrow, not as a calibrated 90% interval. Small, free-surface network;
-  surcharged flow is not validated for this input path.
+  `NORMAL CV 0.20`): the ROM band's width is 0.86 / 0.98 / 0.98 (min / median /
+  max) of the MC 5–95 span and it contains **0.88** of MC outcomes against a
+  0.905 ceiling, so this cell is **calibrated** under the project's C1 rule
+  (VALIDATION.md, "SR-6"). Small, free-surface network; surcharged flow is not
+  validated for this input path.
 
 ### 11.2 `[SOFT_RAINFALL_GRID]` — Gridded Soft Rainfall
 

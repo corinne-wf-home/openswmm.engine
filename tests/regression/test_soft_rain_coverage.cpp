@@ -69,6 +69,7 @@ static const double kK1dScale  = envDouble("SR5_K1D_SCALE", 1.0); // SR-6 falsif
 static const double kPipeDiam  = envDouble("SR5_PIPE_DIAM", 0.5);  // SR-6: surcharge-elasticity probe (ft)
 static const double kSubWidth  = envDouble("SR5_SUBCATCH_WIDTH", 5.0); // SR-6: runoff-elasticity probe (ft)
 static const double kSubArea   = envDouble("SR5_SUBCATCH_AREA", 5.0);  // SR-6: equilibrium probe (acres)
+static const int    kElasOn    = envInt("SR5_RUNOFF_ELASTICITY", 1);    // SR-6 A/B: 0 = pre-SR-6 mapping
 constexpr int    kMcRuns       = 21;
 constexpr double kReportStep   = 300.0;   // s (5 min)
 constexpr double kEndTime      = 3600.0;  // s (1 h sampling window)
@@ -166,6 +167,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     // (K1d is recomputed per step, so setting it before the first step is
     // sufficient). 1.0 = bit-identical to the gate.
     if (with_soft) eng->rom1dK1dScale() = kK1dScale;
+    if (with_soft) eng->rom1dRunoffElasticityEnabled() = (kElasOn != 0);
     const auto& ctx = eng->context();
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());
 
@@ -386,10 +388,12 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     // expected mild under-prediction of the delta-linearized soft forcing —
     // but it brackets every MC median and stays well inside [0.3x, 3x].
     // NOTE (2026-10-04 review): `coverage` is MEDIAN CONTAINMENT, not interval
-    // coverage. C1 (owner, 2026-10-05): calibrated means member coverage >= 0.80;
-    // this cell measures ~0.76 and is RANKING ONLY until SR-6 lands. Printed,
-    // not asserted -- no tolerance is invented to make a spread test green.
-    mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, "SR-6");
+    // coverage. C1 (owner, 2026-10-05): calibrated means member coverage >= 0.80.
+    // SR-6 (2026-10-05) raised this cell from 0.761 to 0.881 by propagating the
+    // gage spread through the rain->runoff elasticity; it is now a validated
+    // cell and asserts the floor (SR5_RUNOFF_ELASTICITY=0 reproduces 0.761).
+    EXPECT_TRUE(mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, "SR-6"))
+        << "SR-5 is a validated cell since SR-6: member coverage must stay >= 0.80 (measured 0.881)";
     EXPECT_GE(coverage, 0.90)
         << "ROM [q05,q95] must contain the MC median at >=90% of samples";
     EXPECT_GE(width_frac, 0.80)
