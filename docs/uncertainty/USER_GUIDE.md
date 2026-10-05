@@ -36,9 +36,12 @@ routing step you get three additional per-cell depth fields:
 | `q50` | Median depth (best single estimate) |
 | `q95` | 95th-percentile depth |
 
-Together `[q05, q95]` is a **90th-percentile prediction interval**: if the true Manning's n and
-rainfall intensity lie within the perturbation ranges you specify, there is roughly a 90 %
-probability that the true depth at each cell lies inside the band.
+Together `[q05, q95]` is the **5th-to-95th percentile band of the ensemble**. Whether it is a
+calibrated 90% interval depends on the regime: measured against brute-force Monte Carlo, the
+fraction of outcomes inside ranges from 0.83 down to 0.20 (VALIDATION.md, "Interval-coverage
+audit"). Treat the band as a **ranking** of where uncertainty concentrates unless that table
+marks your regime *calibrated* (≥ 0.80 of outcomes inside). This document says "band", not
+"90% interval", for that reason.
 
 **What parameters can be uncertain:**
 
@@ -136,7 +139,7 @@ Controls the ROM solver. All keywords are optional; defaults shown.
 | Keyword | Default | Range | Description |
 |---|---|---|---|
 | `ENABLE` | `NO` | YES/NO | Activate the ROM sidecar. |
-| `MEMBERS` | `50` | ≥ 2 | Ensemble size M. More members → smoother quantiles, O(M) cost. |
+| `MEMBERS` | `50` | ≥ 2 | Ensemble size M, a **cost knob**: O(M) per step. On the linear forcing paths M = 20 reproduces M = 200 to three decimals (measured 2026-10-04, VALIDATION.md audit §3) — the quantiles sit on exact LHS strata, so more members buy quantile granularity, never coverage. Keep 50 for bit-identity with the recorded results; use 20 when cost matters. |
 | `MODES` | `10` | ≥ 1 | Laplacian eigenmodes retained for the ROM basis. More modes → finer spatial resolution of spread. Capped at min(MEMBERS, n_tri−1). |
 | `MANNINGS_PERT` | `0.20` | ≥ 0 | Half-range for Manning's n: each member's n ∈ [1−p, 1+p] × n_base. Overridden by `[UNCERTAINTY] 2D MANNINGS_N`. |
 | `RAINFALL_PERT` | `0.20` | ≥ 0 | Half-range for rainfall intensity. Overridden by `[UNCERTAINTY] 2D RAINFALL`. |
@@ -243,9 +246,9 @@ uncertain, results may vary." This is honest but quantifies nothing.
 **What the ROM sidecar does**: run 50 virtual members as a lightweight parallel process alongside
 the single deterministic solver. Extra cost: about 2 seconds on a 4-minute model. At every node
 or cell, at every timestep, you get three additional fields: `q05` (optimistic scenario),
-`q50` (best estimate), `q95` (pessimistic scenario). Together they form a **90th-percentile
-prediction interval** — if the true Manning's n is anywhere within ±20% of the calibrated
-value, the depth lies inside the band for roughly 90% of timesteps.
+`q50` (best estimate), `q95` (pessimistic scenario). Together they form the ensemble's
+5th-to-95th percentile band — a ranking of where the model is sensitive to the uncertain
+parameters, and a calibrated interval only in the regimes VALIDATION.md marks as such.
 
 ### 4.2 Why eigenmodes — the guitar string analogy
 
@@ -330,7 +333,7 @@ the 1000× speedup practically achievable.
 
 **The 1000× speedup crosses a practical threshold.** At 10× speedup, uncertainty quantification
 is marginally better than Monte Carlo. At 100×, it is practical for research. At 1000×, it is
-operationally free: a 4-minute simulation gains a 90th-percentile prediction band for under
+operationally free: a 4-minute simulation gains an uncertainty band for under
 0.25 seconds of additional compute. That threshold is what makes this useful in everyday
 engineering practice, not just in papers.
 
@@ -786,8 +789,11 @@ The per-coupling-point bounds `[q_min, q_max]` across all M members are accumula
 - **q50** is the median of the ensemble — the best single-number estimate when Manning's n is
   uncertain. For small perturbations (≤ 20%) it is close to, but not identical to, the
   deterministic CVODE result (small systematic bias from the linearisation).
-- **[q05, q95]** is a 90-percentile prediction interval. It answers: "if the true Manning's n
-  and rainfall are anywhere within the specified ±p% range, what is the range of outcomes?"
+- **[q05, q95]** is the ensemble's 5th-to-95th percentile band. It answers: "if the true
+  Manning's n and rainfall are anywhere within the specified ±p% range, roughly what range of
+  outcomes follows?" — *roughly*, because the ROM's band is narrower than brute force in
+  several regimes (see VALIDATION.md's audit); use it to rank, and as a probability only
+  where that table says calibrated.
 - **q95 − q05** (the spread) quantifies where uncertainty matters most. Large spread = high
   sensitivity to the uncertain parameters at that cell and time.
 
@@ -829,7 +835,12 @@ q95 − q05 ≈ 2 · p · |∂(depth)/∂(Manning's n)| · n_base
 | 200+ | Diminishing returns; use if publishing or for regulatory submissions. |
 
 Cost scales exactly as O(M). Doubling M doubles ROM overhead (which is already ~1% of total
-simulation time), so M=100 adds roughly 2% overhead relative to M=0.
+simulation time on the comonotone Manning path), so M=100 adds roughly 2% overhead relative to
+M=0. **What M does not buy:** coverage. On the linear forcing paths the band at M = 20 is
+identical to M = 200 to three decimals (measured), because the quantiles sit on exact LHS
+strata; the band's size is set by the formulation, not by the sample. The table above is
+about quantile granularity only. The correlated (`COHERENCE CORR_LEN`) path is the expensive
+one: about 10× the comonotone advance per step on a 9,800-cell 2D mesh (VALIDATION.md, CL-2a).
 
 ### 5.5 Modes guidance
 
@@ -1515,7 +1526,9 @@ steps × dt=1 s. Full MC: 20 perturbed CVODE runs each advancing t=0→30 s.
 **ROM vs full MC speedup**: ~1265× at 50×50, M=20; ~1060× implied at 100×100.
 
 ROM advance cost scales as O(M · k · n_steps) — purely arithmetic, no ODE solves.
-Doubling M doubles ROM overhead, which is ~1% of total simulation time at M=50.
+Doubling M doubles ROM overhead, which is ~1% of total simulation time at M=50 (comonotone
+Manning path; the correlated soft-rain path is ~10× the comonotone advance per step). M does
+not change band coverage on the linear forcing paths: M = 20 and M = 200 give the same band.
 
 ### 9.2 1D sewer network (estimated, N=10,000 nodes)
 

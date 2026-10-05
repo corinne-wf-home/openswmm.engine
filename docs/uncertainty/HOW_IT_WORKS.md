@@ -96,8 +96,9 @@ different possible values of Manning's n (or rainfall depth, or both) *at the
 same time*, alongside your one real simulation. Every one of those 50
 "members" is a slightly different parallel universe: what if n were 0.0122
 here? 0.0179 there? Sort the 50 depth values at each node and each moment in
-time, and you get a band — a 90% prediction interval — exactly like a
-spaghetti plot's shaded confidence cone.
+time, and you get a band — the 5th-to-95th percentile of the members — exactly
+like a spaghetti plot's shaded cone. (Whether that band is a *calibrated* 90%
+interval is a separate, measured question; see "What the band promises" below.)
 
 The catch with real weather ensembles is that each of the 50 forecast members
 is a *full, independent run of the entire climate model* — expensive. The
@@ -348,9 +349,18 @@ q50  =  the median value          (the "best single guess")
 q95  =  the 95th-percentile value (5% chance the true depth is higher)
 ```
 
-`[q05, q95]` is a **90% prediction interval**: if the true Manning's n and
-rainfall depth lie anywhere within the sampled range, the true depth should
-fall inside that band roughly 90% of the time.
+**What the band promises (status 2026-10-05).** `[q05, q95]` is the 5th-to-95th
+percentile of the ensemble, which would be a 90% prediction interval *if* the
+ROM reproduced the brute-force spread exactly. It does not everywhere. Measured
+against brute-force Monte Carlo (VALIDATION.md, "Interval-coverage audit"), the
+fraction of true outcomes inside the band ranges from 0.83 (front passage) and
+0.82 (2D production operator) down to 0.76 (soft rain), 0.51 (surcharged pipes)
+and 0.20 (an unreachable-regime fixture). The project's rule (C1): a cell is
+**calibrated** when that fraction is ≥ 0.80; otherwise its band is **ranking
+only** — it reliably shows *where* uncertainty concentrates and *which* nodes
+are more uncertain than others, but its width is not a probability. Each
+ranking-only cell has a named fix PR. Read every band in this guide as a
+ranking unless VALIDATION.md marks that regime calibrated.
 
 ---
 
@@ -365,9 +375,12 @@ timestep (43,200 routing steps).
 **Cost.** The deterministic baseline run — no uncertainty tracking at all —
 took 2,124 seconds (about 35 minutes). Turning on the uncertainty sidecar
 with a **50-member ensemble and ±20% Manning's-n uncertainty** brought the
-total to 2,171 seconds: **a 2.2% overhead** for full 90% prediction bands at
+total to 2,171 seconds: **a 2.2% overhead** for 5th-to-95th percentile bands at
 every one of 8,266 nodes, at every report timestep, for the entire 6-hour
-storm. A brute-force Monte Carlo equivalent — 50 full deterministic reruns —
+storm. (That figure is the 1D Manning path with comonotone coherence; the
+correlated soft-rain path costs more per step — about 10× the comonotone
+advance on a 9,800-cell 2D profile mesh, VALIDATION.md "CL-2a" — and the
+StormCity bands themselves are ranking-only, not calibrated; see above.) A brute-force Monte Carlo equivalent — 50 full deterministic reruns —
 would cost roughly **50× the baseline**, or nearly 30 hours.
 
 **Result.** Output from this same StormCity uncertainty-benchmark setup (50
@@ -464,7 +477,7 @@ brute-force Monte Carlo, uncertainty quantification is marginally more
 attractive than the status quo. At 100×, it becomes viable for careful
 research studies. At roughly 1000× — the regime this sidecar operates in —
 uncertainty quantification becomes **operationally free**: a 4-minute
-calibration run gains a full 90% prediction band for well under a second of
+calibration run gains a full uncertainty band for well under a second of
 extra compute. That's the difference between "something a PhD student runs
 once for a paper" and "something that's on by default in every production
 run," and it's the threshold that actually changes engineering practice.
@@ -629,7 +642,7 @@ there, which is more involved than the 1D path-integral approach used above.
 | **K_eff / K1d** | Effective conductance (from Manning's n, slope, depth) | scales the decay rate |
 | **Latin Hypercube Sampling** | Stratified "one ticket per price bracket" sampling | strata of `[1−p, 1+p]` |
 | **q05 / q50 / q95** | The 5th / 50th / 95th percentile across all 50 members at a point | sorted `h_i[t]` |
-| **90% prediction interval** | The band `[q05, q95]` | width = uncertainty magnitude |
+| **Band `[q05, q95]`** | 5th-to-95th percentile of the members; calibrated (≥ 0.80 of outcomes inside, C1) in some regimes, *ranking only* in others | VALIDATION.md audit table |
 | **Fiedler mode** | The smoothest non-trivial shape; flags network bottlenecks | eigenvector for smallest nonzero `λ` |
 
 ---
