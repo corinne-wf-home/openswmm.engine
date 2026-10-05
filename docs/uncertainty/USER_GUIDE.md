@@ -1486,7 +1486,7 @@ xarray as a supplementary group.
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from
-    0.009 — effectively unrepresented — to 1.354, comfortably within the acceptance band) but is
+    0.009 — effectively unrepresented — to 1.354 (1.295 after the 2026-10-04 metric correction, member coverage 0.83), comfortably within the acceptance band) but is
     **1D only**. The 2D counterpart (the same mechanism showing up as the drain-to-pond
     limitation — coverage 0.55–0.60 in VALIDATION.md's 2D solver-mode-compatibility section) is
     not addressed by this fix; a travel-time *field* rather than a path integral would be needed
