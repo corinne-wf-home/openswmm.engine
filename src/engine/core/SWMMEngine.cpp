@@ -1445,6 +1445,21 @@ void SWMMEngine::stepRunoff(double dt_routing) noexcept {
         // A4. Runoff (computes subcatches.runoff[i] = newRunoff rate)
         //     Runoff solver is self-contained; output is subcatches.runoff[i].
         //     Routing picks it up via Phase 2 interpolation → nodes.runoff_inflow[].
+        // SR-6: advance the two perturbed runoff members through the SAME
+        // kernel call with the SAME arguments, BEFORE the deterministic run
+        // (they read this step's deterministic runon/snow/gw inputs and leave
+        // solver + ctx exactly as found). Only when gage-level soft rain is
+        // active, so every other run is untouched.
+        // (The 1D ROM and its soft-rain state are declared inside the
+        // OPENSWMM_HAS_2D block on this line -- the documented pre-existing
+        // quirk -- so the probe is gated the same way.)
+#ifdef OPENSWMM_HAS_2D
+        if (soft_rain_1d_active_ && rom1d_runoff_elasticity_enabled_) {
+            rom1d_runoff_probe_.step(runoff_, ctx_, dt_runoff, ctx_.climate_state.evap_rate,
+                                     ctx_.climate_state.infil_factor,
+                                     ctx_.climate_state.recovery_factor, mon);
+        }
+#endif
         runoff_.execute(ctx_, dt_runoff, ctx_.climate_state.evap_rate,
                         ctx_.climate_state.infil_factor, ctx_.climate_state.recovery_factor, mon);
 
@@ -2840,6 +2855,12 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                 }
                 return 0.0;
             };
+            // SR-6: scale each contribution's relative spread by its
+            // subcatchment's rain->runoff elasticity (1.0 when the probe is
+            // off or not yet seeded), so the band carries the runoff response
+            // to rain, not the rain itself. See RunoffElasticity.hpp.
+            const std::vector<double>& elas = rom1d_runoff_probe_.elasticity();
+            const bool use_elas = rom1d_runoff_elasticity_enabled_ && rom1d_runoff_probe_.seeded();
             for (int ai = 0; ai < n_active; ++ai) {
                 const auto uai = static_cast<std::size_t>(ai);
                 const double dh = rom1d_dh_buf_[uai];
@@ -2847,8 +2868,12 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                 double numer_a = 0.0, numer_b = 0.0;
                 for (int k = rom1d_soft_off_[uai]; k < rom1d_soft_off_[uai + 1]; ++k) {
                     const auto uk = static_cast<std::size_t>(k);
+                    const int sidx = rom1d_soft_sub_[uk];
+                    const double e = (use_elas && sidx >= 0 &&
+                                      static_cast<std::size_t>(sidx) < elas.size())
+                                     ? elas[static_cast<std::size_t>(sidx)] : 1.0;
                     const double w = rom1d_soft_area_[uk]
-                                     * relSpread1D(rom1d_soft_gage_[uk]);
+                                     * relSpread1D(rom1d_soft_gage_[uk]) * e;
                     (rom1d_soft_is_b_[uk] ? numer_b : numer_a) += w;
                 }
                 const double tot = rom1d_soft_node_area_[uai];
@@ -6039,6 +6064,7 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     rom1d_soft_gage_.clear();
     rom1d_soft_area_.clear();
     rom1d_soft_is_b_.clear();
+    rom1d_soft_sub_.clear();
     soft_rain_1d_active_ = false;
     soft_rain_1d_has_a_ = false;
     soft_rain_1d_has_b_ = false;
@@ -6099,6 +6125,7 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     rom1d_soft_gage_.assign(nnz, -1);
     rom1d_soft_area_.assign(nnz, 0.0);
     rom1d_soft_is_b_.assign(nnz, 0);
+    rom1d_soft_sub_.assign(nnz, -1);
 
     // Pass 2: fill the CSR (counts reused as a running cursor).
     std::vector<int> cursor(rom1d_soft_off_.begin(),
@@ -6114,6 +6141,7 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
         if (!sr.configured[ug]) continue;
         const auto k = static_cast<std::size_t>(cursor[static_cast<std::size_t>(ai)]++);
         rom1d_soft_gage_[k] = g;
+        rom1d_soft_sub_[k]  = s;
         rom1d_soft_area_[k] = ctx_.subcatches.area[static_cast<std::size_t>(s)];
         rom1d_soft_is_b_[k] = (sr.family[ug] == uncertainty::DistType::UNIFORM) ? 1 : 0;
     }

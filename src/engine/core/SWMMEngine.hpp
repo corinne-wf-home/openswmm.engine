@@ -72,6 +72,7 @@
 #include "../uncertainty/UncertaintyEnsemble.hpp"
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
+#include "../uncertainty/RunoffElasticity.hpp"
 namespace openswmm::twoD { class Default2DOutputPlugin; }
 #endif
 
@@ -492,6 +493,10 @@ private:
     std::vector<int>    rom1d_soft_gage_;      ///< CSR gage index per configured subcatchment contribution
     std::vector<double> rom1d_soft_area_;      ///< CSR area per contribution
     std::vector<char>   rom1d_soft_is_b_;      ///< CSR: 1 when the contribution's gage is UNIFORM (plane B)
+    std::vector<int>    rom1d_soft_sub_;       ///< CSR: subcatchment index per contribution (SR-6 elasticity lookup)
+    // ---- SR-6: rain->runoff elasticity for the soft-rain spread mapping ----
+    uncertainty::RunoffElasticityProbe rom1d_runoff_probe_;
+    bool rom1d_runoff_elasticity_enabled_ = true;   ///< Internal knob (A/B measurement), default on
     bool soft_rain_1d_active_ = false;         ///< True when any configured gage feeds an active node
     bool soft_rain_1d_has_a_  = false;         ///< Any NORMAL/LOGNORMAL contribution exists
     bool soft_rain_1d_has_b_  = false;         ///< Any UNIFORM contribution exists
@@ -565,6 +570,10 @@ public:
     /// dissipation lambda*K1d. Not parser-exposed; set through the C++ handle
     /// between open() and the first step.
     double& rom1dK1dScale() noexcept { return rom1d_k1d_scale_; }
+    /// SR-6: enable/disable the runoff-elasticity correction of the soft-rain
+    /// spread (default on). Off reproduces the pre-SR-6 mapping bit-for-bit.
+    bool& rom1dRunoffElasticityEnabled() noexcept { return rom1d_runoff_elasticity_enabled_; }
+    const uncertainty::RunoffElasticityProbe& rom1dRunoffProbe() const noexcept { return rom1d_runoff_probe_; }
 private:
     double rom1d_k1d_scale_ = 1.0;
 

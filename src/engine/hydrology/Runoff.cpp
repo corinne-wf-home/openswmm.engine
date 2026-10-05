@@ -241,7 +241,8 @@ void RunoffSolver::init(SimulationContext& ctx) {
 // ============================================================================
 
 void RunoffSolver::execute(SimulationContext& ctx, double dt, double evap_rate_in,
-                           double infil_factor, double recovery_factor, int month) {
+                           double infil_factor, double recovery_factor, int month,
+                           double rain_scale) {
     int n = soa_.n_subcatch;
     if (n == 0) return;
 
@@ -270,6 +271,9 @@ void RunoffSolver::execute(SimulationContext& ctx, double dt, double evap_rate_i
         double rain_inhr = p.rainfall * ucf::UCF(ucf::RAINFALL, ctx.options);
         rain_inhr = ctx.forcing.effective_rainfall(ui, rain_inhr);
         double rain = rain_inhr / ucf::UCF(ucf::RAINFALL, ctx.options);
+        // SR-6: perturbed-member evaluation scales RAIN only (snow is not the
+        // uncertain input). Guarded so the production call (1.0) is untouched.
+        if (rain_scale != 1.0) rain *= rain_scale;
         double snow = ctx.forcing.effective_snowfall(ui, p.snowfall);
         precip_[ui] = rain + snow;
         ctx.subcatches.rainfall[ui] = precip_[ui];  // ft/sec (internal units)
@@ -666,6 +670,47 @@ void RunoffSolver::infil_set_state(int i, int model, const double state[6]) noex
             break;
         }
     }
+}
+
+
+// ============================================================================
+// SR-6: state snapshot for perturbed-member evaluation
+// ============================================================================
+
+RunoffSolver::State RunoffSolver::saveState() const {
+    State st;
+    st.depth_imperv0      = soa_.depth_imperv0;
+    st.depth_imperv1      = soa_.depth_imperv1;
+    st.depth_perv         = soa_.depth_perv;
+    st.old_runoff_imperv0 = soa_.old_runoff_imperv0;
+    st.old_runoff_imperv1 = soa_.old_runoff_imperv1;
+    st.old_runoff_perv    = soa_.old_runoff_perv;
+    st.runoff             = soa_.runoff;
+    st.evap_loss          = soa_.evap_loss;
+    st.infil_loss         = soa_.infil_loss;
+    st.imperv_runoff_cfs  = soa_.imperv_runoff_cfs;
+    st.perv_runoff_cfs    = soa_.perv_runoff_cfs;
+    st.horton             = horton_states_;
+    st.grnampt            = grnampt_states_;
+    st.curvenum           = curvenum_states_;
+    return st;
+}
+
+void RunoffSolver::restoreState(const State& st) {
+    soa_.depth_imperv0      = st.depth_imperv0;
+    soa_.depth_imperv1      = st.depth_imperv1;
+    soa_.depth_perv         = st.depth_perv;
+    soa_.old_runoff_imperv0 = st.old_runoff_imperv0;
+    soa_.old_runoff_imperv1 = st.old_runoff_imperv1;
+    soa_.old_runoff_perv    = st.old_runoff_perv;
+    soa_.runoff             = st.runoff;
+    soa_.evap_loss          = st.evap_loss;
+    soa_.infil_loss         = st.infil_loss;
+    soa_.imperv_runoff_cfs  = st.imperv_runoff_cfs;
+    soa_.perv_runoff_cfs    = st.perv_runoff_cfs;
+    horton_states_          = st.horton;
+    grnampt_states_         = st.grnampt;
+    curvenum_states_        = st.curvenum;
 }
 
 } // namespace runoff

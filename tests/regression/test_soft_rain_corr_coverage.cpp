@@ -388,8 +388,10 @@ TEST(SoftRainCorrCoverage, CorrelatedBandsBracketCorrelatedMonteCarlo) {
     // Checklist floors: coverage >= 0.90, width-ratio in [0.3, 3.0] at >= 0.80.
     // Actuals are printed above and recorded in VALIDATION.md on first run.
     // NOTE (2026-10-04 review): `coverage` is MEDIAN CONTAINMENT, not interval
-    // coverage. C1: RANKING ONLY (~0.68) until SR-6 lands; printed, not asserted.
-    mcq::reportCalibration("CL-1e soft rain, CORR_LEN", member_cov, "SR-6");
+    // coverage. C1: SR-6 raised this cell 0.684 -> 0.827; validated, asserts the
+    // floor (thin margin by design: a numerics change that erodes it must show).
+    EXPECT_TRUE(mcq::reportCalibration("CL-1e soft rain, CORR_LEN", member_cov, "SR-6"))
+        << "CL-1e is a validated cell since SR-6: member coverage must stay >= 0.80 (measured 0.827)";
     EXPECT_GE(coverage, 0.90)
         << "correlated ROM [q05,q95] must contain the correlated-MC median at "
         << ">=90% of samples";

@@ -459,4 +459,78 @@ TEST(SoftRainGageEngine, CorrLenWithoutCoordinatesWarnsAndFallsBackToFull) {
         << "fallback must reproduce the FULL path exactly";
 }
 
+// ---------------------------------------------------------------------------
+// SR-6: runoff-elasticity probe must leave the deterministic path bit-identical
+// ---------------------------------------------------------------------------
+
+struct DetProbe {
+    std::vector<double> heads;        // end-of-run node heads
+    std::vector<double> stat_imperv;  // runoff statistics accumulators
+    std::vector<double> stat_evap;
+    std::vector<double> runoff;
+    int probe_steps = 0;
+    double band = 0.0;
+};
+
+DetProbe runDetProbe(const std::string& inp, const std::string& tag, bool elasticity_on) {
+    DetProbe d;
+    const std::string rpt = g_pfx + tag + ".rpt";
+    const std::string csv = g_pfx + tag + ".uncertainty.csv";
+    SWMM_Engine handle = swmm_engine_create();
+    if (swmm_engine_open(handle, inp.c_str(), rpt.c_str(), nullptr, nullptr) != SWMM_OK) return d;
+    auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    eng->rom1dRunoffElasticityEnabled() = elasticity_on;
+    if (swmm_engine_initialize(handle) != SWMM_OK || swmm_engine_start(handle, 0) != SWMM_OK) return d;
+    runToEnd(handle);
+    d.heads       = eng->context().nodes.head;
+    d.stat_imperv = eng->context().subcatches.stat_imperv_vol;
+    d.stat_evap   = eng->context().subcatches.stat_evap_vol;
+    d.runoff      = eng->context().subcatches.runoff;
+    d.probe_steps = eng->rom1dRunoffProbe().steps();
+    swmm_engine_end(handle); swmm_engine_close(handle); swmm_engine_destroy(handle);
+    bool found = false;
+    d.band = maxBandWidth(csv, found);
+    return d;
+}
+
+TEST(SoftRainGageEngine, RunoffElasticityProbeLeavesDeterministicPathBitIdentical) {
+    // Same model, probe off vs on. The deterministic heads, the runoff
+    // statistics accumulators and the final runoff rates must be EQUAL (not
+    // near): the perturbed members run on a swapped-in copy of the solver
+    // state and every ctx array execute() writes is restored. The band itself
+    // must differ (the probe is doing work) and the probe must have stepped.
+    const std::string inp = g_pfx + "sr6_bitid.inp";
+    writeChainInp(inp, "RG1 NORMAL CV 0.30");
+    const DetProbe off = runDetProbe(inp, "sr6_off", false);
+    const DetProbe on  = runDetProbe(inp, "sr6_on",  true);
+    ASSERT_FALSE(off.heads.empty());
+    ASSERT_EQ(on.heads.size(), off.heads.size());
+    for (std::size_t i = 0; i < off.heads.size(); ++i)
+        EXPECT_EQ(on.heads[i], off.heads[i]) << "node " << i;
+    for (std::size_t i = 0; i < off.stat_imperv.size(); ++i) {
+        EXPECT_EQ(on.stat_imperv[i], off.stat_imperv[i]) << "stat_imperv " << i;
+        EXPECT_EQ(on.stat_evap[i],   off.stat_evap[i])   << "stat_evap " << i;
+        EXPECT_EQ(on.runoff[i],      off.runoff[i])      << "runoff " << i;
+    }
+    EXPECT_EQ(off.probe_steps, 0);
+    EXPECT_GT(on.probe_steps, 0) << "probe never advanced";
+    EXPECT_GT(on.band, off.band) << "elasticity > 1 on the rising limb must widen the band";
+}
+
+TEST(SoftRainGageEngine, NoSoftRainMeansNoProbeAtAll) {
+    // Without a [SOFT_RAINGAGES] section the probe must not even seed: every
+    // non-soft-rain run is untouched by SR-6.
+    const std::string inp = g_pfx + "sr6_nosoft.inp";
+    writeChainInp(inp, nullptr);
+    SWMM_Engine handle = swmm_engine_create();
+    ASSERT_EQ(swmm_engine_open(handle, inp.c_str(), (g_pfx + "sr6_nosoft.rpt").c_str(), nullptr, nullptr), SWMM_OK);
+    ASSERT_EQ(swmm_engine_initialize(handle), SWMM_OK);
+    ASSERT_EQ(swmm_engine_start(handle, 0), SWMM_OK);
+    runToEnd(handle);
+    auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    EXPECT_FALSE(eng->rom1dRunoffProbe().seeded());
+    EXPECT_EQ(eng->rom1dRunoffProbe().steps(), 0);
+    swmm_engine_end(handle); swmm_engine_close(handle); swmm_engine_destroy(handle);
+}
+
 } // anonymous namespace

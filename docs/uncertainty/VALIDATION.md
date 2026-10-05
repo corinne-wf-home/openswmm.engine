@@ -537,31 +537,42 @@ law), M-independent (the band is a scaled deterministic response), K1d- and
 pipe-independent (it sits upstream of routing), and only mildly
 time-dependent (the subcatchments slowly approach equilibrium).
 
-## 3. What this means for SR-6
+## 3. The fix (SR-6, 2026-10-05) and its result
 
-The fix is not in the ROM's ODE but in the **spread mapping**: the gage spread
-must be propagated through the rain → runoff transformation, not applied as if
-runoff were linear in rain. Three ways, for the design step:
+Implemented as design (A), refined: a **single-step trial cannot see the
+elasticity** (most of it is in the accumulated ponded depth, not in one step's
+rain), so the engine carries **two persistent perturbed runoff states** at
+rain × (1 ± 0.1), advanced through the unmodified production kernel every
+runoff step with the same arguments as the deterministic call
+(`uncertainty::RunoffElasticityProbe`, `RunoffSolver::saveState/restoreState`,
+a `rain_scale` argument that is a no-op at 1.0). Per subcatchment,
+`E_s = ln(q₊/q₋) / ln(1.1/0.9)`, and the soft-rain spread uses `CV·E_s`
+instead of `CV`. Active only when gage-level soft rain is configured. Cost:
+two extra runoff-kernel calls per *runoff* step.
 
-- **(A) Local runoff elasticity.** Each runoff step, evaluate the subcatchment
-  kernel at rain × (1 ± δ) without committing state, take `E_s =
-  ∂ln q / ∂ln rain`, and use `rel_s = CV · E_s` in the node spread. Two extra
-  kernel evaluations per subcatchment per *runoff* step (minutes, not routing
-  steps); needs a non-mutating trial evaluation of the kernel.
-- **(B) Ensemble runoff.** Run the Phase-3 `RunoffEnsemble` (M per-member
-  runoff states) and feed `SpectralROM1D::setEnsembleRunoff` per-member inflow
-  rates. Exact, no linearisation; costs M × runoff per runoff step, and the
-  RunoffEnsemble source is not in the engine build yet. The right *validation
-  reference* for (A), and a possible opt-in mode.
-- **(C) Closed-form elasticity** of the overland kinematic wave — no general
-  closed form on the rising limb; rejected.
+| Cell | Before SR-6: width ratio min / med / max, member coverage | After SR-6 | C1 status |
+|---|---|---|---|
+| SR-5 soft rain, FULL (CV 0.20) | 0.632 / 0.710 / 0.751, **0.761** | 0.863 / **0.976** / 0.984, **0.881** | **calibrated**, asserted |
+| CL-1e soft rain, CORR_LEN (CV 0.40, ℓ = 120 m) | 0.379 / 0.570 / 0.700, **0.684** | 0.543 / **0.804** / 0.942, **0.827** | **calibrated**, asserted |
+| CL-1e downstream narrowing, ℓ = 30 m | 0.563 | 0.565 | the feature's point, unchanged |
 
-Recommendation (F): implement (A); use (B) as the reference when validating
-(A), and measure (B)'s cost before offering it. Acceptance stays as written:
-SR-5 and CL-1e member coverage ≥ 0.80 with no floor edits. The `FORCING_VECTOR`
-`INFLOW` path is unaffected (an inflow perturbation has elasticity 1 by
-definition). The correlated (CL-1e) shortfall should close by the same factor
-since the elasticity is per-subcatchment, not per-coherence-mode.
+Robustness of SR-5 with the correction on: CV 0.10 → 0.886, CV 0.40 → 0.901;
+5,000 ft flow path (elasticity 1.64) → 0.851; equilibrium subcatchments →
+0.902; M = 20 → 0.881 (identical to M = 50). With the correction off
+(`SR5_RUNOFF_ELASTICITY=0`) every pre-SR-6 number reproduces exactly.
+
+**Deterministic path bit-identical, tested**: end-of-run node heads, runoff
+statistics accumulators and runoff rates are `EXPECT_EQ`-equal with the probe
+on and off (`RunoffElasticityProbeLeavesDeterministicPathBitIdentical`), and a
+model with no `[SOFT_RAINGAGES]` never seeds the probe.
+
+**Not covered (documented approximations)**: LID surface runoff is added to
+the subcatchment runoff after the kernel and is not perturbed; cascaded
+subcatchments' members read the deterministic run-on. Both leave E_s at the
+non-LID, non-cascaded value. Design (B), the full `RunoffEnsemble`, was not
+needed: the gates' brute-force Monte Carlo *is* the exact reference, and (A)
+reaches 0.88 against a 0.905 ceiling.
+
 
 ---
 

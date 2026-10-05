@@ -76,6 +76,9 @@ list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/UncertaintyEnsemble.cpp)
 # it landed here (two definitions of one class in one process is the ODR
 # hazard this file's test notes already warn about).
 list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/SpdeSpatialBasis.cpp)
+# SR-6 (2026-10-05): per-subcatchment runoff elasticity for the soft-rain spread
+# mapping (two perturbed runoff states through the unmodified kernel).
+list(APPEND OPENSWMM_ENGINE_SOURCES uncertainty/RunoffElasticity.cpp)
 
 file(GLOB_RECURSE OPENSWMM_ENGINE_HEADERS
     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}

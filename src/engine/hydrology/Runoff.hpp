@@ -104,7 +104,27 @@ public:
      */
     void execute(SimulationContext& ctx, double dt, double evap_rate = 0.0,
                  double infil_factor = 1.0, double recovery_factor = 1.0,
-                 int month = -1);
+                 int month = -1, double rain_scale = 1.0);
+
+    /**
+     * @brief Snapshot of everything execute() mutates inside the solver (SR-6).
+     *
+     * Lets the uncertainty sidecar advance PERTURBED copies of the runoff state
+     * through the unmodified production kernel: save, swap a copy in, run
+     * execute(), swap back. Plain vector copies, so a save/restore round trip
+     * is exact and the deterministic path is bit-identical. Does NOT cover the
+     * ctx.subcatches arrays execute() writes; the caller restores those.
+     */
+    struct State {
+        std::vector<double> depth_imperv0, depth_imperv1, depth_perv;
+        std::vector<double> old_runoff_imperv0, old_runoff_imperv1, old_runoff_perv;
+        std::vector<double> runoff, evap_loss, infil_loss, imperv_runoff_cfs, perv_runoff_cfs;
+        std::vector<HortonState>    horton;
+        std::vector<GreenAmptState> grnampt;
+        std::vector<CurveNumState>  curvenum;
+    };
+    State saveState() const;
+    void  restoreState(const State& st);
 
     const RunoffSoA& soa() const { return soa_; }
 
