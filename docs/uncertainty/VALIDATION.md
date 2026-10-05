@@ -98,6 +98,20 @@ with margin for solver noise across platforms.
 
 # Soft-Rainfall ROM vs Monte Carlo — Validation (SR-5)
 
+> **Metric correction, 2026-10-04 (cross-vendor review of PR SP3).** Two defects
+> in this gate's metrics, shared by its correlated sibling and by the PR-10
+> harness idiom: (1) the MC "q95 − q05" was `h[19] − h[1]` of 21 members, the
+> 0.071–0.929 span, ~11% narrower than the true 5–95 span, so every width ratio
+> below was biased **high by ~12%**; (2) "coverage" counted only whether the MC
+> **median** lay inside the ROM band, which is median containment, not interval
+> coverage. Both soft-rain gates now use midpoint-plotting-position quantiles
+> (the ROM's own convention, `tests/regression/mc_quantiles.hpp`) and also report
+> the empirical fraction of MC members inside the ROM band. Corrected numbers are
+> in §2a. The PR-10 harness (`test_rom_coverage.cpp`, three sites) still uses the
+> old idiom; its recorded ratios (0.102 / 0.033 / 1.031 / 1.354) should be read
+> as ~12% high and its "coverage" as median containment — not corrected here,
+> since those numbers underpin the H5/H11 record and deserve their own pass.
+
 Status: measured results from `tests/regression/test_soft_rain_coverage.cpp`
 (2026-07-16). Analog of the reform PR-10 experiment above, for the soft-rainfall
 location-scale forcing path instead of the Manning's-n parameter.
@@ -142,7 +156,16 @@ registered and run **with no expectation edits**:
 |---|---|---|
 | Coverage | 1.000 (60/60) | **1.000** (60/60) |
 | Width ratio in [0.3, 3.0] | 1.000 (35/35) | **1.000** (35/35) |
-| Width ratio min / median / max | 0.754 / 0.821 / 0.872 | **0.731 / 0.822 / 0.869** |
+| Width ratio min / median / max | 0.754 / 0.821 / 0.872 | ~~0.731 / 0.822 / 0.869~~ (old idiom) |
+
+**Corrected (2026-10-04, midpoint quantiles):** width ratio **0.632 / 0.710 /
+0.751**; median containment 1.000; **empirical member coverage 0.761 overall,
+0.769 in the saturated regime, against a nominal 0.905** (19 of 21 strata
+midpoints lie in [0.05, 0.95]). The under-coverage is the width under-prediction
+seen from the other side: a band 0.71× the MC width around a normal spread
+captures about 0.76 of the mass, which is what was measured. Nothing is gated on
+member coverage yet; a floor for it is a validation-design decision (see the
+checklist's open decisions), not something to invent to make the gate green.
 
 The median reproduces to three digits. The min and max moved by about 0.02 and
 0.003, so the run is close to but **not bit-identical** with July's. The base
@@ -371,17 +394,24 @@ gate (`tests/regression/test_soft_rain_corr_coverage.cpp`) was registered and ru
 
 | Metric | July (pre-port line, CL-1e) | SP3 re-port |
 |---|---|---|
-| Coverage, ROM [q05,q95] ∋ correlated-MC median | ≥ 0.90 floor | **1.000** (60/60) |
+| Median containment, ROM [q05,q95] ∋ correlated-MC median | ≥ 0.90 floor | **1.000** (60/60) |
+| **Empirical member coverage** (fraction of MC members inside the ROM band; nominal 0.905) | not gated | **0.684** overall, **0.652** saturated |
 | Width ratio in [0.3, 3.0], saturated regime | ≥ 0.80 floor | **1.000** (35/35) |
-| Width ratio min / median / max | see CL-1e section | **0.436 / 0.659 / 0.806** |
+| Width ratio min / median / max (midpoint quantiles) | see CL-1e section | **0.379 / 0.570 / 0.700** |
 | J5 band, correlated (ℓ = 30 m) ÷ comonotone | < 1 required | **0.563** |
+
+*Corrected 2026-10-04 after cross-vendor review; the first-run values 0.436 /
+0.659 / 0.806 used the biased `h[19] − h[1]` MC width and "coverage" meant
+median containment (see the SR-5 section's correction banner).*
 
 The MC reference is built from `CorrelatedFieldGenerator` (the CL-1 rank/copula
 field) while the engine now uses the SPDE Matérn ν = 2 basis, so this is a
-cross-method comparison, not a self-check. The ROM median band is about 0.66 of
-the correlated MC band, narrower than the comonotone case's 0.82 (SR-5), which
-is consistent with the delta-linearization under-prediction compounding with
-spatial cancellation.
+cross-method comparison, not a self-check. The ROM median band is about 0.57 of
+the correlated MC band, narrower than the comonotone case's 0.71 (SR-5), and the
+member coverage of 0.65–0.68 against a nominal 0.905 is that under-prediction
+seen from the other side. Correlated bands from this path are therefore
+**narrower than the reference by a factor the gate's floors do not catch**; the
+floors were set on width-ratio bands and median containment.
 
 ## 2. Findings
 
