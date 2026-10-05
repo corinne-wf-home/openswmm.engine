@@ -388,8 +388,8 @@ TEST(SoftRainCorrCoverage, CorrelatedBandsBracketCorrelatedMonteCarlo) {
     // Checklist floors: coverage >= 0.90, width-ratio in [0.3, 3.0] at >= 0.80.
     // Actuals are printed above and recorded in VALIDATION.md on first run.
     // NOTE (2026-10-04 review): `coverage` is MEDIAN CONTAINMENT, not interval
-    // coverage; empirical member coverage is printed and recorded, not gated
-    // (see test_soft_rain_coverage.cpp for why).
+    // coverage. C1: RANKING ONLY (~0.68) until SR-6 lands; printed, not asserted.
+    mcq::reportCalibration("CL-1e soft rain, CORR_LEN", member_cov, "SR-6");
     EXPECT_GE(coverage, 0.90)
         << "correlated ROM [q05,q95] must contain the correlated-MC median at "
         << ">=90% of samples";

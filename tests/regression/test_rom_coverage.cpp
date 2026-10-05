@@ -390,6 +390,8 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
                 "min/med/max = %.3f / %.3f / %.3f  (in-band frac %.3f of %d)\n",
                 n_total, coverage, member_cov_sum / n_total, ratio_min, ratio_med, ratio_max,
                 width_frac, n_width);
+    // C1: this cell is known to be spin-up-limited (P4 root cause); fix = P8.
+    mcq::reportCalibration("PR-10 free-surface chain", member_cov_sum / n_total, "P8");
 
     // Measured on the first full run (2026-07-08, this fixture):
     //   coverage = 0.997 (294/295), width ratio min/med/max =
@@ -660,6 +662,10 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
                 "surcharged_frac=%.3f  (n_width=%d)\n",
                 label, r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med,
                 r.ratio_max, r.surcharged_frac, r.n_width);
+
+    // C1: EXPLICIT is a documented limitation; SEMI_IMPLICIT's fix is H5b.
+    mcq::reportCalibration(label, r.member_cov,
+                           std::string(label) == "EXPLICIT" ? "documented limitation (H5)" : "H5b");
 
     // The regime precondition itself: this fixture must actually be
     // surcharged for most of the window, or the band-width comparison below
@@ -991,6 +997,10 @@ TEST(RomCoverageFront, PhaseCoordinate) {
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  (n_width=%d)\n",
                 r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
 
+    // C1 (2026-10-05): H11 claims a calibrated band, so it asserts the floor.
+    EXPECT_TRUE(mcq::reportCalibration("H11 front, phase coordinate", r.member_cov, "-"))
+        << "H11 is a 'validated' cell: member coverage must stay >= 0.80 (measured 0.83 on 2026-10-04)";
+
     // H11's acceptance bounds (HSYM_RESIDUALS_PR_CHECKLIST.md, PR H11):
     // coverage >= 0.90, width-ratio median in [0.5, 2.0]. Per standing rule
     // 1.2, these are the checklist's own numbers, not adjusted from what was
@@ -1020,4 +1030,5 @@ TEST(RomCoverageFront, AmplitudeOnlyBaseline) {
     std::printf("[ROM-vs-MC FRONT AmplitudeOnlyBaseline] samples=%d  median-containment=%.3f  member-coverage=%.3f  "
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  (n_width=%d)\n",
                 r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
+    mcq::reportCalibration("H11 amplitude-only baseline", r.member_cov, "superseded by H11 (ungated baseline)");
 }

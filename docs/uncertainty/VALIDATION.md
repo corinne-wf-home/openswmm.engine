@@ -11,19 +11,27 @@ own convention) and report **empirical member coverage**: the fraction of MC
 members inside the ROM's q05–q95 band, nominal 0.905 for 21 strata midpoints
 (≈0.92 for the 2D test's 25). **Gate verdicts did not change.** The numbers did.
 
-## 1. Every MC cell, corrected
+## 1. Every MC cell, corrected — with the C1 status
 
-| Gate / cell | Width ratio median, old → corrected | Member coverage | Verdict |
-|---|---|---|---|
-| PR-10 free-surface chain (deliberately red) | 0.102 → **0.097** | **0.20** | red, unchanged |
-| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged |
-| H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] |
-| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] |
-| H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated |
-| SR-5 soft rain, FULL | 0.822 → **0.710** | **0.76** | passes |
-| CL-1e soft rain, CORR_LEN | 0.659 → **0.570** | **0.68** | passes |
-| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes |
-| W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass |
+**C1 decision (owner, 2026-10-05).** A cell is **calibrated** when its empirical
+member coverage is ≥ 0.80 (the 21-member LHS ceiling is 0.905; 0.80 leaves one
+member of granularity). Below that it is **ranking only**: the band still shows
+where uncertainty concentrates and which nodes are more uncertain than others,
+but is not a 90% interval. Ranking-only cells stay registered, print their
+number and their fix PR (every run prints a `[C1]` line per cell), and are never
+loosened. Cells that claim "validated" assert the floor.
+
+| Gate / cell | Width ratio median, old → corrected | Member coverage | Gate verdict | **C1 status** |
+|---|---|---|---|---|
+| PR-10 free-surface chain (deliberately red) | 0.102 → **0.097** | **0.20** | red, unchanged | ranking only → **P8** |
+| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged | ranking only, documented limitation |
+| H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] | ranking only → **H5b** |
+| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] | **calibrated** (asserted ≥ 0.80) |
+| H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated | superseded by H11 |
+| SR-5 soft rain, FULL | 0.822 → **0.710** | **0.76** | passes | ranking only → **SR-6** |
+| CL-1e soft rain, CORR_LEN | 0.659 → **0.570** | **0.68** | passes | ranking only → **SR-6** |
+| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (asserted ≥ 0.80) → breadth: **W4** |
+| W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass | reference rungs, ungated |
 
 (The 2D test compares 25 like-for-like members under the same `round(p·(M−1))`
 rule on both sides, so its gated width ratio is a fair same-rule comparison and
@@ -79,13 +87,12 @@ testable lead (the ratio should move with K1d), not yet tested. It belongs to
 whoever revisits the forcing-channel formulation (F/O48 class), not to a test
 tolerance.
 
-## 5. Decision put to the owner: a member-coverage floor
+## 5. The member-coverage floor — decided
 
-Nothing is gated on member coverage. If a floor is adopted, the measured range is
-0.05–0.83 across cells, with 0.905 nominal. A floor at 0.80 would currently pass
-only H11 and the 2D "adv" rung; 0.70 adds SR-5; 0.50 adds H5 SEMI_IMPLICIT. The
-choice is a statement about what the bands are for (ranking vs calibrated
-interval) and should be made once, in the checklist, not per test.
+Decided 2026-10-05 (C1): floor 0.80, applied uniformly in one commit; see the
+status column in §1. Two cells are calibrated and assert it (H11, 2D production
+rung). Everything else is ranking only with a named fix PR. No floor was
+lowered anywhere to make a cell pass.
 
 ## 6. Reproduction
 
