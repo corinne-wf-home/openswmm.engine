@@ -327,11 +327,10 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     // expected mild under-prediction of the delta-linearized soft forcing —
     // but it brackets every MC median and stays well inside [0.3x, 3x].
     // NOTE (2026-10-04 review): `coverage` is MEDIAN CONTAINMENT, not interval
-    // coverage. The empirical member coverage is printed above and recorded in
-    // VALIDATION.md; it is NOT gated here because a floor for it is a
-    // validation-design decision (checklist rule 2: no tolerance is invented to
-    // make a spread test green). Expect it below the nominal 0.905 by about the
-    // same factor the width ratio is below 1.
+    // coverage. C1 (owner, 2026-10-05): calibrated means member coverage >= 0.80;
+    // this cell measures ~0.76 and is RANKING ONLY until SR-6 lands. Printed,
+    // not asserted -- no tolerance is invented to make a spread test green.
+    mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, "SR-6");
     EXPECT_GE(coverage, 0.90)
         << "ROM [q05,q95] must contain the MC median at >=90% of samples";
     EXPECT_GE(width_frac, 0.80)

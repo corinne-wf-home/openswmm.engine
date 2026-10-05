@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <vector>
 
 namespace mcq {
@@ -52,6 +53,22 @@ inline double intervalCoverage(const std::vector<double>& values, double lo, dou
     std::size_t inside = 0;
     for (double v : values) if (v >= lo && v <= hi) ++inside;
     return static_cast<double>(inside) / static_cast<double>(values.size());
+}
+
+/// C1 decision (owner, 2026-10-05): a cell is CALIBRATED when its empirical
+/// member coverage is >= kCalibratedFloor; otherwise it is RANKING ONLY --
+/// still registered, still printing, documented with its fix PR, never
+/// loosened. Cells that claim "validated" assert on this; others only print.
+constexpr double kCalibratedFloor = 0.80;
+
+/// Prints the C1 verdict line for a cell and returns whether it is calibrated.
+inline bool reportCalibration(const char* cell, double member_cov, const char* fix_pr) {
+    const bool ok = member_cov >= kCalibratedFloor;
+    std::printf("[C1] %-32s member-coverage=%.3f  -> %s%s%s\n", cell, member_cov,
+                ok ? "CALIBRATED (>= 0.80)" : "RANKING ONLY (< 0.80",
+                ok ? "" : "; fix: ", ok ? "" : fix_pr);
+    if (!ok) std::printf("[C1] %-32s %s\n", "", ")");
+    return ok;
 }
 
 }  // namespace mcq
