@@ -1,3 +1,101 @@
+# Interval-coverage audit of every ROM-vs-MC gate (P7, 2026-10-04)
+
+Follow-up to the SP3 cross-vendor review. Two metric defects were shared by
+every 1D ROM-vs-MC gate written since PR 10: the 21-member MC "q95 − q05" was
+`h[19] − h[1]` (the 0.071–0.929 span, ~11% narrow), and "coverage" meant *the MC
+median lies inside the ROM band*. The second is close to tautological under the
+deviation form: the ROM median tracks the deterministic run by construction and
+the MC median sits near it, so any band of nonzero width "covers". All gates now
+use midpoint plotting positions (`tests/regression/mc_quantiles.hpp`, the ROMs'
+own convention) and report **empirical member coverage**: the fraction of MC
+members inside the ROM's q05–q95 band, nominal 0.905 for 21 strata midpoints
+(≈0.92 for the 2D test's 25). **Gate verdicts did not change.** The numbers did.
+
+## 1. Every MC cell, corrected
+
+| Gate / cell | Width ratio median, old → corrected | Member coverage | Verdict |
+|---|---|---|---|
+| PR-10 free-surface chain (deliberately red) | 0.102 → **0.097** | **0.20** | red, unchanged |
+| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged |
+| H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] |
+| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] |
+| H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated |
+| SR-5 soft rain, FULL | 0.822 → **0.710** | **0.76** | passes |
+| CL-1e soft rain, CORR_LEN | 0.659 → **0.570** | **0.68** | passes |
+| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes |
+| W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass |
+
+(The 2D test compares 25 like-for-like members under the same `round(p·(M−1))`
+rule on both sides, so its gated width ratio is a fair same-rule comparison and
+was left as the gated quantity; the midpoint-span ratio is reported beside it.)
+
+## 2. What the member coverage says that the width ratio did not
+
+- **H5 SEMI_IMPLICIT: median width ratio ≈ 1 but member coverage 0.51.** The
+  band is the right width *on median* yet misses half the outcomes. The width
+  ratio ranges 0.000–2.67 across samples, so "lands almost exactly on 1.0" (the
+  H5 record) described the median of a very wide distribution, not a calibrated
+  band. The band is mis-centred or mis-sized sample by sample. This is the most
+  consequential correction in the table.
+- **W3 2D "adv": over-wide (1.3×) yet member coverage only 0.82.** Same pattern:
+  width is not the whole story; centring is.
+- **H11 phase coordinate** is the best-calibrated cell measured (0.83), and the
+  amplitude-only baseline (0.05) shows how badly the pre-H11 band missed.
+- **Soft-rain paths** under-cover (0.76 / 0.68) by exactly the amount their width
+  deficit predicts; they are not mis-centred.
+
+## 3. Member count is a cost knob, not a calibration knob (SR-5 sweep)
+
+| M (ROM members) | width ratio min / med / max | member coverage |
+|---|---|---|
+| 20 | 0.632 / 0.710 / 0.751 | 0.761 |
+| 50 (default) | 0.632 / 0.710 / 0.751 | 0.761 |
+| 100 | 0.632 / 0.710 / 0.751 | 0.761 |
+| 200 | 0.632 / 0.710 / 0.751 | 0.761 |
+
+Identical to three decimals. The ROM's q05/q95 sit on exact LHS strata midpoints,
+and the forcing channel is linear in the per-member coefficient, so M changes
+nothing about the band here except cost (O(M·k) per step). M = 20 reproduces
+M = 200. Raising M will not improve coverage on this path.
+
+## 4. The soft-rain under-dispersion is a formulation constant (SR-5 sweeps)
+
+| CV | width ratio min / med / max | member coverage |
+|---|---|---|
+| 0.10 | 0.629 / 0.708 / 0.749 | 0.762 |
+| 0.20 | 0.632 / 0.710 / 0.751 | 0.761 |
+| 0.40 | 0.640 / 0.720 / 0.760 | 0.762 |
+
+Independent of CV, so **not** a nonlinearity of the rain → runoff → routing
+response (that would grow with CV). Per report time (CV 0.20): the ratio is
+0.65 at t = 300 s, peaks at 0.74 around 1500 s, and drifts down to 0.68 at
+3600 s, while both ROM and MC widths grow steadily. A near-constant factor of
+≈0.7 present from the first report, with a mild late decline, and insensitive to
+CV and M, is a property of how the forcing channel is formulated: the
+deviation-form modal ODE dissipates at `λ_j·K1d` while the storage-dominated
+fixture integrates rain-rate deviations without loss, so the ROM carries less of
+the accumulated forcing uncertainty than the physical system does. That is a
+testable lead (the ratio should move with K1d), not yet tested. It belongs to
+whoever revisits the forcing-channel formulation (F/O48 class), not to a test
+tolerance.
+
+## 5. Decision put to the owner: a member-coverage floor
+
+Nothing is gated on member coverage. If a floor is adopted, the measured range is
+0.05–0.83 across cells, with 0.905 nominal. A floor at 0.80 would currently pass
+only H11 and the 2D "adv" rung; 0.70 adds SR-5; 0.50 adds H5 SEMI_IMPLICIT. The
+choice is a statement about what the bands are for (ranking vs calibrated
+interval) and should be made once, in the checklist, not per test.
+
+## 6. Reproduction
+
+    build/<dir>/tests/regression/test_rom_coverage            # all five 1D cells
+    build/<dir>/tests/regression/test_soft_rain_coverage      # SR5_CV=… SR5_MEMBERS=… SR5_TRACE=1
+    build/<dir>/tests/regression/test_soft_rain_corr_coverage
+    build/<dir>/tests/regression/test_2d_rom_marcher_coverage
+
+---
+
 # ROM vs Brute-Force Monte Carlo — Validation Report (Reform PR 10)
 
 Status: measured results from `tests/regression/test_rom_coverage.cpp`
@@ -107,10 +205,9 @@ with margin for solver noise across platforms.
 > coverage. Both soft-rain gates now use midpoint-plotting-position quantiles
 > (the ROM's own convention, `tests/regression/mc_quantiles.hpp`) and also report
 > the empirical fraction of MC members inside the ROM band. Corrected numbers are
-> in §2a. The PR-10 harness (`test_rom_coverage.cpp`, three sites) still uses the
-> old idiom; its recorded ratios (0.102 / 0.033 / 1.031 / 1.354) should be read
-> as ~12% high and its "coverage" as median containment — not corrected here,
-> since those numbers underpin the H5/H11 record and deserve their own pass.
+> in §2a. The PR-10 harness (`test_rom_coverage.cpp`, three sites) was corrected the
+> same day (P7); every cell's corrected numbers and the empirical member
+> coverage of ALL nine MC cells are in the "Interval-coverage audit" section.
 
 Status: measured results from `tests/regression/test_soft_rain_coverage.cpp`
 (2026-07-16). Analog of the reform PR-10 experiment above, for the soft-rainfall
