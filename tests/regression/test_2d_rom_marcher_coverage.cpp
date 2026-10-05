@@ -90,6 +90,7 @@
 #include "2d/uncertainty/DeviationOperator2D.hpp"
 #include "2d/uncertainty/MeshEigenBasis.hpp"
 #include "2d/uncertainty/SpectralROM.hpp"
+#include "mc_quantiles.hpp"
 
 using namespace openswmm::twoD;
 
@@ -372,6 +373,8 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0,
 struct RungScore {
     int    samples = 0;
     double coverage = 0.0, ratio_med = 0.0, w_frac = 0.0;
+    double member_cov = 0.0;      // empirical interval coverage (nominal ~0.92 for 25 midpoints in [0.06,0.94])
+    double ratio_med_mid = 0.0;   // width ratio vs midpoint-interpolated 5-95 MC span
     bool passes() const {
         return coverage >= 0.90 && w_frac >= 0.80 &&
                ratio_med >= 0.5 && ratio_med <= 2.0;
@@ -386,6 +389,8 @@ RungScore scoreBands(const RomBands& bands, const MeshData& mesh0,
     const int hi = static_cast<int>(std::round(0.95 * (kM - 1)));
 
     int n_tot = 0, n_cov = 0, n_w = 0, n_w_ok = 0;
+    double member_cov_sum = 0.0;
+    std::vector<double> ratios_mid;
     std::vector<double> ratios;
     std::vector<double> hc(kM);
 
@@ -405,6 +410,17 @@ RungScore scoreBands(const RomBands& bands, const MeshData& mesh0,
             ++n_tot;
             if (bands.q05[ur][uc] <= mc_med && mc_med <= bands.q95[ur][uc])
                 ++n_cov;
+            // 2026-10-04 review: `coverage` above is MEDIAN CONTAINMENT. Report
+            // the empirical member coverage too, and the width ratio against a
+            // midpoint-interpolated 5-95 span (the like-for-like same-index
+            // ratio below is kept as the gated quantity: both sides use
+            // round(p*(M-1)) at M=25, i.e. the 0.06-0.94 span).
+            member_cov_sum += mcq::intervalCoverage(hc, bands.q05[ur][uc], bands.q95[ur][uc]);
+            {
+                const double w_mid = mcq::quantileMidpoint(hc, 0.95) - mcq::quantileMidpoint(hc, 0.05);
+                if (w_mid > 1e-6)
+                    ratios_mid.push_back((bands.q95[ur][uc] - bands.q05[ur][uc]) / w_mid);
+            }
             if (mc_w > 1e-6) {
                 const double ratio =
                     (bands.q95[ur][uc] - bands.q05[ur][uc]) / mc_w;
@@ -418,6 +434,11 @@ RungScore scoreBands(const RomBands& bands, const MeshData& mesh0,
     RungScore s;
     s.samples  = n_tot;
     s.coverage = n_tot ? static_cast<double>(n_cov) / n_tot : 0.0;
+    s.member_cov = n_tot ? member_cov_sum / n_tot : 0.0;
+    if (!ratios_mid.empty()) {
+        std::sort(ratios_mid.begin(), ratios_mid.end());
+        s.ratio_med_mid = ratios_mid[ratios_mid.size() / 2];
+    }
     s.w_frac   = n_w ? static_cast<double>(n_w_ok) / n_w : 0.0;
     if (!ratios.empty()) {
         std::sort(ratios.begin(), ratios.end());
@@ -466,11 +487,11 @@ TEST(Rom2dMarcherCoverage, ProductionRungBandsBracketMarcherMonteCarlo) {
         ASSERT_TRUE(bands.ok) << "rung " << rungName(rungs[q])
                               << ": operator assembly failed";
         scores[q] = scoreBands(bands, mesh0, mc);
-        std::printf("[2D-ROM-vs-marcher] %s coverage=%.3f width-med=%.3f "
-                    "in[0.3,3]=%.3f (n=%d)%s\n",
-                    rungName(rungs[q]), scores[q].coverage,
-                    scores[q].ratio_med, scores[q].w_frac, scores[q].samples,
-                    scores[q].passes() ? "  [PASSES FLOORS]" : "");
+        std::printf("[2D-ROM-vs-marcher] %s median-containment=%.3f member-coverage=%.3f "
+                    "width-med=%.3f (vs 5-95 midpoint span %.3f) in[0.3,3]=%.3f (n=%d)%s\n",
+                    rungName(rungs[q]), scores[q].coverage, scores[q].member_cov,
+                    scores[q].ratio_med, scores[q].ratio_med_mid, scores[q].w_frac,
+                    scores[q].samples, scores[q].passes() ? "  [PASSES FLOORS]" : "");
     }
 
     ASSERT_GT(scores[0].samples, 0) << "MC produced no wet samples";

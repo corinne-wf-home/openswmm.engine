@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -51,7 +52,19 @@
 namespace {
 
 constexpr double kBaseRainInHr = 1.0;     // location rain rate (in/hr)
-constexpr double kCV           = 0.20;    // NORMAL coefficient of variation
+// Sweep hooks (2026-10-04): SR5_CV overrides the CV, SR5_MEMBERS the ROM
+// ensemble size (via a [2D_ROM] MEMBERS line, which buildROM1D inherits).
+// SR5_TRACE=1 prints every (node, time) width ratio. Defaults reproduce the
+// gate exactly; the hooks exist for the calibration sweeps recorded in
+// VALIDATION.md ("Interval-coverage audit") and are not used by ctest.
+inline double envDouble(const char* name, double dflt) {
+    const char* v = std::getenv(name); return (v && *v) ? std::atof(v) : dflt;
+}
+inline int envInt(const char* name, int dflt) {
+    const char* v = std::getenv(name); return (v && *v) ? std::atoi(v) : dflt;
+}
+static const double kCV        = envDouble("SR5_CV", 0.20);    // NORMAL coefficient of variation
+static const int    kMembers   = envInt("SR5_MEMBERS", 0);      // 0 = engine default (50)
 constexpr int    kMcRuns       = 21;
 constexpr double kReportStep   = 300.0;   // s (5 min)
 constexpr double kEndTime      = 3600.0;  // s (1 h sampling window)
@@ -103,8 +116,10 @@ std::string fixtureInp(double rain_mult, bool with_soft) {
     for (int i = 1; i <= 5; ++i)
         f << "C" << i << " CIRCULAR 0.5 0 0 0 1\n";
     f << "\n[REPORT]\nINPUT NO\nCONTINUITY YES\nNODES ALL\nLINKS ALL\n\n";
-    if (with_soft)
+    if (with_soft) {
         f << "[SOFT_RAINGAGES]\nRG1 NORMAL CV " << kCV << "\n";
+        if (kMembers >= 2) f << "\n[2D_ROM]\nMEMBERS " << kMembers << "\n";
+    }
     return f.str();
 }
 
@@ -270,6 +285,11 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
             // the deviation-form spread starts at zero and grows toward its
             // parametric steady state, so early-window under-prediction is
             // expected (DEVIATION_FORM.md §4.3).
+            if (mc_width > 1e-6 && std::getenv("SR5_TRACE"))
+                std::printf("  trace t=%6.0f %s ratio=%.3f rom_w=%.4e mc_w=%.4e\n",
+                            rom.times[k], nm.c_str(),
+                            (rom_q95[k] - rom_q05[k]) / mc_width,
+                            rom_q95[k] - rom_q05[k], mc_width);
             if (late && mc_width > 1e-6) {
                 const double rom_width = rom_q95[k] - rom_q05[k];
                 const double ratio = rom_width / mc_width;

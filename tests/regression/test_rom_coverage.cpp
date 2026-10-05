@@ -71,6 +71,7 @@
 #include "openswmm/engine/openswmm_engine.h"
 #include "core/SWMMEngine.hpp"
 #include "uncertainty/SpectralROM1D.hpp"
+#include "mc_quantiles.hpp"
 
 #if defined(_WIN32)
 #  include <process.h>   // _getpid
@@ -330,10 +331,9 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     }
 
     // --- Compare at every (junction, report time) with t > 60 s --------------
-    // MC empirical quantiles from the 21 sorted heads (nearest-rank):
-    //   q05 → index 1, q50 → index 10, q95 → index 19.
     int n_total = 0, n_covered = 0;
     int n_width = 0, n_width_ok = 0;
+    double member_cov_sum = 0.0;   // empirical interval coverage accumulator
     double ratio_min = 1e300, ratio_max = 0.0;
     std::vector<double> ratios;
 
@@ -347,8 +347,13 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
             for (int i = 0; i < kMcRuns; ++i)
                 h[static_cast<std::size_t>(i)] = mc[static_cast<std::size_t>(i)].heads.at(nm)[k];
             std::sort(h.begin(), h.end());
-            const double mc_q50   = h[10];
-            const double mc_width = h[19] - h[1];
+            // Midpoint-plotting-position quantiles (mc_quantiles.hpp): the
+            // ROM's own convention. The former h[19]-h[1] was the 0.071-0.929
+            // span, ~11% narrower than 5-95, biasing the width ratio ~12% high
+            // (2026-10-04 review; corrected numbers in VALIDATION.md).
+            const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
+            const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
+            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
@@ -378,9 +383,12 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     const double ratio_med = ratios[ratios.size() / 2];
 
     // Diagnostic report (measured values documented in VALIDATION.md).
-    std::printf("[ROM-vs-MC] samples=%d  coverage=%.3f  width-ratio "
+    // `coverage` is MEDIAN CONTAINMENT (the MC median inside the ROM band);
+    // member-coverage is the empirical fraction of MC members inside it,
+    // nominal 0.905 for 21 strata midpoints. Reported, not gated (2026-10-04).
+    std::printf("[ROM-vs-MC] samples=%d  median-containment=%.3f  member-coverage=%.3f  width-ratio "
                 "min/med/max = %.3f / %.3f / %.3f  (in-band frac %.3f of %d)\n",
-                n_total, coverage, ratio_min, ratio_med, ratio_max,
+                n_total, coverage, member_cov_sum / n_total, ratio_min, ratio_med, ratio_max,
                 width_frac, n_width);
 
     // Measured on the first full run (2026-07-08, this fixture):
@@ -549,7 +557,8 @@ double crownElevOf(const std::string& node_name) {
 
 struct SurchargeCellResult {
     bool   ok           = false;
-    double coverage      = 0.0;
+    double coverage      = 0.0;   // median containment
+    double member_cov    = 0.0;   // empirical interval coverage (nominal 0.905)
     double ratio_min     = 1e300, ratio_med = 0.0, ratio_max = 0.0;
     double surcharged_frac = 0.0;
     int    n_total = 0, n_width = 0;
@@ -589,6 +598,7 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
 
     int n_total = 0, n_covered = 0, n_width = 0, n_width_ok = 0;
     int n_surcharge_samples = 0, n_surcharge_hit = 0;
+    double member_cov_sum = 0.0;
     double ratio_min = 1e300, ratio_max = 0.0;
     std::vector<double> ratios;
 
@@ -603,8 +613,13 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
             for (int i = 0; i < kMcRuns; ++i)
                 h[static_cast<std::size_t>(i)] = mc[static_cast<std::size_t>(i)].heads.at(nm)[k];
             std::sort(h.begin(), h.end());
-            const double mc_q50   = h[10];
-            const double mc_width = h[19] - h[1];
+            // Midpoint-plotting-position quantiles (mc_quantiles.hpp): the
+            // ROM's own convention. The former h[19]-h[1] was the 0.071-0.929
+            // span, ~11% narrower than 5-95, biasing the width ratio ~12% high
+            // (2026-10-04 review; corrected numbers in VALIDATION.md).
+            const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
+            const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
+            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
@@ -627,6 +642,7 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
     std::sort(ratios.begin(), ratios.end());
     res.ok              = true;
     res.coverage         = static_cast<double>(n_covered) / n_total;
+    res.member_cov       = member_cov_sum / n_total;
     res.ratio_min        = ratio_min;
     res.ratio_med        = ratios[ratios.size() / 2];
     res.ratio_max        = ratio_max;
@@ -639,10 +655,10 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
 
 void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
     ASSERT_TRUE(r.ok) << label << ": a run failed or produced no comparable samples";
-    std::printf("[ROM-vs-MC SURCHARGED %s] samples=%d  coverage=%.3f  "
+    std::printf("[ROM-vs-MC SURCHARGED %s] samples=%d  median-containment=%.3f  member-coverage=%.3f  "
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  "
                 "surcharged_frac=%.3f  (n_width=%d)\n",
-                label, r.n_total, r.coverage, r.ratio_min, r.ratio_med,
+                label, r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med,
                 r.ratio_max, r.surcharged_frac, r.n_width);
 
     // The regime precondition itself: this fixture must actually be
@@ -874,7 +890,8 @@ std::vector<std::size_t> frontWindowIndices(const std::vector<double>& times,
 
 struct FrontCellResult {
     bool   ok        = false;
-    double coverage   = 0.0;
+    double coverage   = 0.0;   // median containment
+    double member_cov = 0.0;   // empirical interval coverage (nominal 0.905)
     double ratio_min  = 1e300, ratio_med = 0.0, ratio_max = 0.0;
     int    n_total = 0, n_width = 0;
 };
@@ -916,6 +933,7 @@ FrontCellResult runFrontCell(bool phase_enabled) {
         if (rom.q05.at(nm).size() < n_samples) return res;
 
     int n_total = 0, n_covered = 0, n_width = 0, n_width_ok = 0;
+    double member_cov_sum = 0.0;
     double ratio_min = 1e300, ratio_max = 0.0;
     std::vector<double> ratios;
 
@@ -930,8 +948,13 @@ FrontCellResult runFrontCell(bool phase_enabled) {
             for (int i = 0; i < kMcRuns; ++i)
                 h[static_cast<std::size_t>(i)] = mc[static_cast<std::size_t>(i)].heads.at(nm)[k];
             std::sort(h.begin(), h.end());
-            const double mc_q50   = h[10];
-            const double mc_width = h[19] - h[1];
+            // Midpoint-plotting-position quantiles (mc_quantiles.hpp): the
+            // ROM's own convention. The former h[19]-h[1] was the 0.071-0.929
+            // span, ~11% narrower than 5-95, biasing the width ratio ~12% high
+            // (2026-10-04 review; corrected numbers in VALIDATION.md).
+            const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
+            const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
+            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
@@ -951,6 +974,7 @@ FrontCellResult runFrontCell(bool phase_enabled) {
     std::sort(ratios.begin(), ratios.end());
     res.ok       = true;
     res.coverage = static_cast<double>(n_covered) / n_total;
+    res.member_cov = member_cov_sum / n_total;
     res.ratio_min = ratio_min;
     res.ratio_med = ratios[ratios.size() / 2];
     res.ratio_max = ratio_max;
@@ -963,9 +987,9 @@ FrontCellResult runFrontCell(bool phase_enabled) {
 TEST(RomCoverageFront, PhaseCoordinate) {
     const FrontCellResult r = runFrontCell(/*phase_enabled=*/true);
     ASSERT_TRUE(r.ok) << "a run failed or produced no comparable front-passage samples";
-    std::printf("[ROM-vs-MC FRONT PhaseCoordinate] samples=%d  coverage=%.3f  "
+    std::printf("[ROM-vs-MC FRONT PhaseCoordinate] samples=%d  median-containment=%.3f  member-coverage=%.3f  "
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  (n_width=%d)\n",
-                r.n_total, r.coverage, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
+                r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
 
     // H11's acceptance bounds (HSYM_RESIDUALS_PR_CHECKLIST.md, PR H11):
     // coverage >= 0.90, width-ratio median in [0.5, 2.0]. Per standing rule
@@ -993,7 +1017,7 @@ TEST(RomCoverageFront, AmplitudeOnlyBaseline) {
     // H11 actually recovers, not a pass/fail gate in its own right.
     const FrontCellResult r = runFrontCell(/*phase_enabled=*/false);
     ASSERT_TRUE(r.ok) << "a run failed or produced no comparable front-passage samples";
-    std::printf("[ROM-vs-MC FRONT AmplitudeOnlyBaseline] samples=%d  coverage=%.3f  "
+    std::printf("[ROM-vs-MC FRONT AmplitudeOnlyBaseline] samples=%d  median-containment=%.3f  member-coverage=%.3f  "
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  (n_width=%d)\n",
-                r.n_total, r.coverage, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
+                r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
 }
