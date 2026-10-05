@@ -2750,7 +2750,7 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                                 snap.n_conduits, ctx_.current_time,
                                 snap.node_surcharged);
         }
-        const double K1d = computeK1d();
+        const double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
 
         const int n_active = static_cast<int>(rom1d_active_map_.size());
 

@@ -65,6 +65,10 @@ inline int envInt(const char* name, int dflt) {
 }
 static const double kCV        = envDouble("SR5_CV", 0.20);    // NORMAL coefficient of variation
 static const int    kMembers   = envInt("SR5_MEMBERS", 0);      // 0 = engine default (50)
+static const double kK1dScale  = envDouble("SR5_K1D_SCALE", 1.0); // SR-6 falsification knob
+static const double kPipeDiam  = envDouble("SR5_PIPE_DIAM", 0.5);  // SR-6: surcharge-elasticity probe (ft)
+static const double kSubWidth  = envDouble("SR5_SUBCATCH_WIDTH", 5.0); // SR-6: runoff-elasticity probe (ft)
+static const double kSubArea   = envDouble("SR5_SUBCATCH_AREA", 5.0);  // SR-6: equilibrium probe (acres)
 constexpr int    kMcRuns       = 21;
 constexpr double kReportStep   = 300.0;   // s (5 min)
 constexpr double kEndTime      = 3600.0;  // s (1 h sampling window)
@@ -96,7 +100,7 @@ std::string fixtureInp(double rain_mult, bool with_soft) {
     f << std::setfill(' ') << "\n";
     f << "[SUBCATCHMENTS]\n";
     for (int i = 1; i <= 5; ++i)
-        f << "S" << i << " RG1 J" << i << " 5.0 5 100 1.0 0\n";
+        f << "S" << i << " RG1 J" << i << " " << kSubArea << " " << kSubWidth << " 100 1.0 0\n";
     f << "\n[SUBAREAS]\n";
     for (int i = 1; i <= 5; ++i)
         f << "S" << i << " 0.015 0.20 0.00 0.00 100 OUTLET\n";
@@ -114,7 +118,7 @@ std::string fixtureInp(double rain_mult, bool with_soft) {
     f << "C5 J5 O1 200 0.02 0 0 0 0\n\n";
     f << "[XSECTIONS]\n";
     for (int i = 1; i <= 5; ++i)
-        f << "C" << i << " CIRCULAR 0.5 0 0 0 1\n";
+        f << "C" << i << " CIRCULAR " << kPipeDiam << " 0 0 0 1\n";
     f << "\n[REPORT]\nINPUT NO\nCONTINUITY YES\nNODES ALL\nLINKS ALL\n\n";
     if (with_soft) {
         f << "[SOFT_RAINGAGES]\nRG1 NORMAL CV " << kCV << "\n";
@@ -126,6 +130,7 @@ std::string fixtureInp(double rain_mult, bool with_soft) {
 struct RunResult {
     std::map<std::string, std::vector<double>> heads;
     std::map<std::string, std::vector<double>> q05, q50, q95;
+    std::map<std::string, std::vector<double>> latq;   // lateral inflow (cfs) at report times
     std::vector<double> times;
     bool ok = false;
 };
@@ -157,6 +162,10 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     }
 
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    // SR-6 falsification knob: scales the K1d handed to the ROM every step
+    // (K1d is recomputed per step, so setting it before the first step is
+    // sufficient). 1.0 = bit-identical to the gate.
+    if (with_soft) eng->rom1dK1dScale() = kK1dScale;
     const auto& ctx = eng->context();
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());
 
@@ -184,6 +193,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
             out.times.push_back(b);
             for (const auto& [nm, ui] : node_idx) {
                 out.heads[nm].push_back(ctx.nodes.head[static_cast<std::size_t>(ui)]);
+                out.latq[nm].push_back(ctx.nodes.lat_flow[static_cast<std::size_t>(ui)]);
                 if (rom && rom->is_ready() &&
                     ui < static_cast<int>(rom->full_to_active.size())) {
                     const int ai = rom->full_to_active[static_cast<std::size_t>(ui)];
@@ -311,6 +321,55 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     std::sort(ratios.begin(), ratios.end());
     const double ratio_med = ratios[ratios.size() / 2];
 
+    {
+        // Proportional-scaling check: if head responded exactly in proportion
+        // to rain, the MC 5-95 band would be ~3.40*CV*dh (21 midpoint strata)
+        // and the ROM band ~3.29*CV*dh (50 strata). Print both ratios at J1 and
+        // J5 at the last report time so the shortfall can be attributed to the
+        // MC side (elasticity != 1) or the ROM side.
+        const std::size_t kk = n_samples - 1;
+        for (const char* nm : {"J1", "J5"}) {
+            const auto& hs = rom.heads.at(nm);
+            const double dh = hs[kk] - hs[0];
+            std::vector<double> h(kMcRuns);
+            for (int i = 0; i < kMcRuns; ++i) h[static_cast<std::size_t>(i)] = mc[static_cast<std::size_t>(i)].heads.at(nm)[kk];
+            std::sort(h.begin(), h.end());
+            const double mc_w = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
+            const double rom_w = rom.q95.at(nm)[kk] - rom.q05.at(nm)[kk];
+            // Inflow volume into the node over the window vs the stored volume
+            // A*dh (A = 20000 ft^2): the ratio is inflow/(inflow - outflow).
+            double v_in = 0.0;
+            const auto& lq = rom.latq.at(nm);
+            for (std::size_t j = 1; j <= kk && j < lq.size(); ++j)
+                v_in += 0.5 * (lq[j] + lq[j - 1]) * (rom.times[j] - rom.times[j - 1]);
+            // Runoff elasticity to rain, straight from the extreme MC members:
+            // ln(V_hi/V_lo) / ln(mult_hi/mult_lo). 1.0 = runoff proportional to rain.
+            auto vol = [&](int i) {
+                const auto& q = mc[static_cast<std::size_t>(i)].latq.at(nm);
+                double v = 0.0;
+                for (std::size_t j = 1; j <= kk && j < q.size(); ++j)
+                    v += 0.5 * (q[j] + q[j - 1]) * (rom.times[j] - rom.times[j - 1]);
+                return v;
+            };
+            const double z_lo = openswmm::uncertainty::probit(0.5 / kMcRuns);
+            const double z_hi = openswmm::uncertainty::probit((kMcRuns - 0.5) / kMcRuns);
+            const double elas = std::log(vol(kMcRuns - 1) / vol(0))
+                              / std::log((1.0 + z_hi * kCV) / (1.0 + z_lo * kCV));
+            const double rain_equiv_cfs = kSubArea * 43560.0 * (kBaseRainInHr / 12.0) / 3600.0;
+            std::printf("[SoftRain-elasticity] %s t=%.0f dh_det=%.4f  MC/(3.40*CV*dh)=%.3f  ROM/(3.29*CV*dh)=%.3f  "
+                        "V_in/(A*dh)=%.3f  runoff-elasticity=%.3f  mean_runoff/rain=%.2f\n",
+                        nm, rom.times[kk], dh, mc_w / (3.40 * kCV * dh), rom_w / (3.29 * kCV * dh),
+                        v_in / (20000.0 * dh), elas, (v_in / rom.times[kk]) / rain_equiv_cfs);
+        }
+        double max_fill = 0.0;
+        for (const auto& [nm, hs] : rom.heads) {
+            if (nm.size() < 2 || nm[0] != 'J') continue;
+            const double invert = 100.0 - (nm[1] - '0');
+            for (double h : hs) max_fill = std::max(max_fill, (h - invert) / kPipeDiam);
+        }
+        std::printf("[SoftRain-fixture] pipe_diam=%.2f ft  max(depth/diam)=%.2f  (>1 = pressurised)\n",
+                    kPipeDiam, max_fill);
+    }
     std::printf("[SoftRain-vs-MC] samples=%d median-containment=%.3f "
                 "member-coverage=%.3f (saturated %.3f, nominal 0.905) width-ratio "
                 "min/med/max = %.3f / %.3f / %.3f (in-band frac %.3f of %d)\n",

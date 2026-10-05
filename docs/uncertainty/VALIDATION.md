@@ -488,6 +488,83 @@ ctest --test-dir build/darwin-tests-local -R "test_engine_spde_spatial_basis|tes
 
 ---
 
+# SR-6 step 1 — the soft-rain shortfall is the rain-to-runoff elasticity (2026-10-05)
+
+Falsification sweeps on the SR-5 gate (`test_soft_rain_coverage`, env hooks
+`SR5_K1D_SCALE`, `SR5_PIPE_DIAM`, `SR5_SUBCATCH_WIDTH`, `SR5_SUBCATCH_AREA`;
+defaults reproduce the gate bit-for-bit). Numbers are the median ROM/MC width
+ratio and the empirical member coverage.
+
+## 1. Two hypotheses killed
+
+| Knob | Range | Width-ratio median | Member coverage | Verdict |
+|---|---|---|---|---|
+| K1d scale (modal dissipation) | ×0.1 … ×10 | 0.710 → 0.699 | 0.764 → 0.746 | **not the lever** |
+| Pipe diameter (surcharge) | 0.5 … 8 ft (max fill 0.23 → 0.01) | 0.710 → 0.723 | 0.761 → 0.787 | **not the lever** |
+
+The forcing channel's dissipation and the pipe hydraulics are both irrelevant
+to the shortfall. A direct decomposition at J1, t = 3600 s, explains why:
+
+| Quantity | Measured |
+|---|---|
+| ROM band ÷ (3.29·CV·Δh_det), i.e. ROM vs *proportional scaling of the deterministic head rise* | **1.008** |
+| MC band ÷ (3.40·CV·Δh_det), i.e. MC vs the same | **1.390** |
+| Inflow volume ÷ stored volume (outflow share) | 1.017 |
+| **Runoff elasticity to rain**, ln(V_hi/V_lo)/ln(rain_hi/rain_lo) from the extreme members | **1.395** |
+
+The ROM does exactly what its formulation says: the band is a proportional
+scaling of the deterministic response. The Monte Carlo heads move 1.39× more
+than proportionally, and that factor is the **runoff** elasticity: on this
+fixture the subcatchments (5 acres, 5 ft flow width) never reach equilibrium,
+runoff delivered by t = 1 h is 12% of rain × area, and on the rising limb of
+Manning overland flow (Q ∝ d^{5/3}) the elasticity of delivered runoff to rain
+sits between 1 and 5/3. Widening the flow path to 5,000 ft raises it to
+**1.64** (≈ 5/3). The soft-rain mapping `spread = dh/dt · CV` assumes runoff
+scales one-for-one with rain, i.e. elasticity 1.
+
+## 2. The confirming experiment: let runoff reach equilibrium
+
+| Subcatchment | runoff ÷ rain at 1 h | runoff elasticity | width-ratio min / med / max | member coverage |
+|---|---|---|---|---|
+| 5 ac, 5 ft (the gate) | 0.12 | 1.395 | 0.632 / 0.710 / 0.751 | 0.761 |
+| 0.05 ac, 5,000 ft | 0.84 | 1.061 | 0.042 / 0.864 / 0.957 | 0.763 |
+| 0.005 ac, 5,000 ft | 0.91 | 1.005 | 0.916 / **0.945** / 0.975 | **0.893** |
+
+With runoff proportional to rain, the soft-rain ROM is calibrated (0.893
+against the 0.905 ceiling) with no change to the ROM. This also explains the
+earlier observations exactly: constant elasticity is CV-independent (a power
+law), M-independent (the band is a scaled deterministic response), K1d- and
+pipe-independent (it sits upstream of routing), and only mildly
+time-dependent (the subcatchments slowly approach equilibrium).
+
+## 3. What this means for SR-6
+
+The fix is not in the ROM's ODE but in the **spread mapping**: the gage spread
+must be propagated through the rain → runoff transformation, not applied as if
+runoff were linear in rain. Three ways, for the design step:
+
+- **(A) Local runoff elasticity.** Each runoff step, evaluate the subcatchment
+  kernel at rain × (1 ± δ) without committing state, take `E_s =
+  ∂ln q / ∂ln rain`, and use `rel_s = CV · E_s` in the node spread. Two extra
+  kernel evaluations per subcatchment per *runoff* step (minutes, not routing
+  steps); needs a non-mutating trial evaluation of the kernel.
+- **(B) Ensemble runoff.** Run the Phase-3 `RunoffEnsemble` (M per-member
+  runoff states) and feed `SpectralROM1D::setEnsembleRunoff` per-member inflow
+  rates. Exact, no linearisation; costs M × runoff per runoff step, and the
+  RunoffEnsemble source is not in the engine build yet. The right *validation
+  reference* for (A), and a possible opt-in mode.
+- **(C) Closed-form elasticity** of the overland kinematic wave — no general
+  closed form on the rising limb; rejected.
+
+Recommendation (F): implement (A); use (B) as the reference when validating
+(A), and measure (B)'s cost before offering it. Acceptance stays as written:
+SR-5 and CL-1e member coverage ≥ 0.80 with no floor edits. The `FORCING_VECTOR`
+`INFLOW` path is unaffected (an inflow perturbation has elasticity 1 by
+definition). The correlated (CL-1e) shortfall should close by the same factor
+since the elasticity is per-subcatchment, not per-coherence-mode.
+
+---
+
 # Correlated soft rainfall re-port on the marcher line (PR SP3)
 
 Measured 2026-10-03. SP3 re-homes CL-1c/CL-2c (`COHERENCE CORR_LEN`) onto

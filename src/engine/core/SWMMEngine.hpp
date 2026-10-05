@@ -558,6 +558,16 @@ private:
     /// SP3: build the SPDE spatial basis / coefficient field for CORR_LEN gages.
     void buildRom1DSoftField() noexcept;
 
+public:
+    /// SR-6 diagnostic knob (test-only, default 1.0 = bit-identical): multiplies
+    /// the per-step K1d handed to the 1D ROM. Exists to falsify the hypothesis
+    /// that the soft-rain band shortfall is set by the forcing channel's
+    /// dissipation lambda*K1d. Not parser-exposed; set through the C++ handle
+    /// between open() and the first step.
+    double& rom1dK1dScale() noexcept { return rom1d_k1d_scale_; }
+private:
+    double rom1d_k1d_scale_ = 1.0;
+
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
     double computeK1d() noexcept;
 
