@@ -598,7 +598,7 @@ network's own current flow velocities — not assumed or hand-tuned).
 Reconstructing that member's head then samples the deterministic run's own
 history a little earlier or later instead of at "now." Re-measured against
 the same brute-force MC design on a dedicated front-passage fixture: median
-width ratio went from 0.009 to 1.354, comfortably inside the same acceptance
+width ratio went from 0.009 to 1.354 (1.295 after the 2026-10-04 MC-quantile correction; empirical member coverage 0.83), comfortably inside the same acceptance
 band H5 and PR-10 use — with the underlying physical constants left at their
 design-time defaults, no calibration against this specific result. Two
 properties worth trusting rather than taking on faith: (1) a member with

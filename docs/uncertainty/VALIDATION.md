@@ -125,6 +125,8 @@ checklist: it measures the composite effect of PRs 4–9.
 | Width ratio ROM/MC in [0.3, 3.0] (saturated) | ≥ 0.80 | **1.000** (155/155) | ≥ 0.95 |
 | Width ratio min / median / max | — | **0.676 / 1.251 / 1.610** | median ∈ [0.5, 2.0] |
 
+> *Correction 2026-10-04 (interval-coverage audit, top of this file): this section's "coverage" was median containment and its width ratios used the 0.071–0.929 MC span. The current fixture's corrected median width ratio is 0.097 with member coverage 0.20 (the deliberately red result); the 1.251 headline below was never reproducible on either base.*
+
 The ROM band is a calibrated estimate of the brute-force band in this regime:
 it brackets the Monte-Carlo median essentially always, and its width sits
 within a factor of ~1.6 of the truth everywhere, with a slightly conservative
@@ -818,10 +820,11 @@ P4 compat-matrix pattern).
 |---|---|---|---|---|
 | EXPLICIT | 0.997 | 0.016 / **0.034** / 1.866 | 1.000 | **FAILS** ratio_med ≥ 0.3 |
 | SEMI_IMPLICIT | 0.990 | 0.021 / **1.031** / 2.799 | 1.000 | **passes** |
+| *corrected 2026-10-04 (midpoint MC quantiles)* | median containment 0.997 · **member coverage 0.51** | 0.000 / **0.982** / 2.665 | — | still passes [0.3, 3]; **not calibrated**: half the MC members fall outside the band |
 
 Both cells clear coverage ≥ 0.90 and surcharged_frac ≥ 0.50 comfortably. The
 alpha floor (see below) was calibrated against this exact fixture, so
-SEMI_IMPLICIT's ratio_med landing almost exactly at 1.0 is a genuine
+SEMI_IMPLICIT's ratio_med landing near 1.0 (0.982 after the 2026-10-04 metric correction; member coverage only 0.51, so the median width is right while the per-sample band is often mis-centred — see the interval-coverage audit) is a genuine
 calibration result, not a coincidence — but the same floor leaves EXPLICIT's
 median an order of magnitude below the checklist's own 0.3 floor. Both
 findings are explained in §3, not adjusted away.
@@ -922,7 +925,7 @@ follow-up, and the floor-response was already shown non-monotonic (finding
 as a documented limitation of the source-side-attenuation formulation
 specifically under `NODE_CONTINUITY EXPLICIT`.** Recorded in
 `docs/uncertainty/HOW_IT_WORKS.md` §8 and `USER_GUIDE.md` limitation 10,
-both recommending `SEMI_IMPLICIT` when validated surcharged bands are
+both recommending `SEMI_IMPLICIT` when surcharged bands are needed (validated for width on median; member coverage 0.51, see the interval-coverage audit) — i.e. when they are
 needed. `RomCoverageSurcharged.ExplicitContinuity` stays registered and
 deliberately red — a live regression guard against this getting *worse*,
 and a ready-made gate if a future session takes on the flow-keyed-signal
@@ -1032,6 +1035,7 @@ the saturated-regime gates above).
 |---|---|---|---|---|
 | `AmplitudeOnlyBaseline` (phase disabled) | 1.000 | 0.000 / **0.009** / 0.025 | 34 | *not gated — "before" measurement* |
 | `PhaseCoordinate` (phase enabled) | 1.000 | 0.000 / **1.354** / 2.554 | 34 | **passes** (coverage ≥ 0.90, ratio_med ∈ [0.5, 2.0]) |
+| *corrected 2026-10-04 (midpoint MC quantiles)* | median containment 1.000 · **member coverage 0.83** | 0.000 / **1.295** / 2.448 | 34 | still passes; the best-calibrated cell measured |
 
 **H11 recovers essentially the whole front-passage width gap**: median width
 ratio goes from **0.009** (≈150× too narrow — the amplitude channel alone
