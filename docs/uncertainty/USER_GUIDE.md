@@ -1676,14 +1676,18 @@ a defect.
   coincide) the gage falls back to `COHERENCE FULL` with a one-time warning. One
   correlation length applies per network, the largest among `CORR_LEN` gages.
   `CORR_LEN` cannot be combined with mixed families on one network: the run is
-  refused at initialization with a message naming the cause. Validated against
-  a correlated Monte Carlo on the test chain (`NORMAL CV 0.40`, ℓ = 120 m):
-  coverage 1.000, width ratio 0.44 / 0.66 / 0.81; the downstream band at ℓ = 30 m
-  is 0.56× the comonotone band, which is the point of the feature.
-- Validated against brute-force Monte Carlo on the test chain (21 members,
-  `NORMAL CV 0.20`): coverage 1.000, ROM-to-MC band-width ratio 0.73 / 0.82 /
-  0.87 (min / median / max). That is a small, free-surface network; band
-  magnitude in surcharged flow is not validated for this input path.
+  refused at initialization with a message naming the cause. Compared against a
+  correlated Monte Carlo on the test chain (`NORMAL CV 0.40`, ℓ = 120 m): the
+  band contains the MC median at every sample, its width is 0.38 / 0.57 / 0.70 of
+  the MC 5–95 span, and it contains **0.68** of MC outcomes against a nominal
+  0.90, so correlated bands run narrow. The downstream band at ℓ = 30 m is 0.56×
+  the comonotone band, which is the point of the feature.
+- Compared against brute-force Monte Carlo on the test chain (21 members,
+  `NORMAL CV 0.20`): the ROM band contains the MC median at every sample, its
+  width is 0.63 / 0.71 / 0.75 (min / median / max) of the MC 5–95 span, and it
+  contains **0.76** of MC outcomes against a nominal 0.90. Read the band as
+  somewhat narrow, not as a calibrated 90% interval. Small, free-surface network;
+  surcharged flow is not validated for this input path.
 
 ### 11.2 `[SOFT_RAINFALL_GRID]` — Gridded Soft Rainfall
 

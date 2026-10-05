@@ -39,6 +39,7 @@
 #include "core/SWMMEngine.hpp"
 #include "uncertainty/SpectralROM1D.hpp"
 #include "uncertainty/LhsShuffle.hpp"
+#include "mc_quantiles.hpp"
 
 #if defined(_WIN32)
 #  include <process.h>   // _getpid
@@ -233,10 +234,10 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     }
 
     // --- Compare at every (junction, report time) with t > 60 s -------------
-    // MC empirical quantiles from 21 sorted heads (nearest-rank):
-    //   q05 → index 1, q50 → index 10, q95 → index 19.
     int n_total = 0, n_covered = 0;
     int n_width = 0, n_width_ok = 0;
+    int n_late = 0;
+    double member_cov_sum = 0.0, member_cov_late_sum = 0.0;
     double ratio_min = 1e300, ratio_max = 0.0;
     std::vector<double> ratios;
 
@@ -250,11 +251,20 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
             for (int i = 0; i < kMcRuns; ++i)
                 h[static_cast<std::size_t>(i)] = mc[static_cast<std::size_t>(i)].heads.at(nm)[k];
             std::sort(h.begin(), h.end());
-            const double mc_q50   = h[10];
-            const double mc_width = h[19] - h[1];
+            // Midpoint-plotting-position quantiles (see mc_quantiles.hpp): the
+            // ROM's own convention. The former h[19]-h[1] was the 0.071-0.929
+            // span and biased the width ratio high by ~12%.
+            const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
+            const double mc_q05   = mcq::quantileMidpoint(h, 0.05);
+            const double mc_q95   = mcq::quantileMidpoint(h, 0.95);
+            const double mc_width = mc_q95 - mc_q05;
 
             ++n_total;
+            // Median containment (the pre-review "coverage") and TRUE empirical
+            // interval coverage: the fraction of MC members inside the ROM band.
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
+            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
+            if (late) { member_cov_late_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]); ++n_late; }
 
             // Width comparison only in the saturated regime (second half):
             // the deviation-form spread starts at zero and grows toward its
@@ -274,15 +284,18 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     ASSERT_GT(n_total, 0);
     ASSERT_GT(n_width, 0) << "MC produced no resolvable spread — fixture too static";
 
-    const double coverage = static_cast<double>(n_covered) / n_total;
+    const double coverage = static_cast<double>(n_covered) / n_total;   // median containment
+    const double member_cov = member_cov_sum / n_total;                  // empirical interval coverage
+    const double member_cov_late = (n_late > 0) ? member_cov_late_sum / n_late : 0.0;
     const double width_frac = static_cast<double>(n_width_ok) / n_width;
     std::sort(ratios.begin(), ratios.end());
     const double ratio_med = ratios[ratios.size() / 2];
 
-    std::printf("[SoftRain-vs-MC] samples=%d coverage=%.3f width-ratio "
+    std::printf("[SoftRain-vs-MC] samples=%d median-containment=%.3f "
+                "member-coverage=%.3f (saturated %.3f, nominal 0.905) width-ratio "
                 "min/med/max = %.3f / %.3f / %.3f (in-band frac %.3f of %d)\n",
-                n_total, coverage, ratio_min, ratio_med, ratio_max,
-                width_frac, n_width);
+                n_total, coverage, member_cov, member_cov_late,
+                ratio_min, ratio_med, ratio_max, width_frac, n_width);
 
     // Checklist floors: coverage >= 0.90, width-ratio in [0.3, 3.0] at >= 0.80.
     // Actuals are printed above and recorded in VALIDATION.md on first run.
@@ -293,6 +306,12 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     // The ROM band is slightly narrower than MC (median ratio ~0.82) — the
     // expected mild under-prediction of the delta-linearized soft forcing —
     // but it brackets every MC median and stays well inside [0.3x, 3x].
+    // NOTE (2026-10-04 review): `coverage` is MEDIAN CONTAINMENT, not interval
+    // coverage. The empirical member coverage is printed above and recorded in
+    // VALIDATION.md; it is NOT gated here because a floor for it is a
+    // validation-design decision (checklist rule 2: no tolerance is invented to
+    // make a spread test green). Expect it below the nominal 0.905 by about the
+    // same factor the width ratio is below 1.
     EXPECT_GE(coverage, 0.90)
         << "ROM [q05,q95] must contain the MC median at >=90% of samples";
     EXPECT_GE(width_frac, 0.80)
