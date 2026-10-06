@@ -2766,6 +2766,7 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                                 snap.node_surcharged);
         }
         const double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
+        rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
 
         const int n_active = static_cast<int>(rom1d_active_map_.size());
 

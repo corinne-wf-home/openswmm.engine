@@ -23,7 +23,7 @@ loosened. Cells that claim "validated" assert the floor.
 
 | Gate / cell | Width ratio median, old → corrected | Member coverage | Gate verdict | **C1 status** |
 |---|---|---|---|---|
-| PR-10 free-surface chain (deliberately red) | 0.102 → **0.097** | **0.20** | red, unchanged | ranking only → **P8** |
+| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → **1.961** (P8 fixture) | 0.20 → **0.94** | **green since P8** | **calibrated by C1 (one-sided)**, but ~2× over-wide → **H13**; see C2 |
 | H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged | ranking only, documented limitation |
 | H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] | ranking only → **H5b** |
 | H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] | **calibrated** (asserted ≥ 0.80) |
@@ -488,6 +488,72 @@ ctest --test-dir build/darwin-tests-local -R "test_engine_spde_spatial_basis|tes
 
 ---
 
+# P8 — Free-surface MC fixture redesigned; the saturated band is ~2× over-wide (2026-10-05)
+
+The PR-10 free-surface chain was deliberately red from 2026-08-04: its 100 m
+conduits give the dominant mode a time constant of **10.2 h** (measured in-run
+from the basis eigenvalue λ₀ = 0.0807 and the K1d actually used, 3.38e-4 1/s),
+so its 1 h window sampled 9% of the band and reported a spin-up artefact
+(P4 root cause). P8 changed **one** geometric parameter, conduit length
+100 m → 10 m, and samples the second half of a 4 h window. Everything else
+(5 m drop per conduit, 1 m diameter, 0.1 CMS inflow, ±20% prior, M = 50) is
+the original. The test now prints τ₀ and the saturation at the sampling
+window on every run, and the old geometry is kept as an ungated
+spin-up demonstration.
+
+## 1. Geometry search (all measured; only the chosen row is the fixture)
+
+| Length | DWF | Window | τ₀ | Saturation at window midpoint | Width ratio min / med / max | Member coverage |
+|---|---|---|---|---|---|---|
+| 100 m (old) | 0.1 | 1 h | 10.2 h | 0.05 | 0.018 / 0.097 / 1.02 | 0.20 |
+| 30 m | 0.1 | 1 h | 2.7 h | 0.31 | 0.045 / 0.498 / 1.50 | 0.44 |
+| 10 m | 0.1 | 2 h | 0.85 h | 0.69 | 1.24 / 1.75 / 2.02 | 0.88 |
+| **10 m (P8)** | **0.1** | **4 h** | **0.85 h** | **0.90** | **1.75 / 1.96 / 2.14** | **0.94** |
+| 10 m | 0.3 | 4 h | 0.36 h | 0.996 | 1.97 / 2.06 / 2.20 | 0.98 |
+| 20 m | 0.3 | 6 h | 0.73 h | 0.98 | 1.93 / 2.04 / 2.19 | 0.97 |
+| 100 m (old) | 0.1 | 30 h | 10.2 h | 0.77 | 1.47 / 1.89 / 2.11 | 0.90 |
+
+The ratio climbs with saturation toward **≈2.0** on every geometry, including
+the old one given enough time. That is the answer the old fixture could never
+reach.
+
+## 2. Finding: the free-surface Manning channel over-predicts by ~2× at saturation
+
+At saturation the 1D band is about twice the brute-force band and
+over-covers (0.94–0.98 of outcomes inside, nominal 0.905). This is the
+conveyance-sensitivity over-prediction already on record for 2D (W3 production
+rung, 1.43×) and in the original PR-10 write-up (1.25×, on numbers that were
+never reproducible), now measured cleanly in 1D. The deviation-form fixed point
+`δa = (mm−1)·b_j` responds to a Manning perturbation with the full conveyance
+sensitivity, while the hydraulics settle a mass-balance-set head that moves
+less. It is the free-surface sibling of H5's surcharged over-prediction. Not
+fixed here; logged for the formulation queue (candidate **H13**).
+
+## 3. Gate status
+
+Verdict: **green**, with no bound moved. The standing bounds (median
+containment ≥ 0.95, width ratio in [0.3, 3] for ≥ 0.95 of samples, median
+width ratio in [0.5, 2.0]) are kept, and the C1 member-coverage floor is now
+asserted. The measured median 1.96 sits just under the 2.0 ceiling; the
+deeper-inflow variant reads 2.06 and would fail it. That is reported here
+rather than avoided by picking a different fixture: the fixture was chosen as
+the smallest change from the original that reaches saturation, not for its
+number.
+
+**A gap in C1 this exposes.** The member-coverage floor is one-sided. A band
+twice too wide passes it comfortably. Calibration needs an upper bound too;
+the existing width-ratio ceiling plays that role here by accident of history.
+The checklist carries this as decision **C2**: make calibration two-sided
+(member coverage within a band around nominal, or coverage ≥ 0.80 **and**
+width ratio ≤ 1.5), applied uniformly.
+
+## 4. Reproduction
+
+    build/<dir>/tests/regression/test_rom_coverage --gtest_filter='RomCoverage.*'
+    P8_LEN=100 P8_WINDOW_H=1 build/<dir>/tests/regression/test_rom_coverage --gtest_filter='RomCoverage.Bands*'   # the old red
+
+---
+
 # SR-6 step 1 — the soft-rain shortfall is the rain-to-runoff elasticity (2026-10-05)
 
 Falsification sweeps on the SR-5 gate (`test_soft_rain_coverage`, env hooks
@@ -527,8 +593,13 @@ scales one-for-one with rain, i.e. elasticity 1.
 | Subcatchment | runoff ÷ rain at 1 h | runoff elasticity | width-ratio min / med / max | member coverage |
 |---|---|---|---|---|
 | 5 ac, 5 ft (the gate) | 0.12 | 1.395 | 0.632 / 0.710 / 0.751 | 0.761 |
-| 0.05 ac, 5,000 ft | 0.84 | 1.061 | 0.042 / 0.864 / 0.957 | 0.763 |
-| 0.005 ac, 5,000 ft | 0.91 | 1.005 | 0.916 / **0.945** / 0.975 | **0.893** |
+| 0.05 ac, 5 ft | 0.84 | 1.061 | 0.042 / 0.864 / 0.957 | 0.763 |
+| 0.005 ac, 5 ft | 0.91 | 1.005 | 0.916 / **0.945** / 0.975 | **0.893** |
+
+*(Correction 2026-10-05: these two rows were first recorded as 5,000 ft wide;
+the shell sweep had passed two settings as one, so the width stayed at the
+fixture's 5 ft. A smaller area reaches equilibrium at any width, so the
+conclusion is unchanged; the labels were wrong.)*
 
 With runoff proportional to rain, the soft-rain ROM is calibrated (0.893
 against the 0.905 ceiling) with no change to the ROM. This also explains the

@@ -15,46 +15,39 @@
  *   (b) width ratio — ROM (q95−q05) vs MC (q95−q05) stays within the stated
  *       band wherever the MC width is resolvable (> 1e-6 m).
  *
- * Runtime: 22 engine runs on a 6-node, 10-minute network — ~2 s total.
+ * Runtime: 22 engine runs on a 6-node network over 4 h — ~10 s total.
  *
- * @warning STATUS 2026-08-04 — THIS TEST IS DELIBERATELY RED. It existed since
- *          586e492b (2026-07-08) but was never wired into CMake; registered for
- *          the first time while starting PR P4. It FAILS: coverage=1.000 but
- *          width ratio min/med/max = 0.024/0.082/0.889 (in-band 0.303) vs the
- *          documented 0.676/1.251/1.610.
+ * STATUS 2026-10-05 (PR P8): the fixture was redesigned and the test is GREEN.
+ *          From 2026-08-04 to 2026-10-05 it was deliberately red: its 100 m
+ *          conduits gave the dominant mode tau_0 = 1/(lambda_0*K1d) ~ 10 h
+ *          (15 h before the computeK1d PHI fix), so a 1 h window sampled 9%
+ *          of the saturated band and reported a ~15x-narrow ratio that was a
+ *          spin-up artefact, not a ROM defect (P4 root cause). The old
+ *          0.676/1.251/1.610 reference was never reproducible on either base.
  *
- *          ROOT CAUSE (measured, not inferred): **the "saturated regime"
- *          premise below is false for this fixture.** The ROM's modal
- *          deviations relax at rate lambda_j * K1d, and on this network the
- *          dominant mode carries b_0 = 0.652 of the sensitivity signal (~76%)
- *          but has tau_0 = 1/(lambda_0*K1d) = 1/(0.0807 * 2.276e-4) ~= 54,500 s
- *          ~= 15 HOURS. At the 1-hour sampling window it is 6.4% saturated, so
- *          the band is ~15x too narrow. The ROM itself is exact: driven to
- *          t = 100,000 s every mode converges to its analytic fixed point
- *          (mode 0 -> 84.05% vs 84.05% predicted; modes 1-3 -> 100.0%). The
- *          spatial signature confirms it — J1, farthest from the grounded
- *          outfall and most mode-0-dominated, is worst (0.027); J5, adjacent to
- *          it and dominated by fast high modes, is nearly right (0.894).
+ *          P8 changed ONE geometric parameter, conduit length 100 m -> 10 m
+ *          (tau_0 = 0.85 h, measured in-run from the basis eigenvalue and the
+ *          K1d actually used), and samples the second half of a 4 h window
+ *          (90% saturated at its start, 99% at its end). Everything else --
+ *          slope per conduit, diameter, inflow, prior, M -- is the original.
+ *          The old geometry is kept as an ungated spin-up DEMONSTRATION
+ *          (RomCoverage.SpinUpDemonstrationOldGeometry) so the lesson stays
+ *          executable.
  *
- *          SECONDARY DEFECT (real, but only 1.49x of the ~5x needed):
- *          computeK1d() computes the SI diffusion-wave diffusivity
- *          D = h^(5/3)/(2*n*sqrt(S)) but now receives h and L in internal FEET
- *          while Manning's n stays SI. `convert_inputs_to_internal`
- *          (PostParseResolver.cpp) does NOT exist on the sidecar base where the
- *          reference numbers were measured — it arrived upstream with
- *          a1319721 (2026-07-05, Bellinge bit-parity ladder). Net effect:
- *          K1d = 0.673x the correct SI value, tau 1.49x too long. Worth fixing
- *          on its own merits; it does NOT green this test.
+ *          WHAT THE SATURATED REGIME SHOWS (measured, VALIDATION.md "P8"):
+ *          member coverage 0.94 (nominal 0.905) and width ratio 1.75 / 1.96 /
+ *          2.14 -- the free-surface Manning channel OVER-predicts the band by
+ *          ~2x at saturation. This is the conveyance-sensitivity
+ *          over-prediction already recorded for 2D (W3, 1.43x) and in the
+ *          PR-10 record (1.25x), now measured cleanly in 1D. Nothing here was
+ *          tuned to pass: the standing [0.5, 2.0] median bound is kept and the
+ *          measured 1.96 sits just under it; a deeper inflow (DWF 0.3) reads
+ *          2.06 and would fail it. That is reported, not hidden. C1's floor
+ *          (member coverage >= 0.80) is one-sided and cannot catch an
+ *          over-wide band; the checklist carries that as an open decision.
  *
- *          Correcting that still leaves only ~9.4% saturation at 1 h, so the
- *          documented 0.676/1.251/1.610 is NOT reproducible from this fixture
- *          at this window on either base. Note also that at FULL saturation the
- *          ratio is ~2.36, which would still trip the ratio_med <= 2.0 assert —
- *          so the acceptance bounds need revisiting alongside the fixture.
- *
- *          Left UNFIXED per hard rule 2 ("nobody tunes a tolerance to green a
- *          spread-magnitude test"). See history_decisions.md and the P4 section
- *          of HSYM_RESIDUALS_PR_CHECKLIST.md.
+ *          Fixture knobs (env): P8_LEN, P8_DROP, P8_DIAM, P8_DWF, P8_INIT,
+ *          P8_WINDOW_H. Defaults are the committed fixture.
  */
 
 #include <gtest/gtest.h>
@@ -62,8 +55,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
+#include <iomanip>
 #include <map>
 #include <string>
 #include <vector>
@@ -93,6 +89,17 @@ constexpr double kRoutingStep   = 30.0;   // s
 constexpr double kReportStep    = 60.0;   // s
 constexpr double kEndTime       = 3600.0; // s (sampling window)
 
+// P8 fixture knobs (env, defaults = the committed fixture). Used to search
+// for a geometry whose dominant modal time constant fits the window; see the
+// "[RomCoverage-fixture]" printout and VALIDATION.md "P8".
+inline double envD(const char* n, double d) { const char* v = std::getenv(n); return (v && *v) ? std::atof(v) : d; }
+static double kP8Len   = envD("P8_LEN",   10.0);  // conduit length (m) -- P8: 10 m (was 100 m, tau0 10 h)
+static double kP8Drop  = envD("P8_DROP",   5.0);  // invert drop per conduit (m)
+static double kP8Diam  = envD("P8_DIAM",   1.0);  // conduit diameter (m)
+static double kP8Dwf   = envD("P8_DWF",    0.1);  // J1 dry-weather inflow (CMS)
+static double kP8Init  = envD("P8_INIT",   0.10); // initial depth (m)
+static double kP8Win   = envD("P8_WINDOW_H", 4.0) * 3600.0; // sampling window (s); END_TIME = window + 5 min
+
 std::string fixtureInp(double rough_mult, bool with_rom) {
     char rough[32];
     std::snprintf(rough, sizeof(rough), "%.9f", kBaseRoughness * rough_mult);
@@ -107,7 +114,7 @@ START_TIME           00:00:00
 REPORT_START_DATE    01/01/2025
 REPORT_START_TIME    00:00:00
 END_DATE             01/01/2025
-END_TIME             01:05:00
+END_TIME             END_HHMM
 REPORT_STEP          00:01:00
 ROUTING_STEP         0:00:30
 MIN_SURFAREA         1.0
@@ -116,38 +123,31 @@ HEAD_TOLERANCE       0.005
 MINIMUM_STEP         0.5
 THREADS              1
 
-[JUNCTIONS]
-;;Name  Elevation  MaxDepth  InitDepth  SurDepth  Aponded
-J1      100        5         0.10       0         0
-J2       95        5         0.10       0         0
-J3       90        5         0.10       0         0
-J4       85        5         0.10       0         0
-J5       80        5         0.10       0         0
-
-[OUTFALLS]
-;;Name  Elevation  Type  Stage  Gated
-O1      75         FREE         NO
-
-[CONDUITS]
-;;Name  From  To   Length  Roughness  InOffset  OutOffset  InitFlow  MaxFlow
-C1      J1    J2   100     ROUGH      0         0          0         0
-C2      J2    J3   100     ROUGH      0         0          0         0
-C3      J3    J4   100     ROUGH      0         0          0         0
-C4      J4    J5   100     ROUGH      0         0          0         0
-C5      J5    O1   100     ROUGH      0         0          0         0
-
-[XSECTIONS]
-;;Link  Shape    Geom1  Geom2  Geom3  Geom4  Barrels
-C1      CIRCULAR 1.0    0      0      0      1
-C2      CIRCULAR 1.0    0      0      0      1
-C3      CIRCULAR 1.0    0      0      0      1
-C4      CIRCULAR 1.0    0      0      0      1
-C5      CIRCULAR 1.0    0      0      0      1
-
-[DWF]
-;;Node  Constituent  Baseline  Patterns
-J1      FLOW         0.1
-
+)";
+    {
+        const int end_min = static_cast<int>(kP8Win / 60.0) + 5;
+        char hhmm[16];
+        std::snprintf(hhmm, sizeof hhmm, "%02d:%02d:00", end_min / 60, end_min % 60);
+        const auto ep = inp.find("END_HHMM");
+        if (ep != std::string::npos) inp.replace(ep, 8, hhmm);
+        std::ostringstream g;
+        g << std::setprecision(10);
+        g << "[JUNCTIONS]\n;;Name  Elevation  MaxDepth  InitDepth  SurDepth  Aponded\n";
+        for (int i = 1; i <= 5; ++i)
+            g << "J" << i << "  " << (100.0 - kP8Drop * (i - 1)) << "  5  " << kP8Init << "  0  0\n";
+        g << "\n[OUTFALLS]\n;;Name  Elevation  Type  Stage  Gated\nO1  "
+          << (100.0 - kP8Drop * 5) << "  FREE  NO\n\n";
+        g << "[CONDUITS]\n;;Name  From  To   Length  Roughness  InOffset  OutOffset  InitFlow  MaxFlow\n";
+        for (int i = 1; i <= 4; ++i)
+            g << "C" << i << "  J" << i << "  J" << (i + 1) << "  " << kP8Len << "  ROUGH  0  0  0  0\n";
+        g << "C5  J5  O1  " << kP8Len << "  ROUGH  0  0  0  0\n\n";
+        g << "[XSECTIONS]\n;;Link  Shape    Geom1  Geom2  Geom3  Geom4  Barrels\n";
+        for (int i = 1; i <= 5; ++i)
+            g << "C" << i << "  CIRCULAR  " << kP8Diam << "  0  0  0  1\n";
+        g << "\n[DWF]\n;;Node  Constituent  Baseline  Patterns\nJ1  FLOW  " << kP8Dwf << "\n\n";
+        inp += g.str();
+    }
+    inp += R"(
 [REPORT]
 INPUT      NO
 CONTINUITY YES
@@ -178,6 +178,7 @@ struct RunResult {
     std::map<std::string, std::vector<double>> q05, q50, q95;
     std::vector<double> times;   // report times (s), aligned with the vectors
     bool ok = false;
+    double lambda0 = 0.0, k1d = 0.0;   // P8: dominant eigenvalue and last K1d (ROM run only)
 };
 
 RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
@@ -287,6 +288,13 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
                 out.ok = false;
         }
     }
+    // P8: modal time-constant diagnostics (ROM run only). The dominant mode's
+    // tau_0 = 1/(lambda_0 * K1d) must fit the sampling window, else the test
+    // measures spin-up, not the band (the P4 root cause).
+    if (rom && rom->basis && !rom->basis->eigenvalues.empty()) {
+        out.lambda0 = rom->basis->eigenvalues[0];
+        out.k1d     = eng->rom1dLastK1d();
+    }
     cleanup();
     return out;
 }
@@ -307,14 +315,22 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
             (1.0 - kPert) + (static_cast<double>(i) + 0.5) / kMcRuns * 2.0 * kPert;
         const std::string tag = "mc" + std::to_string(i);
         mc[static_cast<std::size_t>(i)] =
-            runCase(fixtureInp(mult, /*with_rom=*/false), tag.c_str(), false);
+            runCase(fixtureInp(mult, /*with_rom=*/false), tag.c_str(), false, kP8Win);
         ASSERT_TRUE(mc[static_cast<std::size_t>(i)].ok) << "MC run " << i << " failed";
     }
 
     // --- ROM run -------------------------------------------------------------
-    RunResult rom = runCase(fixtureInp(1.0, /*with_rom=*/true), "rom", true);
+    RunResult rom = runCase(fixtureInp(1.0, /*with_rom=*/true), "rom", true, kP8Win);
     ASSERT_TRUE(rom.ok) << "ROM run failed";
     ASSERT_FALSE(rom.q05.empty()) << "ROM produced no quantiles";
+    {
+        const double tau0 = (rom.lambda0 > 0.0 && rom.k1d > 0.0) ? 1.0 / (rom.lambda0 * rom.k1d) : 0.0;
+        const double sat  = (tau0 > 0.0) ? 1.0 - std::exp(-0.5 * kP8Win / tau0) : 0.0;
+        std::printf("[RomCoverage-fixture] len=%.0f m drop=%.1f m diam=%.2f m dwf=%.3f cms  "
+                    "lambda0=%.4f K1d=%.3e 1/s  tau0=%.0f s (%.2f h)  saturation@%.0fs=%.3f\n",
+                    kP8Len, kP8Drop, kP8Diam, kP8Dwf, rom.lambda0, rom.k1d, tau0, tau0 / 3600.0,
+                    0.5 * kP8Win, sat);
+    }
 
     // --- Verify all runs share the same number of report samples -------------
     // If any run bailed early (stall guard / error), its time vector is shorter
@@ -341,7 +357,7 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
         const auto& rom_q95 = rom.q95.at(nm);
         for (std::size_t k = 0; k < n_samples; ++k) {
             if (rom.times[k] <= 60.0) continue;
-            const bool late = rom.times[k] >= 0.5 * kEndTime;  // saturated regime
+            const bool late = rom.times[k] >= 0.5 * kP8Win;   // saturated half of the window  // saturated regime
 
             std::vector<double> h(kMcRuns);
             for (int i = 0; i < kMcRuns; ++i)
@@ -390,8 +406,12 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
                 "min/med/max = %.3f / %.3f / %.3f  (in-band frac %.3f of %d)\n",
                 n_total, coverage, member_cov_sum / n_total, ratio_min, ratio_med, ratio_max,
                 width_frac, n_width);
-    // C1: this cell is known to be spin-up-limited (P4 root cause); fix = P8.
-    mcq::reportCalibration("PR-10 free-surface chain", member_cov_sum / n_total, "P8");
+    // C1 (P8, 2026-10-05): the fixture now samples the saturated regime, so
+    // this is a validated cell and asserts the floor. NOTE the floor is
+    // one-sided: this band is ~2x over-wide and passes it; the width bounds
+    // below are what catch over-prediction.
+    EXPECT_TRUE(mcq::reportCalibration("PR-10 free-surface chain", member_cov_sum / n_total, "-"))
+        << "free-surface chain is a validated cell since P8: member coverage must stay >= 0.80 (measured 0.941)";
 
     // Measured on the first full run (2026-07-08, this fixture):
     //   coverage = 0.997 (294/295), width ratio min/med/max =
@@ -411,6 +431,24 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     EXPECT_GE(ratio_med, 0.5) << "median width ratio implausibly low";
     EXPECT_LE(ratio_med, 2.0) << "median width ratio implausibly high";
 }
+
+// ---------------------------------------------------------------------------
+// P8: the old geometry, kept as an executable demonstration of the P4 lesson.
+// Ungated: it prints tau_0 and the saturation reached at the old 1 h window.
+// ---------------------------------------------------------------------------
+TEST(RomCoverage, SpinUpDemonstrationOldGeometry) {
+    const double len0 = kP8Len, win0 = kP8Win;
+    kP8Len = 100.0; kP8Win = 3600.0;
+    RunResult rom = runCase(fixtureInp(1.0, /*with_rom=*/true), "spinup_demo", true, kP8Win);
+    kP8Len = len0; kP8Win = win0;
+    ASSERT_TRUE(rom.ok);
+    const double tau0 = (rom.lambda0 > 0.0 && rom.k1d > 0.0) ? 1.0 / (rom.lambda0 * rom.k1d) : 0.0;
+    std::printf("[RomCoverage-spinup-demo] old geometry (100 m): tau0=%.0f s (%.1f h); "
+                "saturation at 1 h = %.3f -- a 1 h window cannot measure this band\n",
+                tau0, tau0 / 3600.0, 1.0 - std::exp(-3600.0 / tau0));
+    EXPECT_GT(tau0, 4.0 * 3600.0) << "the demonstration only makes sense if tau0 >> window";
+}
+
 
 // ============================================================================
 // PR H5 — surcharged-regime sensitivity attenuation: the gate that makes the

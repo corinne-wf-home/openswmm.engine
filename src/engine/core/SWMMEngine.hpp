@@ -574,8 +574,14 @@ public:
     /// spread (default on). Off reproduces the pre-SR-6 mapping bit-for-bit.
     bool& rom1dRunoffElasticityEnabled() noexcept { return rom1d_runoff_elasticity_enabled_; }
     const uncertainty::RunoffElasticityProbe& rom1dRunoffProbe() const noexcept { return rom1d_runoff_probe_; }
+    /// P8 diagnostic: the K1d handed to the 1D ROM on the most recent routing
+    /// step (0 before the first). With the basis eigenvalues this gives the
+    /// modal time constants tau_j = 1/(lambda_j*K1d) that a coverage fixture
+    /// must fit inside its sampling window (the P4 root cause).
+    double rom1dLastK1d() const noexcept { return rom1d_last_k1d_; }
 private:
     double rom1d_k1d_scale_ = 1.0;
+    double rom1d_last_k1d_ = 0.0;
 
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
     double computeK1d() noexcept;
