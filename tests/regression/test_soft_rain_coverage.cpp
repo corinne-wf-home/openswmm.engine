@@ -392,7 +392,7 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     // SR-6 (2026-10-05) raised this cell from 0.761 to 0.881 by propagating the
     // gage spread through the rain->runoff elasticity; it is now a validated
     // cell and asserts the floor (SR5_RUNOFF_ELASTICITY=0 reproduces 0.761).
-    EXPECT_TRUE(mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, "SR-6"))
+    EXPECT_TRUE(mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, ratio_med, "SR-6"))
         << "SR-5 is a validated cell since SR-6: member coverage must stay >= 0.80 (measured 0.881)";
     EXPECT_GE(coverage, 0.90)
         << "ROM [q05,q95] must contain the MC median at >=90% of samples";

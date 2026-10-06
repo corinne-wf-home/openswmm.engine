@@ -502,10 +502,10 @@ TEST(Rom2dMarcherCoverage, ProductionRungBandsBracketMarcherMonteCarlo) {
     EXPECT_GE(prod.coverage, 0.90)
         << "production-rung bands must bracket the marcher MC median";
     // C1 (2026-10-05): the production rung claims a validated band.
-    EXPECT_TRUE(mcq::reportCalibration("W3 2D production rung (adv)", prod.member_cov, "W4"))
+    EXPECT_TRUE(mcq::reportCalibration("W3 2D production rung (adv)", prod.member_cov, prod.ratio_med, "W4"))
         << "production rung is a 'validated' cell: member coverage must stay >= 0.80 (measured 0.82 on 2026-10-04)";
     for (std::size_t q = 0; q + 1 < 4; ++q)   // the three reference rungs; index 3 is prod
-        mcq::reportCalibration(rungName(rungs[q]), scores[q].member_cov, "reference rung, ungated");
+        mcq::reportCalibration(rungName(rungs[q]), scores[q].member_cov, scores[q].ratio_med, "reference rung, ungated");
     EXPECT_GE(prod.w_frac, 0.80)
         << "width ratio within [0.3,3] at >=80% of samples";
     EXPECT_GE(prod.ratio_med, 0.5) << "median width ratio implausibly low";

@@ -355,8 +355,10 @@ ROM reproduced the brute-force spread exactly. It does not everywhere. Measured
 against brute-force Monte Carlo (VALIDATION.md, "Interval-coverage audit"), the
 fraction of true outcomes inside the band ranges from 0.83 (front passage) and
 0.82 (2D production operator) down to 0.76 (soft rain), 0.51 (surcharged pipes)
-and 0.20 (an unreachable-regime fixture). The project's rule (C1): a cell is
-**calibrated** when that fraction is ≥ 0.80; otherwise its band is **ranking
+and 0.20 (an unreachable-regime fixture). The project's rule (C1 + C2): a cell is
+**calibrated** when that fraction is ≥ 0.80 *and* the band is no more than
+1.5× the brute-force width on median; ≥ 0.80 but wider than that is
+**conservative** (right place, too wide); below 0.80 its band is **ranking
 only** — it reliably shows *where* uncertainty concentrates and *which* nodes
 are more uncertain than others, but its width is not a probability. Each
 ranking-only cell has a named fix PR. Read every band in this guide as a
