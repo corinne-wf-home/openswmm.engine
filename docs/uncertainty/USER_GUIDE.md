@@ -1732,12 +1732,16 @@ INFLOWS node_grid.h5  CENTROID  FORCE_LOCATION  NODES  nodes.txt
   and the grid supplies spread only). `NODES <file>` (for INFLOWS target only:
   a text file listing node names, one per line).
 
-**What is wired on this line (PR SP2).** Only the `2D` target is. The 2D grid's
-`/spread` plane drives the 2D ROM's soft forcing whenever the 2D ROM is enabled
-(`[2D_ROM] ENABLE YES`), **with or without `FORCE_LOCATION`**; without it the
-gages remain the deterministic rainfall. `RUNOFF` and `INFLOWS` targets are
-parsed and recorded but nothing consumes them yet (their runtime, SR-2d, is not
-ported). `COHERENCE CORR_LEN` on a grid (PR SP3) is wired: the correlation acts over the
+**What is wired on this line (PR SP2, SP4).** The `2D` grid's `/spread` plane
+drives the 2D ROM's soft forcing whenever the 2D ROM is enabled (`[2D_ROM]
+ENABLE YES`), **with or without `FORCE_LOCATION`**; without it the gages remain
+the deterministic rainfall. `RUNOFF` and `INFLOWS` targets (SP4) consume the
+deterministic `/location` plane only, and only with `FORCE_LOCATION`: `RUNOFF`
+overrides each subcatchment's rainfall (user rain units; `CENTROID`, or
+`AREA_MEAN` where `[POLYGONS]` exist), `INFLOWS` adds a lateral inflow to the
+listed nodes (user flow units). Their `/spread` planes have no ROM consumer on
+any branch: rainfall *uncertainty* for 1D subcatchments is the `[SOFT_RAINGAGES]`
+path, not a grid. `COHERENCE CORR_LEN` on a grid (PR SP3) is wired: the correlation acts over the
 triangle centroids. It cannot be combined with a `family=MIXED` file; that is
 refused at initialization. The grid's last time plane is held for the rest of
 the run. A `CV` spread is converted to an

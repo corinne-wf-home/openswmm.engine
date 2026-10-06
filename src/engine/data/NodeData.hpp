@@ -190,13 +190,26 @@ struct NodeData {
     std::vector<double>     lat_flow;
 
     /**
-     * @brief User-forced lateral inflow set via the API (project flow units).
+     * @brief User-set lateral inflow from swmm_node_set_lateral_inflow()
+     *        (INTERNAL cfs; the API setter converts from project units).
      *
      * Unlike lat_flow, this is not cleared between routing steps.  The
      * value persists until the user explicitly changes it and is added
      * to lat_flow at each routing step.
      */
     std::vector<double>     user_lat_flow;
+
+    /**
+     * @brief Per-step lateral inflow from the runtime FORCING channel
+     *        (INTERNAL cfs). Rebuilt from ctx.forcing by applyForcings() at
+     *        the start of every routing step, so a RESET forcing lasts one
+     *        step and a PERSIST forcing is re-applied each step; it never
+     *        accumulates into user_lat_flow. Added to lat_flow alongside
+     *        user_lat_flow and counted in routing_forcing_inflow.
+     *        (SP4, 2026-10-05: before this, an ADD forcing accumulated in
+     *        user_lat_flow every step and was never removed.)
+     */
+    std::vector<double>     forcing_lat_flow;
 
     // -----------------------------------------------------------------------
     // Decomposed lateral inflow sources
@@ -607,6 +620,7 @@ struct NodeData {
         volume.assign(un, 0.0);
         lat_flow.assign(un, 0.0);
         user_lat_flow.assign(un, 0.0);
+        forcing_lat_flow.assign(un, 0.0);
         runoff_inflow.assign(un, 0.0);
         gw_inflow.assign(un, 0.0);
         ext_inflow.assign(un, 0.0);
@@ -679,7 +693,7 @@ struct NodeData {
         g(sur_depth, 0.0); g(ponded_area, 0.0);
         // Subtype config (storage/outfall/divider) lives in NodeSubtypes side-tables.
         g(depth, 0.0); g(head, 0.0); g(volume, 0.0);
-        g(lat_flow, 0.0); g(user_lat_flow, 0.0);
+        g(lat_flow, 0.0); g(user_lat_flow, 0.0); g(forcing_lat_flow, 0.0);
         g(runoff_inflow, 0.0); g(gw_inflow, 0.0); g(ext_inflow, 0.0);
         g(dwf_inflow, 0.0); g(rdii_inflow, 0.0); g(iface_inflow, 0.0);
         g(coupling_inflow, 0.0); g(coupling_volume, 0.0); g(coupling_queue, 0.0);
@@ -729,7 +743,7 @@ struct NodeData {
         // its rows are erased/renumbered by NodeSubtypes::erase_node (called by the
         // node-delete path), not here.
         e(depth); e(head); e(volume);
-        e(lat_flow); e(user_lat_flow);
+        e(lat_flow); e(user_lat_flow); e(forcing_lat_flow);
         e(runoff_inflow); e(gw_inflow); e(ext_inflow); e(dwf_inflow);
         e(rdii_inflow); e(iface_inflow);
         e(coupling_inflow); e(coupling_volume); e(coupling_queue);
@@ -824,6 +838,7 @@ struct NodeData {
         volume.shrink_to_fit();
         lat_flow.shrink_to_fit();
         user_lat_flow.shrink_to_fit();
+        forcing_lat_flow.shrink_to_fit();
         runoff_inflow.shrink_to_fit();
         gw_inflow.shrink_to_fit();
         ext_inflow.shrink_to_fit();

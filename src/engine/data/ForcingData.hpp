@@ -54,7 +54,7 @@ struct ForcingData {
     // ------ Node forcing (sized to n_nodes) ---------------------------------
 
     std::vector<ForcingMode>    node_lat_inflow_mode;
-    std::vector<double>         node_lat_inflow_value;
+    std::vector<double>         node_lat_inflow_value;   ///< PROJECT flow units (CFS/CMS), as the API documents; applyForcings() converts to internal cfs
     std::vector<ForcingPersist> node_lat_inflow_persist;
 
     std::vector<ForcingMode>    node_head_boundary_mode;

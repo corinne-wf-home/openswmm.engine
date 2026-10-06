@@ -11,6 +11,10 @@
  */
 
 #include "SWMMEngine.hpp"
+#include <fstream>
+#ifdef OPENSWMM_HAS_2D
+#include "../uncertainty/GridMappingWeights.hpp"
+#endif
 #include "DateTime.hpp"
 #include "SimulationContext.hpp"
 #include "PerfTimers.hpp"
@@ -990,6 +994,9 @@ int SWMMEngine::step(double* elapsed_time) noexcept {
     resetStepMassBalance();
 
     // ---- Apply user-injected runtime forcings ----
+#ifdef OPENSWMM_HAS_2D
+    stageSoftGridForcings();   // SP4: RUNOFF/INFLOWS grid /location -> ctx_.forcing (RESET)
+#endif
     applyForcings(dt_next);
 
     // ---- Full simulation pipeline (matching legacy swmm_step order) ----
@@ -1129,6 +1136,22 @@ void SWMMEngine::stepRunoff(double dt_routing) noexcept {
         for (int g = 0; g < ctx_.n_gages(); ++g) {
             if (ctx_.gages.rainfall[static_cast<std::size_t>(g)] > 0.0)
                 is_raining = true;
+        }
+        // SP4 (SR-2d re-port): a RUNOFF grid override may supply rainfall
+        // even when the gages read zero. Detect it here so the runoff clock
+        // uses the wet step (matching the equivalent gage-driven run);
+        // otherwise the nonlinear reservoir diverges on the coarser dry step.
+        // No-op when no subcatchment rainfall forcing is staged.
+        if (!is_raining) {
+            for (int i = 0; i < ctx_.n_subcatches(); ++i) {
+                auto ui = static_cast<std::size_t>(i);
+                if (ui < ctx_.forcing.subcatch_rainfall_mode.size() &&
+                    ctx_.forcing.subcatch_rainfall_mode[ui] != ForcingMode::NONE &&
+                    ctx_.forcing.subcatch_rainfall_value[ui] > 0.0) {
+                    is_raining = true;
+                    break;
+                }
+            }
         }
 
         // A2. Update climate state
@@ -3353,8 +3376,10 @@ void SWMMEngine::updateRoutingMassBalance(double dt_routing) noexcept {
             auto uj = static_cast<std::size_t>(j);
             if (ctx_.nodes.runoff_inflow[uj] > 0.0)
                 runoff_q += ctx_.nodes.runoff_inflow[uj];
-            if (ctx_.nodes.user_lat_flow[uj] > 0.0)
-                user_q_total += ctx_.nodes.user_lat_flow[uj];
+            {
+                const double uq = ctx_.nodes.user_lat_flow[uj] + ctx_.nodes.forcing_lat_flow[uj];
+                if (uq > 0.0) user_q_total += uq;
+            }
             if (ctx_.nodes.coupling_inflow[uj] < 0.0)
                 coupling_out_q += -ctx_.nodes.coupling_inflow[uj];
         }
@@ -4404,17 +4429,29 @@ double SWMMEngine::subcatchSnowDepth(int idx) const noexcept {
 void SWMMEngine::applyForcings(double dt) noexcept {
     auto& f = ctx_.forcing;
 
-    // ---- Node lateral inflow forcing → write to user_lat_flow ----
-    // Transient ForcingData lateral inflows are merged into user_lat_flow
-    // so that the existing stepRunoff application path and mass balance
-    // tracking in updateRoutingMassBalance handle them uniformly.
+    // ---- Node lateral inflow forcing → per-step forcing_lat_flow ----
+    // SP4 (2026-10-05) fixed three defects here, all only active when a
+    // forcing is staged (bit-identical otherwise):
+    //  * ADD/OVERRIDE used to be written INTO the persistent user_lat_flow,
+    //    so a RESET ADD accumulated every step and was never removed. The
+    //    forcing now lives in forcing_lat_flow, rebuilt from scratch every
+    //    step: RESET lasts one step, PERSIST is re-applied each step.
+    //  * The API documents the value in PROJECT flow units (CFS/CMS) but it
+    //    was consumed as internal cfs. Converted here, once.
+    //  * The forced volume was tracked (routing_forcing_inflow) but excluded
+    //    from the continuity total; routing_error() now includes it.
+    const double flow_to_internal = 1.0 / ucf::UCF(ucf::FLOW, ctx_.options);
     for (int i = 0; i < ctx_.n_nodes(); ++i) {
         auto ui = static_cast<std::size_t>(i);
+        double fq = 0.0;
         if (f.node_lat_inflow_mode[ui] == ForcingMode::OVERRIDE) {
-            ctx_.nodes.user_lat_flow[ui] = f.node_lat_inflow_value[ui];
+            // Total user-supplied lateral = value: the forcing supplies the
+            // difference over whatever the persistent API setter holds.
+            fq = f.node_lat_inflow_value[ui] * flow_to_internal - ctx_.nodes.user_lat_flow[ui];
         } else if (f.node_lat_inflow_mode[ui] == ForcingMode::ADD) {
-            ctx_.nodes.user_lat_flow[ui] += f.node_lat_inflow_value[ui];
+            fq = f.node_lat_inflow_value[ui] * flow_to_internal;
         }
+        ctx_.nodes.forcing_lat_flow[ui] = fq;
     }
 
     // ---- Node head boundary forcing (outfalls only) ----
@@ -4854,6 +4891,10 @@ void SWMMEngine::initHydraulics() noexcept {
             break;
         }
     }
+
+    // 1a-iii. SP4 (SR-2d): RUNOFF / INFLOWS grid targets with FORCE_LOCATION
+    //         get their own readers + target mappings; staged per step.
+    initSoftGridRuntimes();
 
     // 1a-ii. Build the optional 1D spectral ROM: triggered by an explicit
     //        [UNCERTAINTY] 1D source, or automatically when the 2D ROM is
@@ -5926,6 +5967,7 @@ void SWMMEngine::assembleLateralInflows(double dt_routing) noexcept {
         ctx_.nodes.lat_flow[uj] += ctx_.nodes.rdii_inflow[uj];
         ctx_.nodes.lat_flow[uj] += ctx_.nodes.iface_inflow[uj];
         ctx_.nodes.lat_flow[uj] += ctx_.nodes.user_lat_flow[uj]
+                                 + ctx_.nodes.forcing_lat_flow[uj]
                                  + ctx_.nodes.coupling_inflow[uj];
     }
 
@@ -6039,6 +6081,240 @@ void SWMMEngine::initMassBalance() noexcept {
 }
 
 #ifdef OPENSWMM_HAS_2D
+// ============================================================================
+// initSoftGridRuntimes() / stageSoftGridForcings() -- SP4 (SR-2d re-port):
+// RUNOFF / INFLOWS targets of [SOFT_RAINFALL_GRID], deterministic /location
+// ============================================================================
+// Ported verbatim from the pre-port branch (a39471c0 / SR-2d) except for the
+// surrounding OPENSWMM_HAS_2D guard (GridFileReader is compiled only with 2D
+// on this line). The stage call sits in step() before applyForcings(), as there.
+
+void SWMMEngine::initSoftGridRuntimes() noexcept {
+    soft_grid_runtimes_.clear();
+
+    auto nearest_index = [](const std::vector<double>& coords, double value) -> int {
+        if (coords.empty()) return -1;
+        int best = 0;
+        for (int i = 1; i < static_cast<int>(coords.size()); ++i) {
+            if (std::abs(value - coords[static_cast<std::size_t>(i)])
+                < std::abs(value - coords[static_cast<std::size_t>(best)])) {
+                best = i;
+            }
+        }
+        return best;
+    };
+
+    auto subcatch_centroid = [this](int idx, double& x, double& y) -> bool {
+        auto ui = static_cast<std::size_t>(idx);
+        if (ui < ctx_.spatial.subcatch_polygon_x.size() &&
+            ui < ctx_.spatial.subcatch_polygon_y.size() &&
+            !ctx_.spatial.subcatch_polygon_x[ui].empty() &&
+            ctx_.spatial.subcatch_polygon_x[ui].size() == ctx_.spatial.subcatch_polygon_y[ui].size()) {
+            const auto& xs = ctx_.spatial.subcatch_polygon_x[ui];
+            const auto& ys = ctx_.spatial.subcatch_polygon_y[ui];
+            double sx = 0.0, sy = 0.0;
+            for (std::size_t k = 0; k < xs.size(); ++k) {
+                sx += xs[k];
+                sy += ys[k];
+            }
+            x = sx / static_cast<double>(xs.size());
+            y = sy / static_cast<double>(ys.size());
+            return true;
+        }
+        if (ui < ctx_.spatial.subcatch_x.size() && ui < ctx_.spatial.subcatch_y.size()) {
+            x = ctx_.spatial.subcatch_x[ui];
+            y = ctx_.spatial.subcatch_y[ui];
+            return true;
+        }
+        return false;
+    };
+
+    auto trim = [](std::string s) -> std::string {
+        const auto first = s.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return {};
+        const auto last = s.find_last_not_of(" \t\r\n");
+        return s.substr(first, last - first + 1);
+    };
+
+    std::string inp_dir;
+    if (!ctx_.inp_file_path.empty()) {
+        inp_dir = std::filesystem::path(ctx_.inp_file_path).parent_path().string();
+    }
+
+    for (const auto& spec : uncertainty_config_.grid_sources) {
+        if (!spec.force_location) continue;
+        if (spec.target != uncertainty::GridTarget::RUNOFF &&
+            spec.target != uncertainty::GridTarget::INFLOWS) continue;
+
+        SoftGridRuntime runtime;
+        runtime.target = spec.target;
+        runtime.force_location = spec.force_location;
+        runtime.file_path = spec.file_path;
+        runtime.nodes_file = spec.nodes_file;
+        runtime.mapping = spec.mapping;
+
+        std::string resolved = spec.file_path;
+        if (!resolved.empty() && resolved[0] != '/' && !inp_dir.empty()) {
+            resolved = (std::filesystem::path(inp_dir) / resolved).string();
+        }
+        if (!runtime.reader.open(resolved) || !runtime.reader.has_location()) {
+            continue;
+        }
+
+        const int nx = runtime.reader.nx();
+        const auto& xs = runtime.reader.x_coords();
+        const auto& ys = runtime.reader.y_coords();
+
+        if (spec.target == uncertainty::GridTarget::RUNOFF) {
+            // SR-4a: AREA_MEAN uses polygon∩pixel area weights (subcatchments);
+            // build a per-target CSR. Falls back to CENTROID (with a warning)
+            // for subcatchments lacking a usable polygon.
+            const bool want_area_mean =
+                (spec.mapping == uncertainty::GridMapping::AREA_MEAN);
+            bool area_mean_used = false;
+            bool warned_fallback = false;
+            if (want_area_mean) {
+                runtime.csr_off.push_back(0);
+            }
+            for (int i = 0; i < ctx_.n_subcatches(); ++i) {
+                double cx = 0.0, cy = 0.0;
+                if (!subcatch_centroid(i, cx, cy)) continue;
+
+                if (want_area_mean) {
+                    const auto ui = static_cast<std::size_t>(i);
+                    std::vector<uint32_t> wpx;
+                    std::vector<float> ww;
+                    if (ui < ctx_.spatial.subcatch_polygon_x.size() &&
+                        ui < ctx_.spatial.subcatch_polygon_y.size()) {
+                        uncertainty::polygonPixelWeights(ctx_.spatial.subcatch_polygon_x[ui],
+                                              ctx_.spatial.subcatch_polygon_y[ui],
+                                              xs, ys, wpx, ww);
+                    }
+                    if (!wpx.empty()) {
+                        runtime.target_indices.push_back(i);
+                        for (std::size_t k = 0; k < wpx.size(); ++k) {
+                            runtime.csr_px.push_back(wpx[k]);
+                            runtime.csr_w.push_back(ww[k]);
+                        }
+                        runtime.csr_off.push_back(static_cast<int>(runtime.csr_px.size()));
+                        // Keep a representative pixel for any CENTROID-style use.
+                        runtime.pixel_indices.push_back(wpx[0]);
+                        area_mean_used = true;
+                        continue;
+                    }
+                    // Fall back to CENTROID for this subcatchment.
+                    if (!warned_fallback) {
+                        ctx_.warnings.push_back(
+                            "WARNING: AREA_MEAN grid mapping fell back to CENTROID for "
+                            "one or more subcatchments without a usable [POLYGONS] outline.");
+                        warned_fallback = true;
+                    }
+                }
+
+                int ix = nearest_index(xs, cx);
+                int iy = nearest_index(ys, cy);
+                if (ix < 0 || iy < 0) continue;
+                runtime.target_indices.push_back(i);
+                const auto px = static_cast<uint32_t>(iy * nx + ix);
+                runtime.pixel_indices.push_back(px);
+                if (want_area_mean) {
+                    // Single-pixel CSR row (weight 1) so the staging loop stays uniform.
+                    runtime.csr_px.push_back(px);
+                    runtime.csr_w.push_back(1.0f);
+                    runtime.csr_off.push_back(static_cast<int>(runtime.csr_px.size()));
+                }
+            }
+            // If AREA_MEAN was requested but nothing used real polygon weights,
+            // drop the CSR so staging uses the plain CENTROID path.
+            if (want_area_mean && !area_mean_used) {
+                runtime.mapping = uncertainty::GridMapping::CENTROID;
+                runtime.csr_off.clear();
+                runtime.csr_px.clear();
+                runtime.csr_w.clear();
+            }
+        } else if (spec.target == uncertainty::GridTarget::INFLOWS) {
+            std::vector<int> node_indices;
+            if (!spec.nodes_file.empty()) {
+                std::string nodes_path = spec.nodes_file;
+                if (!nodes_path.empty() && nodes_path[0] != '/' && !inp_dir.empty()) {
+                    nodes_path = (std::filesystem::path(inp_dir) / nodes_path).string();
+                }
+                std::ifstream f(nodes_path);
+                std::string line;
+                while (std::getline(f, line)) {
+                    line = trim(line);
+                    if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+                    int idx = ctx_.node_names.find(line);
+                    if (idx >= 0) node_indices.push_back(idx);
+                }
+            } else {
+                for (int i = 0; i < ctx_.n_nodes(); ++i) node_indices.push_back(i);
+            }
+
+            for (int idx : node_indices) {
+                auto ui = static_cast<std::size_t>(idx);
+                if (ui >= ctx_.spatial.node_x.size() || ui >= ctx_.spatial.node_y.size()) continue;
+                int ix = nearest_index(xs, ctx_.spatial.node_x[ui]);
+                int iy = nearest_index(ys, ctx_.spatial.node_y[ui]);
+                if (ix < 0 || iy < 0) continue;
+                runtime.target_indices.push_back(idx);
+                runtime.pixel_indices.push_back(static_cast<uint32_t>(iy * nx + ix));
+            }
+        }
+
+        soft_grid_runtimes_.push_back(std::move(runtime));
+    }
+}
+
+void SWMMEngine::stageSoftGridForcings() noexcept {
+    for (auto& runtime : soft_grid_runtimes_) {
+        if (!runtime.reader.has_current()) {
+            if (!runtime.reader.advance()) continue;
+        }
+        while (runtime.reader.has_current() && runtime.reader.spread_next() != nullptr
+               && runtime.reader.time_next() < ctx_.current_time) {
+            if (!runtime.reader.advance()) break;
+        }
+
+        const float* loc = runtime.reader.location_now();
+        if (!loc) continue;
+
+        if (runtime.target == uncertainty::GridTarget::RUNOFF) {
+            const bool use_csr =
+                (runtime.mapping == uncertainty::GridMapping::AREA_MEAN)
+                && !runtime.csr_off.empty();
+            for (std::size_t k = 0; k < runtime.target_indices.size(); ++k) {
+                const int idx = runtime.target_indices[k];
+                const auto ui = static_cast<std::size_t>(idx);
+                double value;
+                if (use_csr) {
+                    // Area-weighted mean over the polygon∩pixel intersections.
+                    value = 0.0;
+                    const int lo = runtime.csr_off[k];
+                    const int hi = runtime.csr_off[k + 1];
+                    for (int m = lo; m < hi; ++m)
+                        value += static_cast<double>(runtime.csr_w[static_cast<std::size_t>(m)])
+                                 * static_cast<double>(loc[runtime.csr_px[static_cast<std::size_t>(m)]]);
+                } else {
+                    value = static_cast<double>(loc[runtime.pixel_indices[k]]);
+                }
+                ctx_.forcing.subcatch_rainfall_mode[ui] = ForcingMode::OVERRIDE;
+                ctx_.forcing.subcatch_rainfall_value[ui] = value;
+                ctx_.forcing.subcatch_rainfall_persist[ui] = ForcingPersist::RESET;
+            }
+        } else if (runtime.target == uncertainty::GridTarget::INFLOWS) {
+            for (std::size_t k = 0; k < runtime.target_indices.size(); ++k) {
+                const int idx = runtime.target_indices[k];
+                const auto ui = static_cast<std::size_t>(idx);
+                const uint32_t px = runtime.pixel_indices[k];
+                ctx_.forcing.node_lat_inflow_mode[ui] = ForcingMode::ADD;
+                ctx_.forcing.node_lat_inflow_value[ui] = static_cast<double>(loc[px]);
+                ctx_.forcing.node_lat_inflow_persist[ui] = ForcingPersist::RESET;
+            }
+        }
+    }
+}
+
 // ============================================================================
 // initSoftRain1D() -- per-active-node gage-level soft rainfall CSR (SP1)
 // ============================================================================

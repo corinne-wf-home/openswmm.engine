@@ -488,6 +488,38 @@ ctest --test-dir build/darwin-tests-local -R "test_engine_spde_spatial_basis|tes
 
 ---
 
+# SP4 — RUNOFF / INFLOWS grid targets re-ported; three runtime-forcing defects fixed (2026-10-05)
+
+SP4 re-ports SR-2d (`SWMMEngine::initSoftGridRuntimes` / `stageSoftGridForcings`)
+verbatim and registers its two dormant gates (`test_engine_soft_rain_grid_targets`,
+2 cases; `test_engine_soft_rain_grid_engine`, 3 cases). Getting the end-to-end
+gate green required fixing three defects in the engine's runtime-forcing path
+that are **not SP4-specific**: every `swmm_forcing_node_lat_inflow()` user hit
+them. All three act only when a forcing is staged, so parity runs are
+bit-identical (full gate 140/142 with only the two known reds).
+
+| Defect | Symptom measured | Fix |
+|---|---|---|
+| Runoff clock ignored a grid rainfall override | grid RUNOFF run used the dry step while the gage control used the wet step; continuity errors −0.161 vs −0.043 with identical rainfall totals | `is_raining` also true when a subcatchment rainfall forcing > 0 is staged (the pre-port SR-2d fix, missing here) |
+| ADD forcing with RESET persistence accumulated | forced lateral inflow grew 0.00057, 0.00113, 0.0017, … every step | transient forcings live in a new per-step `nodes.forcing_lat_flow`, rebuilt by `applyForcings()` each step; `user_lat_flow` is the API setter's persistent value only |
+| Forcing value consumed in the wrong units | 0.02 CMS staged as 0.02 cfs | converted once in `applyForcings()` with `UCF(FLOW)`; the API documents project units and now gets them |
+| Forced volume outside the continuity total | routing continuity error **−4371** (forced volume over initial storage) | `routing_error()` includes `routing_forcing_inflow` |
+
+**A base-level residual, flagged, not fixed.** With all three fixed, the grid
+INFLOWS run and an equivalent `[INFLOWS]`-timeseries control close to the
+*same* routing continuity error, **−0.1426**, carrying the same 211.864 ft³.
+That is a 14% continuity error on a 5-minute, one-junction, one-conduit model
+with constant inflow, independent of how the inflow is supplied. The gate now
+asserts grid = control (error to 1e-9 absolute, volume to 1e-6 relative; the
+two unit-conversion paths differ at 2e-8), replacing the pre-port absolute
+`|error| < 1e-4`, which this base cannot meet for any inflow path on this
+fixture. Candidate follow-up: the early-time storage accounting on short runs.
+
+Reproduction: `ctest -R 'soft_rain_grid_(engine|targets)'`; `SP4_TRACE=1` on
+the engine binary prints per-step inflow and every mass-balance total.
+
+---
+
 # P8 — Free-surface MC fixture redesigned; the saturated band is ~2× over-wide (2026-10-05)
 
 The PR-10 free-surface chain was deliberately red from 2026-08-04: its 100 m

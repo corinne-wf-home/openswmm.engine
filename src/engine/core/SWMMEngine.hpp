@@ -73,6 +73,9 @@
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
 #include "../uncertainty/RunoffElasticity.hpp"
+#ifdef OPENSWMM_HAS_2D
+#include "../uncertainty/GridFileReader.hpp"
+#endif
 namespace openswmm::twoD { class Default2DOutputPlugin; }
 #endif
 
@@ -457,6 +460,38 @@ private:
     /// this base consumes them yet (the WQ uncertainty layer, PR 13 on the
     /// old sidecar, was not ported).
     uncertainty::UncertaintyConfig uncertainty_config_;
+
+#ifdef OPENSWMM_HAS_2D
+    /**
+     * @brief SP4 (SR-2d re-port): deterministic gridded forcing for the RUNOFF
+     *        and INFLOWS targets of [SOFT_RAINFALL_GRID].
+     *
+     * One runtime per FORCE_LOCATION source: its own GridFileReader, the
+     * target subcatchment/node indices, the pixel per target (nearest pixel
+     * centre) or, for RUNOFF with AREA_MEAN and [POLYGONS], a polygon-pixel
+     * area-weight CSR. Staged every step into ctx_.forcing (RUNOFF: rainfall
+     * OVERRIDE in user units; INFLOWS: lateral inflow ADD) with RESET
+     * persistence, so applyForcings() and the runoff solver consume them like
+     * any API forcing. Only the deterministic /location plane is used; the
+     * /spread plane of these two targets has no ROM consumer on either branch.
+     */
+    struct SoftGridRuntime {
+        uncertainty::GridTarget target = uncertainty::GridTarget::TWO_D;
+        bool force_location = false;
+        std::string file_path;
+        std::string nodes_file;
+        GridFileReader reader;
+        std::vector<int> target_indices;       ///< subcatch/node indices in parse order
+        std::vector<uint32_t> pixel_indices;   ///< nearest grid-cell center per target index
+        uncertainty::GridMapping mapping = uncertainty::GridMapping::CENTROID;
+        std::vector<int> csr_off;              ///< CSR row offsets (n_targets+1); empty => CENTROID
+        std::vector<uint32_t> csr_px;          ///< CSR pixel indices
+        std::vector<float> csr_w;              ///< CSR area-fraction weights (row-sum 1)
+    };
+    std::vector<SoftGridRuntime> soft_grid_runtimes_; ///< RUNOFF/INFLOWS grid forcing runtimes
+    void initSoftGridRuntimes() noexcept;
+    void stageSoftGridForcings() noexcept;
+#endif
 
     // ---- 1D network spectral ROM (owned) ----
     // Deviation-form ensemble propagating uncertainty alongside the

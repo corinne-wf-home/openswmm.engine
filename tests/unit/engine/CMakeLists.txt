@@ -359,6 +359,80 @@ if(OPENSWMM_BUILD_2D)
     )
     set_tests_properties(test_engine_soft_rain_grid_2d PROPERTIES LABELS "unit")
 
+    # SP4 (SR-2d re-port): RUNOFF/INFLOWS grid targets. Writes its own HDF5
+    # fixtures, so the same direct hdf5 link as test_engine_soft_rain_grid_2d.
+    add_executable(test_engine_soft_rain_grid_engine test_soft_rain_grid_engine.cpp)
+    target_link_libraries(test_engine_soft_rain_grid_engine
+        PRIVATE
+            GTest::gtest GTest::gtest_main GTest::gmock
+            openswmm_engine
+    )
+    find_package(hdf5 CONFIG QUIET)
+    if(TARGET hdf5::hdf5-shared)
+        target_link_libraries(test_engine_soft_rain_grid_engine PRIVATE hdf5::hdf5-shared)
+    elseif(TARGET hdf5::hdf5-static)
+        target_link_libraries(test_engine_soft_rain_grid_engine PRIVATE hdf5::hdf5-static)
+    else()
+        find_package(HDF5 REQUIRED COMPONENTS C)
+        target_link_libraries(test_engine_soft_rain_grid_engine PRIVATE ${HDF5_C_LIBRARIES})
+        target_include_directories(test_engine_soft_rain_grid_engine PRIVATE ${HDF5_INCLUDE_DIRS})
+    endif()
+    target_include_directories(test_engine_soft_rain_grid_engine
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src/engine
+    )
+    set_target_properties(test_engine_soft_rain_grid_engine PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        RUNTIME_OUTPUT_DIRECTORY ${TEST_BIN_DIRECTORY}
+        INSTALL_RPATH "${LIB_ROOT}"
+    )
+    openswmm_stage_test_runtime_deps(test_engine_soft_rain_grid_engine)
+    add_test(
+        NAME    test_engine_soft_rain_grid_engine
+        COMMAND $<TARGET_FILE:test_engine_soft_rain_grid_engine>
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data
+    )
+    set_tests_properties(test_engine_soft_rain_grid_engine PROPERTIES LABELS "unit")
+
+    # SP4 (SR-2d re-port): RUNOFF/INFLOWS grid targets. Writes its own HDF5
+    # fixtures, so the same direct hdf5 link as test_engine_soft_rain_grid_2d.
+    add_executable(test_engine_soft_rain_grid_targets test_soft_rain_grid_targets.cpp)
+    target_link_libraries(test_engine_soft_rain_grid_targets
+        PRIVATE
+            GTest::gtest GTest::gtest_main GTest::gmock
+            openswmm_engine
+    )
+    find_package(hdf5 CONFIG QUIET)
+    if(TARGET hdf5::hdf5-shared)
+        target_link_libraries(test_engine_soft_rain_grid_targets PRIVATE hdf5::hdf5-shared)
+    elseif(TARGET hdf5::hdf5-static)
+        target_link_libraries(test_engine_soft_rain_grid_targets PRIVATE hdf5::hdf5-static)
+    else()
+        find_package(HDF5 REQUIRED COMPONENTS C)
+        target_link_libraries(test_engine_soft_rain_grid_targets PRIVATE ${HDF5_C_LIBRARIES})
+        target_include_directories(test_engine_soft_rain_grid_targets PRIVATE ${HDF5_INCLUDE_DIRS})
+    endif()
+    target_include_directories(test_engine_soft_rain_grid_targets
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src/engine
+    )
+    set_target_properties(test_engine_soft_rain_grid_targets PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        RUNTIME_OUTPUT_DIRECTORY ${TEST_BIN_DIRECTORY}
+        INSTALL_RPATH "${LIB_ROOT}"
+    )
+    openswmm_stage_test_runtime_deps(test_engine_soft_rain_grid_targets)
+    add_test(
+        NAME    test_engine_soft_rain_grid_targets
+        COMMAND $<TARGET_FILE:test_engine_soft_rain_grid_targets>
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data
+    )
+    set_tests_properties(test_engine_soft_rain_grid_targets PROPERTIES LABELS "unit")
+
     # Reduced k×k deviation operator: expm/φ₁ propagator, anisotropic assembly
     # structure, and the SpectralROM matrix-path ≡ diagonal-path parity pin.
     add_gtest_unit(test_engine_2d_deviation_operator test_2d_deviation_operator.cpp)
