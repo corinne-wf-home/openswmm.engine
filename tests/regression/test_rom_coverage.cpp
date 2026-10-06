@@ -410,7 +410,7 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     // this is a validated cell and asserts the floor. NOTE the floor is
     // one-sided: this band is ~2x over-wide and passes it; the width bounds
     // below are what catch over-prediction.
-    EXPECT_TRUE(mcq::reportCalibration("PR-10 free-surface chain", member_cov_sum / n_total, "-"))
+    EXPECT_TRUE(mcq::reportCalibration("PR-10 free-surface chain", member_cov_sum / n_total, ratio_med, "H13 (over-wide at saturation)"))
         << "free-surface chain is a validated cell since P8: member coverage must stay >= 0.80 (measured 0.941)";
 
     // Measured on the first full run (2026-07-08, this fixture):
@@ -702,7 +702,7 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
                 r.ratio_max, r.surcharged_frac, r.n_width);
 
     // C1: EXPLICIT is a documented limitation; SEMI_IMPLICIT's fix is H5b.
-    mcq::reportCalibration(label, r.member_cov,
+    mcq::reportCalibration(label, r.member_cov, r.ratio_med,
                            std::string(label) == "EXPLICIT" ? "documented limitation (H5)" : "H5b");
 
     // The regime precondition itself: this fixture must actually be
@@ -1036,7 +1036,7 @@ TEST(RomCoverageFront, PhaseCoordinate) {
                 r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
 
     // C1 (2026-10-05): H11 claims a calibrated band, so it asserts the floor.
-    EXPECT_TRUE(mcq::reportCalibration("H11 front, phase coordinate", r.member_cov, "-"))
+    EXPECT_TRUE(mcq::reportCalibration("H11 front, phase coordinate", r.member_cov, r.ratio_med, "-"))
         << "H11 is a 'validated' cell: member coverage must stay >= 0.80 (measured 0.83 on 2026-10-04)";
 
     // H11's acceptance bounds (HSYM_RESIDUALS_PR_CHECKLIST.md, PR H11):
@@ -1068,5 +1068,5 @@ TEST(RomCoverageFront, AmplitudeOnlyBaseline) {
     std::printf("[ROM-vs-MC FRONT AmplitudeOnlyBaseline] samples=%d  median-containment=%.3f  member-coverage=%.3f  "
                 "width-ratio min/med/max = %.3f / %.3f / %.3f  (n_width=%d)\n",
                 r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med, r.ratio_max, r.n_width);
-    mcq::reportCalibration("H11 amplitude-only baseline", r.member_cov, "superseded by H11 (ungated baseline)");
+    mcq::reportCalibration("H11 amplitude-only baseline", r.member_cov, r.ratio_med, "superseded by H11 (ungated baseline)");
 }

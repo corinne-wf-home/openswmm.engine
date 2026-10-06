@@ -13,24 +13,28 @@ members inside the ROM's q05–q95 band, nominal 0.905 for 21 strata midpoints
 
 ## 1. Every MC cell, corrected — with the C1 status
 
-**C1 decision (owner, 2026-10-05).** A cell is **calibrated** when its empirical
-member coverage is ≥ 0.80 (the 21-member LHS ceiling is 0.905; 0.80 leaves one
-member of granularity). Below that it is **ranking only**: the band still shows
-where uncertainty concentrates and which nodes are more uncertain than others,
-but is not a 90% interval. Ranking-only cells stay registered, print their
-number and their fix PR (every run prints a `[C1]` line per cell), and are never
-loosened. Cells that claim "validated" assert the floor.
+**C1 decision (owner, 2026-10-05) and C2 (owner, 2026-10-06, option 1).** A
+cell is **calibrated** when its empirical member coverage is ≥ 0.80 (the
+21-member LHS ceiling is 0.905; 0.80 leaves one member of granularity) **and**
+its median ROM/MC width ratio is ≤ 1.5. Coverage ≥ 0.80 with width > 1.5 is
+**conservative (over-wide)**: enough outcomes inside, by being too wide. Coverage
+below 0.80 is **ranking only**: the band still shows where uncertainty
+concentrates and which nodes are more uncertain than others, but is not a 90%
+interval. Conservative and ranking-only cells stay registered, print their
+numbers and their fix PR (every run prints a `[C1/C2]` line per cell), and are
+never loosened. Cells that claim "validated" assert the floor; the ceiling is a
+label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 
 | Gate / cell | Width ratio median, old → corrected | Member coverage | Gate verdict | **C1 status** |
 |---|---|---|---|---|
-| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → **1.961** (P8 fixture) | 0.20 → **0.94** | **green since P8** | **calibrated by C1 (one-sided)**, but ~2× over-wide → **H13**; see C2 |
+| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → **1.961** (P8 fixture) | 0.20 → **0.94** | **green since P8** | **conservative (over-wide)** under C2 → **H13** |
 | H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged | ranking only, documented limitation |
 | H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] | ranking only → **H5b** |
-| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] | **calibrated** (asserted ≥ 0.80) |
+| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] | **calibrated** (0.83 ≥ 0.80, 1.30 ≤ 1.5; floor asserted) |
 | H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated | superseded by H11 |
-| SR-5 soft rain, FULL | 0.822 → **0.710** | **0.76** | passes | ranking only → **SR-6** |
-| CL-1e soft rain, CORR_LEN | 0.659 → **0.570** | **0.68** | passes | ranking only → **SR-6** |
-| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (asserted ≥ 0.80) → breadth: **W4** |
+| SR-5 soft rain, FULL | 0.822 → 0.710 → **0.976** (SR-6) | 0.76 → **0.88** | passes | **calibrated** since SR-6 (floor asserted) |
+| CL-1e soft rain, CORR_LEN | 0.659 → 0.570 → **0.804** (SR-6) | 0.68 → **0.83** | passes | **calibrated** since SR-6 (floor asserted) |
+| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (0.82, 1.32 ≤ 1.5; floor asserted) → breadth: **W4** |
 | W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass | reference rungs, ungated |
 
 (The 2D test compares 25 like-for-like members under the same `round(p·(M−1))`
@@ -87,12 +91,16 @@ testable lead (the ratio should move with K1d), not yet tested. It belongs to
 whoever revisits the forcing-channel formulation (F/O48 class), not to a test
 tolerance.
 
-## 5. The member-coverage floor — decided
+## 5. The calibration rule — decided, two-sided
 
-Decided 2026-10-05 (C1): floor 0.80, applied uniformly in one commit; see the
-status column in §1. Two cells are calibrated and assert it (H11, 2D production
-rung). Everything else is ranking only with a named fix PR. No floor was
-lowered anywhere to make a cell pass.
+C1 (2026-10-05): floor, member coverage ≥ 0.80, asserted by validated cells.
+C2 (2026-10-06, option 1): ceiling, median width ratio ≤ 1.5, a label. Both
+applied uniformly in one commit each; see the status column in §1. Current
+state: **calibrated** H11, 2D production rung, SR-5, CL-1e; **conservative**
+the P8 free-surface chain (1.96, → H13); **ranking only** H5 SEMI_IMPLICIT
+(→ H5b), H5 EXPLICIT (limitation), the 2D reference rungs. The P8 cell is the
+reason C2 exists: C1 alone called it calibrated at coverage 0.94 while it was
+twice too wide. No bound was lowered anywhere to make a cell pass.
 
 ## 6. Reproduction
 
@@ -566,7 +574,8 @@ fixed here; logged for the formulation queue (candidate **H13**).
 Verdict: **green**, with no bound moved. The standing bounds (median
 containment ≥ 0.95, width ratio in [0.3, 3] for ≥ 0.95 of samples, median
 width ratio in [0.5, 2.0]) are kept, and the C1 member-coverage floor is now
-asserted. The measured median 1.96 sits just under the 2.0 ceiling; the
+asserted. Under C2 (2026-10-06) the cell is labelled **conservative
+(over-wide)**, not calibrated: 1.96 is above the 1.5 ceiling. The measured median 1.96 sits just under the 2.0 ceiling; the
 deeper-inflow variant reads 2.06 and would fail it. That is reported here
 rather than avoided by picking a different fixture: the fixture was chosen as
 the smallest change from the original that reaches saturation, not for its

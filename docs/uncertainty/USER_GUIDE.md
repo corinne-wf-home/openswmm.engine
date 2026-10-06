@@ -40,7 +40,8 @@ Together `[q05, q95]` is the **5th-to-95th percentile band of the ensemble**. Wh
 calibrated 90% interval depends on the regime: measured against brute-force Monte Carlo, the
 fraction of outcomes inside ranges from 0.83 down to 0.20 (VALIDATION.md, "Interval-coverage
 audit"). Treat the band as a **ranking** of where uncertainty concentrates unless that table
-marks your regime *calibrated* (≥ 0.80 of outcomes inside). This document says "band", not
+marks your regime *calibrated* (≥ 0.80 of outcomes inside **and** median width no more than
+1.5× brute force; "conservative" means inside-but-too-wide). This document says "band", not
 "90% interval", for that reason.
 
 **What parameters can be uncertain:**

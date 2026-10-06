@@ -55,20 +55,40 @@ inline double intervalCoverage(const std::vector<double>& values, double lo, dou
     return static_cast<double>(inside) / static_cast<double>(values.size());
 }
 
-/// C1 decision (owner, 2026-10-05): a cell is CALIBRATED when its empirical
-/// member coverage is >= kCalibratedFloor; otherwise it is RANKING ONLY --
-/// still registered, still printing, documented with its fix PR, never
-/// loosened. Cells that claim "validated" assert on this; others only print.
-constexpr double kCalibratedFloor = 0.80;
+/// C1 (owner, 2026-10-05): a cell meets the FLOOR when its empirical member
+/// coverage is >= kCalibratedFloor; otherwise it is RANKING ONLY -- still
+/// registered, still printing, documented with its fix PR, never loosened.
+/// C2 (owner, 2026-10-06, option 1): calibration is two-sided. A cell that
+/// meets the floor is CALIBRATED only if its median ROM/MC width ratio is
+/// also <= kCalibratedWidthCeiling; above that it is CONSERVATIVE (over-wide):
+/// enough outcomes inside, but by being too wide. Conservative is a label,
+/// not a failure. Cells that claim "validated" assert the floor; the ceiling
+/// is reported and documented, uniformly, with no per-test variation.
+constexpr double kCalibratedFloor        = 0.80;
+constexpr double kCalibratedWidthCeiling = 1.50;
 
-/// Prints the C1 verdict line for a cell and returns whether it is calibrated.
-inline bool reportCalibration(const char* cell, double member_cov, const char* fix_pr) {
-    const bool ok = member_cov >= kCalibratedFloor;
-    std::printf("[C1] %-32s member-coverage=%.3f  -> %s%s%s\n", cell, member_cov,
-                ok ? "CALIBRATED (>= 0.80)" : "RANKING ONLY (< 0.80",
-                ok ? "" : "; fix: ", ok ? "" : fix_pr);
-    if (!ok) std::printf("[C1] %-32s %s\n", "", ")");
-    return ok;
+enum class Calibration { RankingOnly, Conservative, Calibrated };
+
+inline Calibration classifyCalibration(double member_cov, double ratio_med) {
+    if (member_cov < kCalibratedFloor) return Calibration::RankingOnly;
+    if (ratio_med > kCalibratedWidthCeiling) return Calibration::Conservative;
+    return Calibration::Calibrated;
+}
+
+/// Prints the C1/C2 verdict line for a cell. Returns whether the FLOOR is met
+/// (the gated part); a Conservative cell returns true.
+inline bool reportCalibration(const char* cell, double member_cov, double ratio_med,
+                              const char* fix_pr) {
+    const Calibration c = classifyCalibration(member_cov, ratio_med);
+    const char* verdict =
+        c == Calibration::Calibrated   ? "CALIBRATED (coverage >= 0.80, width <= 1.5)" :
+        c == Calibration::Conservative ? "CONSERVATIVE (coverage >= 0.80 but over-wide, width > 1.5)" :
+                                         "RANKING ONLY (coverage < 0.80)";
+    std::printf("[C1/C2] %-32s member-coverage=%.3f width-med=%.3f -> %s%s%s\n",
+                cell, member_cov, ratio_med, verdict,
+                c == Calibration::Calibrated ? "" : "; fix: ",
+                c == Calibration::Calibrated ? "" : fix_pr);
+    return c != Calibration::RankingOnly;
 }
 
 }  // namespace mcq
