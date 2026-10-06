@@ -245,7 +245,8 @@ struct NodeData {
     std::vector<double>     lat_flow;
 
     /**
-     * @brief User-forced lateral inflow set via the API (project flow units).
+     * @brief User-set lateral inflow from swmm_node_set_lateral_inflow()
+     *        (INTERNAL cfs; the API setter converts from project units).
      *
      * Unlike lat_flow, this is not cleared between routing steps.  The
      * value persists until the user explicitly changes it and is added

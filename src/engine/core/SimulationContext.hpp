@@ -1368,6 +1368,11 @@ struct SimulationContext {
 
         /// Routing continuity error (fraction).
         double routing_error() const {
+            // routing_forcing_inflow (runtime-API / grid-forced lateral inflow)
+            // was tracked but omitted from the inflow total until SP4
+            // (2026-10-05); any forced run then reported a spurious continuity
+            // error of the forced volume over initial storage. Zero in every
+            // run without forcing, so parity results are unchanged.
             double total_in = routing_dry_weather + routing_wet_weather +
                               routing_gw_inflow + routing_link_gw_inflow +   // G-X4
                               routing_rdii + routing_external +
