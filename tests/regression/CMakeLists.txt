@@ -150,6 +150,35 @@ if(OPENSWMM_BUILD_2D)
         LABELS "regression"
         ENVIRONMENT "OPENSWMM_2D_BACKEND=cpu")
 
+    # ---- W4: 2D validation breadth -- correlated-field marcher MC + a second
+    # surface (thalweg channel). A MEASUREMENT target (C1/C2 verdicts printed,
+    # no band-magnitude asserts). ~150 marcher runs ≈ 12-15 min Debug, so it
+    # carries the "slow" label like the Bellinge gate; W4_CELLS/W4_MEMBERS
+    # narrow it for iteration (see the test header).
+    add_executable(test_2d_rom_marcher_coverage_corr test_2d_rom_marcher_coverage_corr.cpp)
+    target_link_libraries(test_2d_rom_marcher_coverage_corr
+        PRIVATE
+            GTest::gtest GTest::gtest_main
+            openswmm_engine
+    )
+    target_include_directories(test_2d_rom_marcher_coverage_corr
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src/engine
+    )
+    set_target_properties(test_2d_rom_marcher_coverage_corr PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+    add_test(
+        NAME    regression_2d_rom_marcher_coverage_corr
+        COMMAND $<TARGET_FILE:test_2d_rom_marcher_coverage_corr>
+    )
+    set_tests_properties(regression_2d_rom_marcher_coverage_corr PROPERTIES
+        LABELS "regression;slow"
+        TIMEOUT 2400
+        ENVIRONMENT "OPENSWMM_2D_BACKEND=cpu")
+
     # ---- PR 10 variant: Bellinge model coverage (fast saturation) ----
     # Real 1020-node network with K1d ≈ 0.123 (540× larger than Phase-9 chain).
     # Dominant mode τ_0 ≈ 100 s (vs 15 h), so 1-hour window reaches ~99% saturation.
