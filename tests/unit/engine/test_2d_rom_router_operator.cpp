@@ -232,6 +232,40 @@ TEST(SurfaceROMRouterOperator, DefaultPathInstallsReducedOperatorOnUndepthWeight
     swmm_engine_destroy(eng);
 }
 
+TEST(SurfaceROMRouterOperator, SpatialManningFieldInstallsPerMemberOperators) {
+    // PR H15: MANNINGS_CORR_LEN > 0 generates a per-member spatial Manning
+    // field, which used to drop the ROM onto the diagonal path silently. The
+    // router must now assemble one reduced operator per member so the field
+    // rides the production operator.
+    const fs::path dir = fs::current_path() / "rom_router_operator_out";
+    fs::create_directories(dir);
+    { std::ofstream f(dir / "spatial_mann.inp"); f << buildModel(/*open=*/false); }
+
+    auto eng = driveRun(dir / "spatial_mann.inp", dir / "spatial_mann.rpt",
+                        dir / "spatial_mann.out",
+                        [](openswmm::twoD::SolverOptions2D& o) {
+                            o.enable_rom            = true;
+                            o.rom_members           = 12;
+                            o.rom_modes             = 6;
+                            o.rom_mannings_pert     = 0.20;
+                            o.rom_rainfall_pert     = 0.0;
+                            o.rom_mannings_corr_len = 1.5;   // metres; fixture is a few m wide
+                        });
+    ASSERT_NE(eng, nullptr);
+    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+    const auto& router = impl->surfaceRouter2D();
+    ASSERT_NE(router.rom(), nullptr);
+    ASSERT_TRUE(router.rom()->spatial_mannings.is_spatial())
+        << "fixture precondition: the correlation length must produce a field";
+    EXPECT_TRUE(router.rom()->hasReducedOperator());
+    EXPECT_TRUE(router.rom()->hasPerMemberOperators())
+        << "a spatial Manning field must get per-member reduced operators (H15)";
+    swmm_engine_end(eng);
+    swmm_engine_report(eng);
+    swmm_engine_close(eng);
+    swmm_engine_destroy(eng);
+}
+
 TEST(SurfaceROMRouterOperator, LegacyOptionRestoresDiagonalPathWithDepthWeightedBasis) {
     const fs::path dir = fs::current_path() / "rom_router_operator_out";
     fs::create_directories(dir);

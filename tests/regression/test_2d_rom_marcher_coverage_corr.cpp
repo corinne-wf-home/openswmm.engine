@@ -34,16 +34,22 @@
  *          with W, V zero-mean per cell (column mean = mean_i c_i) and
  *          per-point variance Var(c), exactly the CL-2b contract.
  *
- *          STRUCTURAL FACT THIS HARNESS EXPOSES (not a bug it introduces):
- *          `SpectralROM::advance()` takes the reduced-operator path only when
- *          `spatial_mannings` is NOT set (`hasReducedOperator() &&
- *          !use_spatial_mann`). A spatially correlated Manning field therefore
- *          runs on the DIAGONAL λ·K_eff path — the legacy convention W3
- *          measured at width-med 0.46 — regardless of which rung the caller
- *          thinks it configured. The correlated-Manning cells below record
- *          what that path actually delivers. The correlated-RAIN cells do
- *          reach the production operator (the soft-forcing R_ij enters the
- *          reduced path unchanged).
+ *          STRUCTURAL FACT THIS HARNESS EXPOSED (W4) AND H15 FIXED: before
+ *          H15 `SpectralROM::advance()` took the reduced-operator path only
+ *          when `spatial_mannings` was NOT set, so a spatially correlated
+ *          Manning field ran on the DIAGONAL λ·K_eff path regardless of rung.
+ *          H15 added per-member reduced operators (one assembly per member
+ *          with cond_mult = 1/W_i, `setReducedOperatorPerMember`). The
+ *          correlated-Manning cells now measure that path ("adv/per-member")
+ *          and keep the pre-H15 diagonal result as the reference row. The
+ *          correlated-RAIN cells always reached the production operator.
+ *
+ *          H15 MEASURED 2026-10-07 (M = 25):
+ *            plane-mann-corr20   adv/per-member 0.801 / 0.92  (pre-H15 diag 0.649 / 0.68)
+ *            plane-mann-corr100  adv/per-member 0.844 / 1.32  (pre-H15 diag 0.835 / 1.24)
+ *          The 20 m cell clears the floor by 0.001 -- recorded as calibrated,
+ *          deliberately NOT asserted (a margin that thin is a coin flip, and
+ *          asserting it would amount to tuning). Still ~8% narrow there.
  *
  *          SECOND SURFACE: a channel with a defined thalweg,
  *          z = S·x + T·|y − y_c|, so flow converges laterally onto the centre
@@ -314,9 +320,12 @@ const char* rungName(Rung r) {
 struct RomInputs {
     // Comonotone Manning multipliers (length M) or empty for "ones".
     std::vector<double> mann_mult;
-    // Correlated Manning multiplier field (M × n) — switches the ROM onto
-    // the spatial (diagonal) path; see the header.
+    // Correlated Manning multiplier field (M × n). Without `per_member` the
+    // ROM takes the spatial (diagonal) path — the pre-H15 behaviour, kept as
+    // the record; with it, one reduced operator is assembled per member
+    // (cond_mult = 1/W_i) and installed via setReducedOperatorPerMember (H15).
     const SpatialUncertaintyField* mann_field = nullptr;
+    bool per_member = false;
     // Correlated rain: loc/spread planes + reduced basis OR materialized field.
     const double* soft_loc = nullptr;
     const double* soft_spread = nullptr;
@@ -397,6 +406,20 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
                              ground_w.data()))
                 return out;
             rom.setReducedOperator(op.M);
+            if (in.mann_field && in.per_member) {
+                const int nt = mesh0.n_triangles();
+                const auto kk = static_cast<std::size_t>(op.k) * static_cast<std::size_t>(op.k);
+                std::vector<double> M_all(static_cast<std::size_t>(M) * kk), cm(static_cast<std::size_t>(nt));
+                for (int i = 0; i < M; ++i) {
+                    for (int t = 0; t < nt; ++t) cm[static_cast<std::size_t>(t)] = 1.0 / in.mann_field->at(i, t);
+                    if (!op.assemble(mesh0, basis, D, h_prev.data(), vel_u.data(), vel_v.data(),
+                                     ground_w.data(), cm.data()))
+                        return out;
+                    std::copy(op.M.begin(), op.M.end(),
+                              M_all.begin() + static_cast<std::ptrdiff_t>(i) * static_cast<std::ptrdiff_t>(kk));
+                }
+                rom.setReducedOperatorPerMember(M_all);
+            }
         }
         rom.advance(kRep, K_legacy, nullptr, nullptr, hdet[static_cast<std::size_t>(r)].data());
         rom.computeQuantiles(hdet[static_cast<std::size_t>(r)].data());
@@ -637,12 +660,22 @@ TEST(Rom2dMarcherCoverageCorr, CorrelatedFieldsAndSecondSurface) {
         const MC mc = runMC(plane, nf, {});
         RomInputs in;
         in.mann_field = &f;
+        // H15 production path: per-member reduced operators on the adv rung.
+        in.per_member = true;
+        RomBands bp = runRomRung(Rung::ANISO_ADV, fp.mesh, fp.grounded, fp.gw, in, fp.hdet, fp.h0, nullptr);
+        ASSERT_TRUE(bp.ok);
+        const Score sp = scoreBands(bp, fp.mesh, mc);
+        printScore(name, "adv/per-member", sp, bp);
+        mcq::reportCalibration((std::string(name) + " (adv, per-member M_i)").c_str(),
+                               sp.member_cov, sp.ratio_med, "H15 follow-up");
+        // Pre-H15 record: the same field on the diagonal fallback.
+        in.per_member = false;
         RomBands bg = runRomRung(Rung::ANISO_ADV, fp.mesh, fp.grounded, fp.gw, in, fp.hdet, fp.h0, nullptr);
         ASSERT_TRUE(bg.ok);
         const Score sg = scoreBands(bg, fp.mesh, mc);
-        printScore(name, "diag/grounded", sg, bg);
-        mcq::reportCalibration((std::string(name) + " (diag, grounded basis)").c_str(),
-                               sg.member_cov, sg.ratio_med, "W4 follow-up");
+        printScore(name, "diag/grounded ", sg, bg);
+        mcq::reportCalibration((std::string(name) + " (diag, grounded basis -- pre-H15)").c_str(),
+                               sg.member_cov, sg.ratio_med, "reference, ungated");
         RomBands bn = runRomRung(Rung::LEGACY, fp.mesh, fp.neumann, fp.gw, in, fp.hdet, fp.h0, nullptr);
         ASSERT_TRUE(bn.ok);
         const Score sn = scoreBands(bn, fp.mesh, mc);

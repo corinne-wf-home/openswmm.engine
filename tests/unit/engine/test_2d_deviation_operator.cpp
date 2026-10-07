@@ -33,9 +33,11 @@
 #include "2d/mesh/MeshBuilder.hpp"
 #include "2d/uncertainty/DeviationOperator2D.hpp"
 #include "2d/uncertainty/MeshEigenBasis.hpp"
+#include "2d/uncertainty/SpatialUncertaintyField.hpp"
 #include "2d/uncertainty/SpectralROM.hpp"
 
 #include <cmath>
+#include <stdexcept>
 #include <cstddef>
 #include <vector>
 
@@ -430,4 +432,256 @@ TEST(DeviationOperator2D, RomRejectsWrongOperatorSize) {
     std::vector<double> bad(static_cast<std::size_t>(
         (basis.num_kept + 1) * (basis.num_kept + 1)), 0.0);
     EXPECT_THROW(rom.setReducedOperator(bad), std::invalid_argument);
+}
+
+// ============================================================================
+// PR H15 — per-cell conductance multiplier and per-member reduced operators
+// ============================================================================
+
+namespace {
+
+// Flow field and grounding shared by the H15 assembly tests: a uniform
+// x-directed velocity (so advection and anisotropy are both live) and
+// grounding on the x=0 faces.
+void h15Fixture(const MeshData& mesh, std::vector<double>& u, std::vector<double>& v,
+                std::vector<double>& gw, std::vector<double>& h) {
+    const int n = mesh.n_triangles();
+    u.assign(static_cast<std::size_t>(n), 0.3);
+    v.assign(static_cast<std::size_t>(n), 0.05);
+    gw.assign(static_cast<std::size_t>(n), 0.0);
+    h.assign(static_cast<std::size_t>(n), 0.0);
+    for (int i = 0; i < n; ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        h[ui] = 0.10 + 0.04 * std::sin(0.3 * i);
+        if (mesh.tri_cx[ui] < 1.0) gw[ui] = 0.25;
+    }
+}
+
+} // namespace
+
+TEST(DeviationOperator2D, CondMultNullIsBitIdenticalToAllOnes) {
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    DeviationOperator2D a, b;
+    a.alpha_par = b.alpha_par = 0.62; a.alpha_perp = b.alpha_perp = 2.0;
+    a.c_factor = b.c_factor = 5.0 / 3.0;
+    std::vector<double> ones(static_cast<std::size_t>(mesh.n_triangles()), 1.0);
+    ASSERT_TRUE(a.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    ASSERT_TRUE(b.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data(), ones.data()));
+    ASSERT_EQ(a.M.size(), b.M.size());
+    for (std::size_t i = 0; i < a.M.size(); ++i)
+        EXPECT_EQ(a.M[i], b.M[i]) << "entry " << i;   // bit-identical, not NEAR
+}
+
+TEST(DeviationOperator2D, UniformCondMultScalesWholeOperator) {
+    // 1/n multiplies diffusion, advection and grounding alike, so a uniform
+    // factor c must give c·M (the shared-operator s = 1/mm convention).
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    DeviationOperator2D a, b;
+    a.alpha_par = b.alpha_par = 0.62; a.alpha_perp = b.alpha_perp = 2.0;
+    a.c_factor = b.c_factor = 5.0 / 3.0;
+    const double c = 1.0 / 0.85;
+    std::vector<double> cm(static_cast<std::size_t>(mesh.n_triangles()), c);
+    ASSERT_TRUE(a.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    ASSERT_TRUE(b.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data(), cm.data()));
+    double scale = 0.0;
+    for (double m : a.M) scale = std::max(scale, std::fabs(m));
+    ASSERT_GT(scale, 0.0);
+    for (std::size_t i = 0; i < a.M.size(); ++i)
+        EXPECT_NEAR(b.M[i], c * a.M[i], 1e-12 * scale) << "entry " << i;
+}
+
+TEST(DeviationOperator2D, NonUniformCondMultIsNotAScalarMultiple) {
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    DeviationOperator2D a, b;
+    a.alpha_par = b.alpha_par = 0.62; a.alpha_perp = b.alpha_perp = 2.0;
+    a.c_factor = b.c_factor = 5.0 / 3.0;
+    const int n = mesh.n_triangles();
+    std::vector<double> cm(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i)
+        cm[static_cast<std::size_t>(i)] = 1.0 / (1.0 + 0.2 * std::sin(0.7 * i));
+    ASSERT_TRUE(a.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    ASSERT_TRUE(b.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data(), cm.data()));
+    // Best scalar fit c* = <A,B>/<A,A>; the residual must be material.
+    double ab = 0.0, aa = 0.0;
+    for (std::size_t i = 0; i < a.M.size(); ++i) { ab += a.M[i] * b.M[i]; aa += a.M[i] * a.M[i]; }
+    const double cstar = ab / aa;
+    double res = 0.0, nrm = 0.0;
+    for (std::size_t i = 0; i < a.M.size(); ++i) {
+        res += (b.M[i] - cstar * a.M[i]) * (b.M[i] - cstar * a.M[i]);
+        nrm += b.M[i] * b.M[i];
+    }
+    EXPECT_GT(std::sqrt(res / nrm), 1e-3)
+        << "a non-uniform 1/n field left the operator a scalar multiple of nominal";
+}
+
+namespace {
+
+// Builds a ROM on `basis` with M members; `mann` scalar multipliers (ones for
+// the spatial path) and an optional spatial field.
+void h15MakeRom(SpectralROM& rom, const MeshEigenBasis& basis, int M,
+                const std::vector<double>& mann, const std::vector<double>& h_det,
+                const SpatialUncertaintyField* field) {
+    std::vector<double> ones(static_cast<std::size_t>(M), 1.0);
+    rom.basis = &basis; rom.n_ensemble = M;
+    rom.mannings_pert = 0.20; rom.rainfall_pert = 0.0;
+    rom.setExternalSamples(mann, ones);
+    rom.initialize();
+    rom.seed(h_det.data());
+    if (field) rom.spatial_mannings = *field;
+}
+
+// Assembles the nominal operator and one operator per member from `field`.
+void h15Assemble(const MeshData& mesh, const MeshEigenBasis& basis,
+                 const SpatialUncertaintyField& field, const std::vector<double>& h,
+                 const std::vector<double>& u, const std::vector<double>& v,
+                 const std::vector<double>& gw, std::vector<double>& M0,
+                 std::vector<double>& M_all, int& k) {
+    DeviationOperator2D op;
+    op.alpha_par = 0.62; op.alpha_perp = 2.0; op.c_factor = 5.0 / 3.0;
+    ASSERT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    M0 = op.M; k = op.k;
+    const auto kk = static_cast<std::size_t>(k) * static_cast<std::size_t>(k);
+    M_all.assign(static_cast<std::size_t>(field.n_members) * kk, 0.0);
+    std::vector<double> cm(static_cast<std::size_t>(field.n_cells));
+    for (int i = 0; i < field.n_members; ++i) {
+        for (int t = 0; t < field.n_cells; ++t) cm[static_cast<std::size_t>(t)] = 1.0 / field.at(i, t);
+        ASSERT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data(), cm.data()));
+        std::copy(op.M.begin(), op.M.end(), M_all.begin() + static_cast<std::ptrdiff_t>(i) * static_cast<std::ptrdiff_t>(kk));
+    }
+}
+
+} // namespace
+
+TEST(DeviationOperator2D, PerMemberOperatorsWithUniformFieldMatchSharedOperatorPath) {
+    // W_i(t) ≡ mm_i ⇒ M_i = M₀/mm_i and the per-member integrator must
+    // reproduce the shared-operator path (s = 1/mm_i) to round-off.
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const int nt = mesh.n_triangles(), M = 7;
+    std::vector<double> mann(static_cast<std::size_t>(M)), ones(static_cast<std::size_t>(M), 1.0);
+    for (int i = 0; i < M; ++i) mann[static_cast<std::size_t>(i)] = 0.8 + 0.4 * (i + 0.5) / M;
+    SpatialUncertaintyField field;
+    field.n_members = M; field.n_cells = nt;
+    field.values.resize(static_cast<std::size_t>(M) * static_cast<std::size_t>(nt));
+    for (int i = 0; i < M; ++i) for (int t = 0; t < nt; ++t) field.at(i, t) = mann[static_cast<std::size_t>(i)];
+
+    std::vector<double> M0, M_all; int k = 0;
+    h15Assemble(mesh, basis, field, h, u, v, gw, M0, M_all, k);
+
+    SpectralROM shared, per;
+    h15MakeRom(shared, basis, M, mann, h, nullptr);
+    h15MakeRom(per, basis, M, ones, h, &field);
+    shared.setReducedOperator(M0);
+    per.setReducedOperator(M0);
+    per.setReducedOperatorPerMember(M_all);
+    ASSERT_TRUE(per.hasPerMemberOperators());
+
+    for (int step = 0; step < 6; ++step) {
+        shared.advance(30.0, 1.0, nullptr, nullptr, h.data());
+        per.advance(30.0, 1.0, nullptr, nullptr, h.data());
+    }
+    double max_a = 0.0;
+    for (double a : shared.a_ensemble) max_a = std::max(max_a, std::fabs(a));
+    ASSERT_GT(max_a, 1e-9) << "vacuous: no deviation developed";
+    EXPECT_LT(maxAbsDiff(shared.a_ensemble, per.a_ensemble), 1e-10 * max_a);
+}
+
+TEST(DeviationOperator2D, PerMemberOperatorsUnitFieldKeepsExactZeroDeviation) {
+    // Every member's field ≡ 1 ⇒ M_i ≡ M₀ bit-for-bit ⇒ the Manning
+    // sensitivity −(M_i − M₀)b is exactly 0 and δa stays exactly 0.
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const int nt = mesh.n_triangles(), M = 5;
+    std::vector<double> ones(static_cast<std::size_t>(M), 1.0);
+    SpatialUncertaintyField field;
+    field.n_members = M; field.n_cells = nt;
+    field.values.assign(static_cast<std::size_t>(M) * static_cast<std::size_t>(nt), 1.0);
+    std::vector<double> M0, M_all; int k = 0;
+    h15Assemble(mesh, basis, field, h, u, v, gw, M0, M_all, k);
+    SpectralROM rom;
+    h15MakeRom(rom, basis, M, ones, h, &field);
+    rom.setReducedOperator(M0);
+    rom.setReducedOperatorPerMember(M_all);
+    for (int step = 0; step < 4; ++step) rom.advance(30.0, 1.0, nullptr, nullptr, h.data());
+    for (double a : rom.a_ensemble) EXPECT_EQ(a, 0.0);
+}
+
+TEST(DeviationOperator2D, PerMemberOperatorsLeaveTheDiagonalFallback) {
+    // Same spatial field, with and without per-member operators: the second
+    // run must take the reduced path (different trajectory from the diagonal
+    // fallback), and clearing the operators must restore the fallback.
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const int nt = mesh.n_triangles(), M = 6;
+    std::vector<double> ones(static_cast<std::size_t>(M), 1.0);
+    SpatialUncertaintyField field;
+    field.n_members = M; field.n_cells = nt;
+    field.values.resize(static_cast<std::size_t>(M) * static_cast<std::size_t>(nt));
+    for (int i = 0; i < M; ++i)
+        for (int t = 0; t < nt; ++t)
+            field.at(i, t) = 1.0 + 0.2 * (2.0 * (i + 0.5) / M - 1.0) * (1.0 + 0.5 * std::sin(0.4 * t + i));
+    std::vector<double> M0, M_all; int k = 0;
+    h15Assemble(mesh, basis, field, h, u, v, gw, M0, M_all, k);
+
+    SpectralROM diag, per, cleared;
+    h15MakeRom(diag, basis, M, ones, h, &field);
+    h15MakeRom(per, basis, M, ones, h, &field);
+    h15MakeRom(cleared, basis, M, ones, h, &field);
+    diag.setReducedOperator(M0);            // spatial field ⇒ diagonal fallback
+    per.setReducedOperator(M0);
+    per.setReducedOperatorPerMember(M_all);
+    cleared.setReducedOperator(M0);
+    cleared.setReducedOperatorPerMember(M_all);
+    cleared.clearReducedOperator();
+    EXPECT_FALSE(cleared.hasReducedOperator());
+    EXPECT_FALSE(cleared.hasPerMemberOperators());
+
+    for (int step = 0; step < 4; ++step) {
+        diag.advance(30.0, 1.0, nullptr, nullptr, h.data());
+        per.advance(30.0, 1.0, nullptr, nullptr, h.data());
+        cleared.advance(30.0, 1.0, nullptr, nullptr, h.data());
+    }
+    double max_a = 0.0;
+    for (double a : per.a_ensemble) max_a = std::max(max_a, std::fabs(a));
+    ASSERT_GT(max_a, 1e-9);
+    EXPECT_GT(maxAbsDiff(diag.a_ensemble, per.a_ensemble), 1e-6 * max_a)
+        << "per-member operators did not change the integration path";
+    // diag (shared op + spatial field) and cleared (no op) both take the
+    // diagonal path and must coincide exactly.
+    EXPECT_EQ(maxAbsDiff(diag.a_ensemble, cleared.a_ensemble), 0.0);
+}
+
+TEST(DeviationOperator2D, SetReducedOperatorPerMemberRejectsWrongSize) {
+    auto mesh = makeStructuredMesh(5);
+    MeshEigenBasis basis;
+    ASSERT_TRUE(basis.build(mesh, 6));
+    const int M = 4;
+    std::vector<double> ones(static_cast<std::size_t>(M), 1.0), h(static_cast<std::size_t>(mesh.n_triangles()), 0.1);
+    SpectralROM rom;
+    h15MakeRom(rom, basis, M, ones, h, nullptr);
+    const auto k = static_cast<std::size_t>(basis.num_kept);
+    EXPECT_THROW(rom.setReducedOperatorPerMember(std::vector<double>((M - 1) * k * k, 0.0)), std::invalid_argument);
+    EXPECT_THROW(rom.setReducedOperatorPerMember(std::vector<double>(M * k * k + 1, 0.0)), std::invalid_argument);
+    EXPECT_NO_THROW(rom.setReducedOperatorPerMember(std::vector<double>(M * k * k, 0.0)));
 }

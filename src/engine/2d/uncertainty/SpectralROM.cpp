@@ -214,6 +214,21 @@ void SpectralROM::setReducedOperator(const std::vector<double>& M_in) {
     reduced_g_.assign(nk, 0.0);
 }
 
+void SpectralROM::setReducedOperatorPerMember(const std::vector<double>& M_all) {
+    const auto nk = static_cast<std::size_t>(n_kept);
+    const auto M  = static_cast<std::size_t>(n_ensemble);
+    if (nk == 0 || M_all.size() != M * nk * nk)
+        throw std::invalid_argument(
+            "SpectralROM::setReducedOperatorPerMember: M_all must be "
+            "n_ensemble x n_kept x n_kept and the ROM must be initialized first");
+    reduced_M_members_.assign(M, std::vector<double>(nk * nk, 0.0));
+    for (std::size_t i = 0; i < M; ++i)
+        std::copy(M_all.begin() + static_cast<std::ptrdiff_t>(i * nk * nk),
+                  M_all.begin() + static_cast<std::ptrdiff_t>((i + 1) * nk * nk),
+                  reduced_M_members_[i].begin());
+    reduced_Mib_.assign(nk, 0.0);
+}
+
 
 void SpectralROM::initialize() {
     if (!basis || basis->num_kept <= 0 || basis->n_triangles <= 0)
@@ -634,7 +649,12 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
     // active-set optimization does not apply: all modes advance.
     const bool has_extra = !extra_params_.empty();
 
-    if (hasReducedOperator() && !use_spatial_mann) {
+    // PR H15: a spatially correlated Manning field rides the reduced path when
+    // per-member operators are installed; otherwise it still falls back to the
+    // diagonal path below (the pre-H15 behaviour).
+    const bool per_member_ops = use_spatial_mann && hasPerMemberOperators();
+
+    if (hasReducedOperator() && (!use_spatial_mann || per_member_ops)) {
         const auto& Mr = reduced_M_;
 
         // Shared across members: Mb = M · b_coarse.
@@ -653,9 +673,24 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
             double* ai = &a_ensemble[ui * nk];
             const double rate_prod    = rate_mult_prod(ui);
             const double forcing_prod = forcing_mult_prod(ui);
-            const double mm = mannings_mult[ui] * rate_prod;
             const double rm = rainfall_mult[ui];
+            // Shared operator: the Manning multiplier scales the whole
+            // operator, s = 1/mm. Per-member operator (H15): the Manning
+            // field is already inside M_i, so only the extra RATE_MULT
+            // product scales it.
+            const double mm = per_member_ops ? rate_prod
+                                             : mannings_mult[ui] * rate_prod;
             const double s  = (mm > 1.0e-12) ? 1.0 / mm : 1.0;
+            const std::vector<double>& Mi = per_member_ops ? reduced_M_members_[ui] : Mr;
+            if (per_member_ops) {
+                // M_i · b for this member's own operator.
+                for (std::size_t p = 0; p < nk; ++p) {
+                    double dot = 0.0;
+                    for (std::size_t q = 0; q < nk; ++q)
+                        dot += Mi[p * nk + q] * b_coarse[q];
+                    reduced_Mib_[p] = dot;
+                }
+            }
 
             const double* W_r_i = use_spatial_rain
                 ? (spatial_rainfall.values.data() + ui * nt) : nullptr;
@@ -675,7 +710,11 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 }
                 fj *= forcing_prod;
 
-                double g = -(s - 1.0) * reduced_Mb_[j] + (fj - r_coarse[j]);
+                // Manning sensitivity: −(s·M_i − M₀)·b. Shared operator:
+                // M_i = M₀ ⇒ −(s − 1)·M₀b, the pre-H15 expression exactly.
+                double g = per_member_ops
+                    ? -(s * reduced_Mib_[j] - reduced_Mb_[j]) + (fj - r_coarse[j])
+                    : -(s - 1.0) * reduced_Mb_[j] + (fj - r_coarse[j]);
                 if (soft_spread_field_) {
                     if (use_soft_rij)
                         g += soft_r_spread_spatial_[ui * nk + j];
@@ -693,7 +732,7 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 reduced_g_[j] = g;
             }
 
-            DeviationOperator2D::propagate(Mr, n_kept, s, dt,
+            DeviationOperator2D::propagate(Mi, n_kept, s, dt,
                                            ai, reduced_g_.data());
         }
 

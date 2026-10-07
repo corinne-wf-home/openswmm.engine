@@ -509,21 +509,55 @@ struct SpectralROM {
      *   belongs in the assembly, where it acts on edge conductances rather
      *   than through the diagonal Rayleigh-quotient approximation.
      * - The per-member spatial Manning field (spatial_mannings) cannot be
-     *   represented by one shared M; advance() falls back to the diagonal
-     *   path in that configuration.
+     *   represented by one shared M. Without per-member operators advance()
+     *   falls back to the diagonal path in that configuration; with them
+     *   (setReducedOperatorPerMember, PR H15) it integrates each member on
+     *   its own operator.
      */
     void setReducedOperator(const std::vector<double>& M_in);
 
-    /// Remove the reduced operator; advance() returns to the diagonal path.
-    void clearReducedOperator() noexcept { reduced_M_.clear(); }
+    /**
+     * @brief Install one reduced operator PER MEMBER (PR H15), for a
+     *        spatially correlated Manning field.
+     *
+     * @p M_all is n_ensemble × k × k row-major: member i's operator
+     * M_i = Pᵀ·L_op(n_i(t))·P, assembled by DeviationOperator2D::assemble with
+     * `cond_mult = 1/W_n,i(t)` (spatial_mannings row i). advance() then
+     * integrates, for each member,
+     *
+     *     d(δa_i)/dt = −(M_i/ρ_i)·δa_i − (M_i/ρ_i − M₀)·b + g_i,
+     *
+     * where M₀ is the nominal operator from setReducedOperator() (required —
+     * it is the anchor the deviation is taken against) and ρ_i is the product
+     * of any extra RATE_MULT columns (1 when none). This is the exact
+     * generalization of the shared-operator form −(M/mm_i)δa − (1/mm_i − 1)Mb:
+     * for a spatially uniform field W_i(t) ≡ mm_i, M_i = M₀/mm_i and the two
+     * coincide. Fixed point −(I − M_i⁻¹M₀)·b; a member whose field is
+     * identically 1 has M_i ≡ M₀ and stays at exactly zero deviation.
+     *
+     * Used only when spatial_mannings.is_spatial(); otherwise ignored (the
+     * shared operator is both cheaper and identical). Reassemble on the same
+     * cadence as the nominal operator. Throws on a size mismatch.
+     */
+    void setReducedOperatorPerMember(const std::vector<double>& M_all);
+
+    /// Remove the reduced operator(s); advance() returns to the diagonal path.
+    void clearReducedOperator() noexcept { reduced_M_.clear(); reduced_M_members_.clear(); }
 
     /// True when a reduced operator is installed.
     bool hasReducedOperator() const noexcept { return !reduced_M_.empty(); }
+
+    /// True when per-member reduced operators are installed (PR H15).
+    bool hasPerMemberOperators() const noexcept { return !reduced_M_members_.empty(); }
 
 private:
     std::vector<double> reduced_M_;   ///< k×k row-major (1/s); empty = diagonal path.
     std::vector<double> reduced_Mb_;  ///< n_kept scratch: M·b_coarse per advance().
     std::vector<double> reduced_g_;   ///< n_kept scratch: per-member forcing vector.
+    /// PR H15: per-member operators M_i (n_ensemble entries of k×k), used with
+    /// spatial_mannings. Empty = shared operator only.
+    std::vector<std::vector<double>> reduced_M_members_;
+    std::vector<double> reduced_Mib_; ///< n_kept scratch: M_i·b_coarse per member.
 
     std::vector<double> h_work_;      ///< n_tri: scratch for reconstruction.
     std::vector<double> h_det_last_;  ///< n_tri: deterministic depth from the last advance()/seed().

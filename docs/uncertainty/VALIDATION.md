@@ -37,7 +37,7 @@ label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 | W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (0.82, 1.32 ≤ 1.5; floor asserted) → breadth: **W4** |
 | W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass | reference rungs, ungated |
 | W4 plane, correlated rain ℓ = 20 / 100 m (adv) | **1.31 / 1.42** | **0.90 / 0.89** | floor asserted | **calibrated** — first MC behind 2D CORR_LEN |
-| W4 plane, correlated Manning ℓ = 20 / 100 m (diagonal path) | 0.68 / 1.24 | **0.65 / 0.84** | measured | ranking only at 20 m → **H15**; calibrated at 100 m |
+| W4 plane, correlated Manning ℓ = 20 / 100 m | 0.68 / 1.24 (diagonal, pre-H15) → **0.92 / 1.32** (H15 per-member M_i) | 0.65 / 0.84 → **0.80 / 0.84** | measured, not asserted | calibrated at both lengths after H15; the 20 m cell by 0.001 |
 | W4 channel (thalweg), comonotone Manning, adv | **2.93** | 0.95 | measured | **conservative** → H13 (2D) + W4b |
 | W4 channel, correlated rain ℓ = 20 m (adv) | 1.60 | 0.91 | measured | conservative |
 
@@ -866,6 +866,69 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# H15 — spatially correlated Manning through the 2D reduced operator (2026-10-07)
+
+**Branch** `hsym2/h15-spatial-manning-reduced-op` (stacked on W4). Closes
+W4 finding (b).
+
+## 1. Problem
+
+`SpectralROM::advance()` took the reduced-operator path only when
+`spatial_mannings` was unset. Any spatially correlated Manning field (the
+`[2D_ROM] MANNINGS_CORR_LEN` key) therefore ran on the diagonal `λ·K_eff`
+path W3 retired for everything else. W4 measured it: 0.649 member coverage
+and 0.68 width ratio at a 20 m correlation length, 0.835 / 1.24 at 100 m.
+
+## 2. Fix
+
+One reduced operator per member. `DeviationOperator2D::assemble` gained an
+optional per-cell conductance multiplier `cond_mult` (the local `1/W_n(t)`):
+it multiplies each edge's diffusive conductance by the harmonic mean of its
+two cells' values (series conductance, the depth-weighting convention), each
+cell's velocity before the face average (so advection scales as 1/n too),
+and the grounding term. A uniform value `c` gives `c·M` of the unscaled
+assembly to 1e-12; null is bit-identical to all-ones (both tested).
+`SpectralROM::setReducedOperatorPerMember(M_all)` installs `n_ensemble` such
+operators; `advance()` then integrates each member on its own `M_i`:
+
+    d(δa_i)/dt = −(M_i/ρ_i)·δa_i − (M_i/ρ_i − M₀)·b + g_i
+
+with `M₀` the nominal operator and `ρ_i` the extra `RATE_MULT` product. For
+a spatially uniform field `W_i ≡ mm_i` this is the shared-operator form
+exactly (`M_i = M₀/mm_i`), tested to 1e-10; a field identically 1 gives
+`M_i ≡ M₀` and exactly zero deviation (tested with `EXPECT_EQ`). Without
+per-member operators the diagonal fallback is unchanged (tested to be
+bit-identical to the no-operator path). `SurfaceRouter2D::refreshROMOperator`
+assembles the per-member set whenever the ROM carries a spatial Manning
+field, on the same cadence as the nominal operator (engine test:
+`MANNINGS_CORR_LEN > 0` ⇒ `hasPerMemberOperators()`). Cost: `M` extra
+assemblies per refresh, `O(M·k²·n)`; per step nothing changes — the shared
+path already did one `k×k` exponential per member.
+
+## 3. Result (W4 harness, M = 25; member coverage / median width ratio)
+
+| cell | pre-H15 (diagonal, grounded) | **H15 (adv, per-member M_i)** | verdict |
+|---|---|---|---|
+| plane, correlated Manning, ℓ = 20 m | 0.649 / 0.68 | **0.801 / 0.92** | calibrated by 0.001 — **not asserted** |
+| plane, correlated Manning, ℓ = 100 m | 0.835 / 1.24 | **0.844 / 1.32** | calibrated |
+
+The short-length cell moved from ranking-only to the floor: coverage +0.15,
+width 0.68 → 0.92. It is still ~8 % narrow and sits on the floor by a margin
+that is noise at this M, so the cell prints its verdict and does not gate —
+asserting a 0.001 margin would be a tolerance choice dressed as a result.
+The remaining narrowness at short ℓ is consistent with W3's observation that
+`k` is a capture dial with a spatial signature: a 20 m field on a 5 m mesh
+has structure the 40 retained modes carry only partly, on the ROM side only
+(the marcher resolves it). Not pursued here. The 100 m cell was already
+calibrated on the diagonal path and stays so; the per-member operator
+widens it slightly, in the direction of the plane's known ~1.3× over-width.
+
+## 4. Reproduction
+
+    W4_CELLS=plane-mann-corr20,plane-mann-corr100 OPENSWMM_2D_BACKEND=cpu \
+        build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr        # ~5 min
+    ctest --test-dir build/<dir> -R 'test_engine_2d_deviation_operator|test_engine_2d_rom_router_operator'
+
 # W4 — 2D validation breadth: correlated-field marcher MC and a second surface (2026-10-07)
 
 **Branch** `hsym2/w4-2d-validation-breadth` (stacked on H5b). A measurement,
@@ -918,7 +981,9 @@ correlation lengths spanning the reduced/materialized split, width within the
 unchanged, so this validates the path users reach through
 `[SOFT_RAINFALL_GRID] COHERENCE CORR_LEN`. Both cells now assert the C1 floor.
 
-**(b) Spatially correlated Manning never reaches the production operator.**
+**(b) Spatially correlated Manning never reaches the production operator**
+(**fixed by H15 the same day — see the H15 section above; the numbers below
+are the pre-H15 record**).
 `SpectralROM::advance()` takes the reduced-operator path only when
 `spatial_mannings` is unset; a correlated Manning field (the `[2D_ROM]
 MANNINGS_CORR_LEN` key, `CorrelatedFieldGenerator` in `seedROM`) runs on the
