@@ -578,8 +578,18 @@ void SpectralROM1D::advance(double dt, double K1d,
                 dot += reduced_M_[p * nk + q] * b_coarse[q];
             reduced_Mb_[p] = dot;
         }
+        // PR H14b: A = −dt·K1d·M shared by every member; the member scalar
+        // s_i = 1/mm_i sits inside the exponent, so the matrix powers are
+        // formed once and each member costs one (k+1)×(k+1) solve.
         for (std::size_t idx = 0; idx < nk * nk; ++idx)
-            reduced_MK_[idx] = K1d * reduced_M_[idx];
+            reduced_MK_[idx] = -dt * K1d * reduced_M_[idx];
+        double s_max = 1.0;
+        for (int i = 0; i < n_ensemble; ++i) {
+            const auto ui = static_cast<std::size_t>(i);
+            const double mm = mannings_mult[ui] * rate_mult_prod(ui);
+            s_max = std::max(s_max, (mm > 1.0e-12) ? 1.0 / mm : 1.0);
+        }
+        reduced_batch_.prepare(reduced_MK_, n_kept, s_max);
         for (std::size_t j = 0; j < nk; ++j) mode_active[j] = true;
         n_modes_active = n_kept;
 
@@ -607,9 +617,9 @@ void SpectralROM1D::advance(double dt, double K1d,
                         if (ep.entry == ParamEntry::FORCING_VECTOR)
                             g += (ep.column[ui] - 1.0) * ep.rv[j];
                 }
-                reduced_g_[j] = g;
+                reduced_g_[j] = g * dt;   // forcing integral column c = dt·g
             }
-            propagateDense(reduced_MK_, n_kept, s, dt, ai, reduced_g_.data());
+            reduced_batch_.apply(s, reduced_g_.data(), ai);
         }
 
         phase_time_ += dt;

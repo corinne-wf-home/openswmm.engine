@@ -668,6 +668,23 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
         for (std::size_t j = 0; j < nk; ++j) mode_active[j] = true;
         n_modes_active = n_kept;
 
+        // PR H14b: on the SHARED-operator path every member integrates
+        // exp(−s_i·dt·M); form the matrix powers once and let each member
+        // pay one (k+1)×(k+1) solve. Per-member operators (H15) keep the
+        // full exponential, their matrices differ.
+        if (!per_member_ops) {
+            reduced_A_.resize(nk * nk);
+            for (std::size_t idx = 0; idx < nk * nk; ++idx)
+                reduced_A_[idx] = -dt * Mr[idx];
+            double s_max = 1.0;
+            for (int i = 0; i < n_ensemble; ++i) {
+                const auto ui = static_cast<std::size_t>(i);
+                const double mm = mannings_mult[ui] * rate_mult_prod(ui);
+                s_max = std::max(s_max, (mm > 1.0e-12) ? 1.0 / mm : 1.0);
+            }
+            reduced_batch_.prepare(reduced_A_, n_kept, s_max);
+        }
+
         for (int i = 0; i < n_ensemble; ++i) {
             auto ui = static_cast<std::size_t>(i);
             double* ai = &a_ensemble[ui * nk];
@@ -732,8 +749,13 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 reduced_g_[j] = g;
             }
 
-            DeviationOperator2D::propagate(Mi, n_kept, s, dt,
-                                           ai, reduced_g_.data());
+            if (per_member_ops) {
+                DeviationOperator2D::propagate(Mi, n_kept, s, dt,
+                                               ai, reduced_g_.data());
+            } else {
+                for (std::size_t j = 0; j < nk; ++j) reduced_g_[j] *= dt;   // c = dt·g
+                reduced_batch_.apply(s, reduced_g_.data(), ai);
+            }
         }
 
         h_det_last_.assign(h_det, h_det + nt);
