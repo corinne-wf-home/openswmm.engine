@@ -9,6 +9,7 @@
 #include "DeviationOperator2D.hpp"
 
 #include "uncertainty/GraphEigenBasis.hpp"
+#include "uncertainty/RomDensePropagator.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -208,165 +209,19 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
 }
 
 // ============================================================================
-// Dense helpers (file-local)
-// ============================================================================
-
-namespace {
-
-// C = A·B, all n×n row-major.
-void matmul(const std::vector<double>& A, const std::vector<double>& B,
-            std::vector<double>& C, int n) {
-    const auto un = static_cast<std::size_t>(n);
-    C.assign(un * un, 0.0);
-    for (std::size_t i = 0; i < un; ++i) {
-        const double* Ai = &A[i * un];
-        double* Ci = &C[i * un];
-        for (std::size_t p = 0; p < un; ++p) {
-            const double a = Ai[p];
-            if (a == 0.0) continue;
-            const double* Bp = &B[p * un];
-            for (std::size_t j = 0; j < un; ++j)
-                Ci[j] += a * Bp[j];
-        }
-    }
-}
-
-// Solve D·X = N in place (X returned in N). Dense LU, partial pivoting.
-// n is small (ROM modes + 1); this is not a performance path.
-bool solveInPlace(std::vector<double>& D, std::vector<double>& N, int n) {
-    const auto un = static_cast<std::size_t>(n);
-    for (int col = 0; col < n; ++col) {
-        // Pivot.
-        int piv = col;
-        double best = std::fabs(D[static_cast<std::size_t>(col) * un + col]);
-        for (int r = col + 1; r < n; ++r) {
-            const double v = std::fabs(D[static_cast<std::size_t>(r) * un + col]);
-            if (v > best) { best = v; piv = r; }
-        }
-        if (best < 1e-300) return false;  // singular — cannot happen for Padé D
-        if (piv != col) {
-            for (int c = 0; c < n; ++c) {
-                std::swap(D[static_cast<std::size_t>(piv) * un + c],
-                          D[static_cast<std::size_t>(col) * un + c]);
-                std::swap(N[static_cast<std::size_t>(piv) * un + c],
-                          N[static_cast<std::size_t>(col) * un + c]);
-            }
-        }
-        const double inv = 1.0 / D[static_cast<std::size_t>(col) * un + col];
-        for (int r = 0; r < n; ++r) {
-            if (r == col) continue;
-            const double f = D[static_cast<std::size_t>(r) * un + col] * inv;
-            if (f == 0.0) continue;
-            for (int c = 0; c < n; ++c) {
-                D[static_cast<std::size_t>(r) * un + c] -=
-                    f * D[static_cast<std::size_t>(col) * un + c];
-                N[static_cast<std::size_t>(r) * un + c] -=
-                    f * N[static_cast<std::size_t>(col) * un + c];
-            }
-        }
-        for (int c = 0; c < n; ++c)
-            N[static_cast<std::size_t>(col) * un + c] *= inv;
-        // Normalize the pivot row of D too, to keep later eliminations exact.
-        for (int c = 0; c < n; ++c)
-            D[static_cast<std::size_t>(col) * un + c] *= inv;
-    }
-    return true;
-}
-
-} // namespace
-
-// ============================================================================
-// expm — scaling-and-squaring with a [6/6] Padé approximant
+// expm / propagate — delegate to the shared dense propagator (PR H14 moved
+// the implementation to uncertainty/RomDensePropagator.hpp so the 1D ROM can
+// use it; the code is verbatim, so 2D results are bit-identical).
 // ============================================================================
 
 void DeviationOperator2D::expm(std::vector<double>& A, int n) {
-    const auto un = static_cast<std::size_t>(n);
-    assert(A.size() == un * un);
-
-    // ‖A‖∞ (max absolute row sum) → scaling exponent s so ‖A/2^s‖ ≤ 1/2.
-    double norm = 0.0;
-    for (std::size_t i = 0; i < un; ++i) {
-        double rs = 0.0;
-        for (std::size_t j = 0; j < un; ++j) rs += std::fabs(A[i * un + j]);
-        norm = std::max(norm, rs);
-    }
-    int s = 0;
-    if (norm > 0.5) {
-        s = static_cast<int>(std::ceil(std::log2(norm / 0.5)));
-        const double f = std::ldexp(1.0, -s);  // 2^{-s}
-        for (auto& a : A) a *= f;
-    }
-
-    // [6/6] Padé: N = Σ c_m A^m, D = Σ (−1)^m c_m A^m,
-    // c_m = (12−m)!·6! / (12!·m!·(6−m)!).
-    static const double c[7] = {
-        1.0, 1.0 / 2.0, 5.0 / 44.0, 1.0 / 66.0,
-        1.0 / 792.0, 1.0 / 15840.0, 1.0 / 665280.0
-    };
-
-    std::vector<double> Apow(un * un, 0.0);  // A^m, starts at identity
-    for (std::size_t i = 0; i < un; ++i) Apow[i * un + i] = 1.0;
-    std::vector<double> Nmat(un * un, 0.0), Dmat(un * un, 0.0), tmp;
-    for (std::size_t i = 0; i < un; ++i) {
-        Nmat[i * un + i] = c[0];
-        Dmat[i * un + i] = c[0];
-    }
-    double sign = 1.0;
-    for (int m = 1; m <= 6; ++m) {
-        matmul(Apow, A, tmp, n);
-        Apow.swap(tmp);
-        sign = -sign;
-        for (std::size_t idx = 0; idx < un * un; ++idx) {
-            Nmat[idx] += c[m] * Apow[idx];
-            Dmat[idx] += sign * c[m] * Apow[idx];
-        }
-    }
-
-    const bool ok = solveInPlace(Dmat, Nmat, n);
-    assert(ok && "Padé denominator singular — matrix not properly scaled");
-    (void)ok;
-
-    // Undo the scaling: square s times.
-    for (int r = 0; r < s; ++r) {
-        matmul(Nmat, Nmat, tmp, n);
-        Nmat.swap(tmp);
-    }
-    A.swap(Nmat);
+    openswmm::uncertainty::denseExpm(A, n);
 }
-
-// ============================================================================
-// propagate — δa ← exp(−s·Δt·M)·δa + φ₁(−s·Δt·M)·Δt·g
-// ============================================================================
 
 void DeviationOperator2D::propagate(const std::vector<double>& M, int k,
                                     double s, double dt,
                                     double* delta_a, const double* g) {
-    assert(k > 0);
-    const auto uk = static_cast<std::size_t>(k);
-    assert(M.size() == uk * uk);
-
-    // Augmented (k+1)×(k+1): B = [[−s·Δt·M, Δt·g],[0, 0]];
-    // exp(B) = [[E, φ₁(−s·Δt·M)·Δt·g],[0, 1]].
-    const int n = k + 1;
-    const auto un = static_cast<std::size_t>(n);
-    std::vector<double> B(un * un, 0.0);
-    const double f = -s * dt;
-    for (std::size_t i = 0; i < uk; ++i) {
-        for (std::size_t j = 0; j < uk; ++j)
-            B[i * un + j] = f * M[i * uk + j];
-        B[i * un + uk] = dt * g[i];
-    }
-
-    expm(B, n);
-
-    std::vector<double> out(uk, 0.0);
-    for (std::size_t i = 0; i < uk; ++i) {
-        double v = B[i * un + uk];              // forcing integral column
-        for (std::size_t j = 0; j < uk; ++j)
-            v += B[i * un + j] * delta_a[j];    // E·δa
-        out[i] = v;
-    }
-    for (std::size_t i = 0; i < uk; ++i) delta_a[i] = out[i];
+    openswmm::uncertainty::propagateDense(M, k, s, dt, delta_a, g);
 }
 
 } // namespace openswmm::twoD

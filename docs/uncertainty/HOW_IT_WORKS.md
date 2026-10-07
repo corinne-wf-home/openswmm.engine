@@ -573,20 +573,27 @@ the deepest pool node, member coverage 0.84 over the surcharged chain under
 `NODE_CONTINUITY SEMI_IMPLICIT`), and the free-surface fixture went from
 ~2× over-wide to calibrated.
 
-Two things it does not fix, both measured. **Upstream of a surcharged pool,
-across a supercritical reach, the band is too wide** — 7–15× on the test
-chain. That is not the source term: zeroing it changes nothing there. It is
-the pool's own (large, correct) deviation diffusing *upstream* through the
-symmetric operator described above, into nodes the pool cannot physically
-influence. The fix is a directional term in the operator, not a constant,
-and is tracked as a separate item. **Under `NODE_CONTINUITY EXPLICIT`** the
-discrete surcharge branch also drowns the node just upstream of a chokepoint,
-which a rule keyed on that node's own depth cannot see; EXPLICIT's
-surcharged bands remain a documented limitation (member coverage 0.69). **If
-you expect appreciable, sustained surcharge, run with `SEMI_IMPLICIT`, and
-read bands at surcharged nodes as calibrated and bands immediately upstream
-of a pool as conservative** (too wide, not too narrow). `surcharge_frac`
-(above) tells you when you are in that regime at all.
+**The operator is now one-way across supercritical reaches (PR H14).** The
+symmetric operator described above relayed a surcharged pool's deviation
+*upstream* across a 5 % supercritical reach into nodes the pool cannot
+physically influence — 7–15× over-wide there on the test chain, and not the
+source term (zeroing it changed nothing). The sidecar now reads each
+conduit's Froude number from the solver and, above Fr ≈ 1 (a smooth ramp
+over 0.8–1.2), removes the upstream node's coupling to its downstream
+neighbour while keeping the reverse. Nothing about the steady band changes
+(the deviation form's fixed point does not depend on the operator); what
+changes is that an upstream node now follows its own local physics while
+the pool fills, instead of the pool's transient. Measured against the
+Monte Carlo on the surcharged chain under `NODE_CONTINUITY SEMI_IMPLICIT`:
+member coverage 0.83, width ratio 1.21 — calibrated — with the nodes above
+the pool at ~1× instead of 7–15×. **Under `EXPLICIT`** the discrete
+surcharge branch also drowns the node just upstream of a chokepoint, which
+a rule keyed on that node's own depth cannot see; EXPLICIT's surcharged
+bands improved (member coverage 0.69 → 0.73) but remain a documented
+limitation. **If you expect appreciable, sustained surcharge, run with
+`SEMI_IMPLICIT`.** `surcharge_frac` (above) tells you when you are in that
+regime at all; `fr_trust` tells you how much of the network the gate is
+acting on.
 
 > **Historical note**: an earlier version of this section also warned that
 > the band reflected uncertainty "since the last recalibration" — the ROM

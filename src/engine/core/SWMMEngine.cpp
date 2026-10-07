@@ -2788,6 +2788,9 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
                                 snap.n_conduits, ctx_.current_time,
                                 snap.node_surcharged);
         }
+        // PR H14: Froude-gated directional operator from the same snapshot
+        // (after updateBasis, which clears any operator projected on the old P).
+        refreshRom1dDirectionalOperator();
         const double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
         rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
 
@@ -6549,11 +6552,13 @@ void SWMMEngine::buildROM1D() noexcept {
 
     // Collect conduit node pairs
     std::vector<int> n1_vec, n2_vec;
+    rom1d_conduit_link_.clear();
     for (int j = 0; j < ctx_.n_links(); ++j) {
         auto uj = static_cast<std::size_t>(j);
         if (ctx_.links.type[uj] != LinkType::CONDUIT) continue;
         n1_vec.push_back(ctx_.links.node1[uj]);
         n2_vec.push_back(ctx_.links.node2[uj]);
+        rom1d_conduit_link_.push_back(j);   // PR H14: ci -> link index
     }
     if (n1_vec.empty()) return;
 
@@ -6931,6 +6936,101 @@ double SWMMEngine::computeK1d() noexcept {
         ++cnt;
     }
     return cnt > 0 ? sum_k / cnt : 1e-4;
+}
+
+// ============================================================================
+// refreshRom1dDirectionalOperator() — PR H14 Froude-gated directional operator
+// ============================================================================
+
+void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
+    rom1d_dir_gated_frac_ = 0.0;
+    if (!rom1d_ || !rom1d_->is_ready()) return;
+    if (!rom1d_directional_cfg_.enabled) { rom1d_->clearReducedOperator(); return; }
+    if (!router_.dwSolver().isHSnapshotValid()) return;
+    const auto snap = router_.dwSolver().lastConvergedH();
+    const int nc = snap.n_conduits;
+    if (nc <= 0 || snap.conduit_off == nullptr || snap.link_froude == nullptr ||
+        static_cast<int>(rom1d_conduit_link_.size()) != nc) return;
+
+    const auto& f2a = rom1d_->full_to_active;
+    rom1d_dir_a1_.resize(static_cast<std::size_t>(nc));
+    rom1d_dir_a2_.resize(static_cast<std::size_t>(nc));
+    rom1d_dir_sign_.resize(static_cast<std::size_t>(nc));
+    rom1d_dir_w_.resize(static_cast<std::size_t>(nc));
+    rom1d_dir_fr_.resize(static_cast<std::size_t>(nc));
+    rom1d_dir_drop_.resize(static_cast<std::size_t>(nc));
+
+    // Weights: the same floored, mean-1 normalization updateBasis() applied
+    // when it built the basis from conduit_off, so an ungated M is diag(λ)
+    // up to the Ritz residual plus whatever dqdh drift has accrued since the
+    // last rebuild.
+    double sum_w = 0.0;
+    bool any_wet = false;
+    for (int ci = 0; ci < nc; ++ci) {
+        const auto uci = static_cast<std::size_t>(ci);
+        const double w = std::max(snap.conduit_off[ci], 1.0e-6);
+        rom1d_dir_w_[uci] = w;
+        sum_w += w;
+        if (snap.conduit_off[ci] > 1.0e-6) any_wet = true;
+    }
+    if (!any_wet || sum_w <= 0.0) return;
+    const double scale = static_cast<double>(nc) / sum_w;
+
+    int n_links = ctx_.n_links();
+    for (int ci = 0; ci < nc; ++ci) {
+        const auto uci = static_cast<std::size_t>(ci);
+        rom1d_dir_w_[uci] *= scale;
+        const int n1 = snap.conduit_n1[ci], n2 = snap.conduit_n2[ci];
+        rom1d_dir_a1_[uci] = (n1 >= 0 && n1 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n1)] : -1;
+        rom1d_dir_a2_[uci] = (n2 >= 0 && n2 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n2)] : -1;
+        const int j = rom1d_conduit_link_[uci];
+        // Consistency guard: the snapshot's conduit order must match the
+        // order buildROM1D() collected conduits in (both walk links in index
+        // order). If it ever does not, skip the gate rather than misattribute
+        // a Froude number.
+        if (j < 0 || j >= n_links || j >= snap.n_links ||
+            ctx_.links.node1[static_cast<std::size_t>(j)] != n1) {
+            rom1d_dir_sign_[uci] = 0;
+            rom1d_dir_fr_[uci]   = 0.0;
+            continue;
+        }
+        const double q = ctx_.links.flow[static_cast<std::size_t>(j)];
+        rom1d_dir_sign_[uci] = (q > 0.0) ? 1 : (q < 0.0 ? -1 : 0);
+        rom1d_dir_fr_[uci]   = std::fabs(snap.link_froude[j]);
+        // Drop gate input: water-surface drop across the conduit in units of
+        // the UPSTREAM node's depth (oriented by flow sign). Outfall ends use
+        // the outfall head like any other node.
+        rom1d_dir_drop_[uci] = 0.0;
+        if (rom1d_dir_sign_[uci] != 0 && n1 >= 0 && n2 >= 0 &&
+            n1 < ctx_.n_nodes() && n2 < ctx_.n_nodes()) {
+            const int up = rom1d_dir_sign_[uci] > 0 ? n1 : n2;
+            const int dn = rom1d_dir_sign_[uci] > 0 ? n2 : n1;
+            const double h_up = ctx_.nodes.head[static_cast<std::size_t>(up)];
+            const double h_dn = ctx_.nodes.head[static_cast<std::size_t>(dn)];
+            const double d_up = h_up - ctx_.nodes.invert_elev[static_cast<std::size_t>(up)];
+            if (d_up > 1.0e-3 && h_up > h_dn)
+                rom1d_dir_drop_[uci] = (h_up - h_dn) / d_up;
+        }
+    }
+
+    int n_gated = 0;
+    const int k = rom1d_->n_kept;
+    const bool ok = uncertainty::assembleDirectionalReduced(
+        rom1d_->basis->P.data(), k, rom1d_->n_nodes, nc,
+        rom1d_dir_a1_.data(), rom1d_dir_a2_.data(), rom1d_dir_w_.data(),
+        rom1d_dir_sign_.data(), rom1d_dir_fr_.data(), rom1d_directional_cfg_,
+        rom1d_dir_M_, &n_gated, rom1d_dir_drop_.data());
+    if (!ok) return;
+    rom1d_dir_gated_frac_ = static_cast<double>(n_gated) / static_cast<double>(nc);
+    // No supercritical reach anywhere: do not install. The diagonal path is
+    // then bit-identical to pre-H14 (an ungated M would still differ from
+    // diag(λ) by the Ritz residual and the dqdh drift since the last rebuild).
+    if (n_gated == 0) { rom1d_->clearReducedOperator(); return; }
+    try {
+        rom1d_->setReducedOperator(rom1d_dir_M_);
+    } catch (...) {
+        rom1d_->clearReducedOperator();
+    }
 }
 
 // ============================================================================

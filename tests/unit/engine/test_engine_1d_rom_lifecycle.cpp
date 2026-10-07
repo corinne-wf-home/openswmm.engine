@@ -1033,3 +1033,121 @@ TEST(SwmmEngine1DRomLifecycle, StillNetworkGivesZeroTravelTime) {
     swmm_engine_close(eng);
     swmm_engine_destroy(eng);
 }
+
+// ============================================================================
+// PR H14 — Froude-gated directional operator (engine-level plumbing)
+// ============================================================================
+
+namespace {
+
+/// 5-junction chain on a 5 % slope with 1.0 ft pipes and a 5 CFS inflow:
+/// supercritical in every reach (the H5b surcharged-chain geometry without
+/// the C5 chokepoint). Froude well above the gate's fr_hi = 1.2.
+std::string buildSteepChainModel(const std::string& extra_sections) {
+    return
+        "[OPTIONS]\n"
+        "FLOW_UNITS           CFS\n"
+        "FLOW_ROUTING         DYNWAVE\n"
+        "START_DATE           01/01/2026\n"
+        "START_TIME           00:00:00\n"
+        "END_DATE             01/01/2026\n"
+        "END_TIME             00:15:00\n"
+        "REPORT_STEP          00:01:00\n"
+        "ROUTING_STEP         5\n"
+        "\n"
+        "[JUNCTIONS]\n"
+        ";;Name  Elev  MaxDepth  InitDepth  SurDepth  Aponded\n"
+        "J1      40.0  8.0       0.1        0         0\n"
+        "J2      30.0  8.0       0.1        0         0\n"
+        "J3      20.0  8.0       0.1        0         0\n"
+        "J4      10.0  8.0       0.1        0         0\n"
+        "J5       5.0  8.0       0.1        0         0\n"
+        "\n"
+        "[OUTFALLS]\n"
+        ";;Name  Elev  Type  Gated\n"
+        "O1      0.0   FREE  NO\n"
+        "\n"
+        "[CONDUITS]\n"
+        ";;Name  From  To  Length  Roughness  InOffset  OutOffset  InitFlow\n"
+        "C1      J1    J2  200.0   0.013      0         0          0.0\n"
+        "C2      J2    J3  200.0   0.013      0         0          0.0\n"
+        "C3      J3    J4  200.0   0.013      0         0          0.0\n"
+        "C4      J4    J5  100.0   0.013      0         0          0.0\n"
+        "C5      J5    O1  100.0   0.013      0         0          0.0\n"
+        "\n"
+        "[XSECTIONS]\n"
+        ";;Link  Shape     Geom1  Geom2  Geom3  Geom4  Barrels\n"
+        "C1      CIRCULAR  3.0    0      0      0      1\n"
+        "C2      CIRCULAR  3.0    0      0      0      1\n"
+        "C3      CIRCULAR  3.0    0      0      0      1\n"
+        "C4      CIRCULAR  3.0    0      0      0      1\n"
+        "C5      CIRCULAR  3.0    0      0      0      1\n"
+        "\n"
+        "[INFLOWS]\n"
+        ";;Node  Constituent  TimeSeries  Type   Mfactor  Sfactor  Baseline  Pattern\n"
+        "J1      FLOW         \"\"          FLOW   1.0      1.0      5.0\n"
+        + extra_sections;
+}
+
+}  // namespace
+
+TEST(SwmmEngine1DRomLifecycle, DirectionalOperatorInstalledOnSupercriticalChain) {
+    const fs::path dir = fs::current_path() / "1d_rom_lifecycle_out";
+    fs::create_directories(dir);
+    const fs::path inp = dir / "h14_steep.inp";
+    const fs::path rpt = dir / "h14_steep.rpt";
+    { std::ofstream f(inp); f << buildSteepChainModel("\n[UNCERTAINTY]\n1D MANNINGS_N 0.20\n"); }
+
+    SWMM_Engine eng = swmm_engine_create();
+    ASSERT_EQ(swmm_engine_open(eng, inp.string().c_str(), rpt.string().c_str(), nullptr, nullptr), SWMM_OK);
+    ASSERT_EQ(swmm_engine_initialize(eng), SWMM_OK);
+    ASSERT_EQ(swmm_engine_start(eng, 1), SWMM_OK);
+    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+    ASSERT_NE(impl->rom1d(), nullptr);
+
+    double elapsed = 0.0;
+    int n_steps = 0;
+    double max_gated = 0.0;
+    bool installed_at_end = false;
+    while (swmm_engine_step(eng, &elapsed) == SWMM_OK && elapsed > 0.0) {
+        if (++n_steps > 2000) break;
+        max_gated = std::max(max_gated, impl->rom1dDirectionalGatedFraction());
+        installed_at_end = impl->rom1d()->hasReducedOperator();
+    }
+    swmm_engine_end(eng);
+    EXPECT_GT(max_gated, 0.5)
+        << "a 5% chain at 5 CFS is supercritical in most reaches; the Froude gate must open";
+    EXPECT_TRUE(installed_at_end)
+        << "with gated reaches the directional operator must be installed on the ROM";
+    swmm_engine_close(eng);
+    swmm_engine_destroy(eng);
+}
+
+TEST(SwmmEngine1DRomLifecycle, DirectionalOperatorDisabledLeavesDiagonalPath) {
+    const fs::path dir = fs::current_path() / "1d_rom_lifecycle_out";
+    fs::create_directories(dir);
+    const fs::path inp = dir / "h14_steep_off.inp";
+    const fs::path rpt = dir / "h14_steep_off.rpt";
+    { std::ofstream f(inp); f << buildSteepChainModel("\n[UNCERTAINTY]\n1D MANNINGS_N 0.20\n"); }
+
+    SWMM_Engine eng = swmm_engine_create();
+    ASSERT_EQ(swmm_engine_open(eng, inp.string().c_str(), rpt.string().c_str(), nullptr, nullptr), SWMM_OK);
+    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+    impl->rom1dDirectionalConfig().enabled = false;
+    ASSERT_EQ(swmm_engine_initialize(eng), SWMM_OK);
+    ASSERT_EQ(swmm_engine_start(eng, 1), SWMM_OK);
+    ASSERT_NE(impl->rom1d(), nullptr);
+
+    double elapsed = 0.0;
+    int n_steps = 0;
+    bool ever_installed = false;
+    while (swmm_engine_step(eng, &elapsed) == SWMM_OK && elapsed > 0.0) {
+        if (++n_steps > 2000) break;
+        ever_installed = ever_installed || impl->rom1d()->hasReducedOperator();
+    }
+    swmm_engine_end(eng);
+    EXPECT_FALSE(ever_installed) << "enabled=false must never install an operator";
+    EXPECT_EQ(impl->rom1dDirectionalGatedFraction(), 0.0);
+    swmm_engine_close(eng);
+    swmm_engine_destroy(eng);
+}

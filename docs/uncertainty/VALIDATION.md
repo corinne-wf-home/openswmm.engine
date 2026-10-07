@@ -27,9 +27,9 @@ label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 
 | Gate / cell | Width ratio median, old → corrected | Member coverage | Gate verdict | **C1 status** |
 |---|---|---|---|---|
-| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → 1.961 (P8 fixture) → **1.177** (H5b) | 0.20 → 0.94 → **0.867** | **green since P8** | **calibrated** since H5b (`alpha_free = 0.6` closes most of H13) |
-| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → 0.033 → **0.694** (H5b) | 0.38 → **0.69** | red, unchanged | ranking only, documented limitation |
-| H5 surcharged, SEMI_IMPLICIT | 1.031 → 0.982 → **5.446** (H5b) | 0.51 → **0.842** | **red since H5b** (ceiling 3.0, not moved) | **conservative**: surcharged nodes calibrated, free-surface nodes upstream of the pool over-wide via operator leakage → **H14** |
+| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → 1.961 (P8 fixture) → 1.177 (H5b) → **1.210** (H14) | 0.20 → 0.94 → 0.867 → **0.993** | **green since P8** | **calibrated** since H5b (`alpha_free = 0.6` closes most of H13); H14 gates its steep reaches too |
+| H5 surcharged, EXPLICIT | 0.033 → 0.033 → 0.694 (H5b) → **0.781** (H14) | 0.38 → 0.69 → **0.73** | **green on H5's bounds since H14** | ranking only (floor unmet), documented limitation |
+| H5 surcharged, SEMI_IMPLICIT | 1.031 → 0.982 → 5.446 (H5b) → **1.208** (H14) | 0.51 → 0.842 → **0.832** | **green since H14** (ceiling 3.0 never moved) | **calibrated**; J3 (above the pool) still 11× over — basis truncation on a 5-node fixture, see H14 §6 |
 | H11 front passage, phase coordinate | 1.354 → 1.295 → **1.290** (H5b) | 0.83 → **0.829** | passes [0.5, 2] | **calibrated** (0.83 ≥ 0.80, 1.29 ≤ 1.5; floor asserted) |
 | H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated | superseded by H11 |
 | SR-5 soft rain, FULL | 0.822 → 0.710 → **0.976** (SR-6) | 0.76 → **0.88** | passes | **calibrated** since SR-6 (floor asserted) |
@@ -866,6 +866,146 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# H14 — Froude-gated directional 1D operator (2026-10-07)
+
+**Branch** `hsym2/h14-directional-1d-operator` (stacked on H15). Closes the
+H5b residual: `RomCoverageSurcharged.SemiImplicitContinuity` is green on
+H5's own bounds, and `regression_rom_coverage` with it — the full gate is
+142/142 for the first time on this line.
+
+## 1. Problem
+
+The 1D ROM's operator is the weighted graph Laplacian built from the Picard
+`dqdh` (one coefficient per conduit, applied to both endpoints): symmetric,
+no flow direction. On H5b's surcharged chain the pool's 10 ft of deviation
+diffused *upstream* across 5 % supercritical reaches and left J1–J3 7–15×
+over-wide (H5b §4 showed by sweep that this was not their own source).
+
+## 2. What was built
+
+- `RomDirectionalOperator.hpp` (pure): `M = Pᵀ·L_dir·P`, with `L_dir` the
+  same grounded weighted Laplacian except that on a conduit whose Froude
+  number exceeds the gate the UPSTREAM node's coupling to the downstream one
+  is removed (`L[up,down] → −w·(1−g)`), the downstream row untouched. Gate
+  `g = clamp((Fr − 0.8)/0.4, 0, 1)`. With every gate closed `M = diag(λ)` up
+  to the Ritz residual (tested); open gates make it non-symmetric (tested
+  against a hand-built dense `L_dir` to 1e-12).
+- `RomDensePropagator.hpp`: the dense [6/6] Padé `expm` and the augmented
+  φ₁ step moved verbatim out of `DeviationOperator2D.cpp` so the 1D ROM
+  (built unconditionally) can use it; 2D delegates and is bit-identical.
+- `SpectralROM1D::setReducedOperator(M)` and a reduced path in `advance()`:
+  `d(δa_i)/dt = −(K1d·M/mm_i)·δa_i − K1d·(1/mm_i − 1)·M·b + g_i`, every
+  forcing term unchanged. `M = diag(λ)` reproduces the diagonal path to
+  1e-10 (tested); a successful `updateBasis()` clears M (P changed).
+- Engine: `refreshRom1dDirectionalOperator()` each routing step from
+  `HSnapshot::link_froude` + the conduit flow sign (ci → link map checked
+  against `node1` so a reordering can never misattribute a Froude number).
+  **Installs nothing when no conduit is gated**, so every subcritical
+  network is bit-identical to pre-H14 — SR-5 and CL-1e reproduce their
+  numbers exactly, H11 is unchanged. `rom1dDirectionalConfig()` /
+  `rom1dDirectionalGatedFraction()`; harness knobs `H14_DIRECTIONAL`,
+  `H14_FR_LO/HI`, `H14_DROP`.
+
+## 3. A property worth knowing before reading the numbers
+
+The deviation form's fixed point `δa* = (mm−1)·b` does not depend on the
+operator (W3 noted this for 2D; the unit test
+`FrozenSourceFixedPointIsOperatorIndependent` pins it for 1D). So the gate
+cannot change a *steady* band at all. What it changes is the transient: an
+upstream node now relaxes on its own local physics while the pool below it
+fills, instead of being dragged by the pool's growth. H5b's window IS that
+regime (the pool keeps rising through it), which is why the gate acts there
+and nowhere else.
+
+## 4. Results (every 1D MC cell; member coverage / median width ratio)
+
+| cell | pre-H14 | **H14** | verdict |
+|---|---|---|---|
+| H5 surcharged, SEMI_IMPLICIT | 0.842 / 5.446 (red on ≤ 3.0) | **0.832 / 1.208** | **calibrated — green** |
+| H5 surcharged, EXPLICIT | 0.693 / 0.694 | 0.732 / 0.781 | H5 bounds pass; floor unmet, documented limitation |
+| PR-10 free-surface (P8) | 0.867 / 1.177 | 0.993 / 1.210 | calibrated (reaches are gated too; slightly over-covers) |
+| H11 front passage | 0.829 / 1.290 | 0.829 / 1.290 | unchanged (no gate opens) |
+| SR-5 / CL-1e soft rain | 0.881 / 0.976, 0.827 / 0.804 | identical | unchanged (no gate opens) |
+
+`H14_DIRECTIONAL=0` reproduces 0.842 / 5.446 exactly. Per node on the SEMI
+cell (late window, ROM width / MC width):
+
+| node | pre-H14 | **H14** |
+|---|---|---|
+| J1 | 0.743 / 0.108 (7.5×) | 0.130 / 0.108 (**1.2×**) |
+| J2 | 0.721 / 0.108 (7.4×) | 0.157 / 0.108 (**1.5×**) |
+| J3 | 1.525 / 0.108 (15×) | 1.198 / 0.108 (11×) |
+| J4 | 6.65 / 9.23 (0.70) | 7.17 / 9.23 (0.76) |
+| J5 | 10.19 / 10.03 (1.02) | 10.76 / 10.03 (1.08) |
+
+J1 and J2 are fixed. J3 — the node directly above the pool — is not.
+
+## 5. J3: what was tried, measured, and rejected
+
+The solver's Froude number is a mid-depth quantity. C3 (J3 → J4) is steep
+but its lower end is drowned by the pool, so its mid-depth is large and it
+reads subcritical: the Froude gate never opens on C3, and J3 keeps its
+coupling to J4. A second, node-level gate was built: open when the
+water-surface drop across the conduit exceeds the upstream node's own depth
+(`(h_up − h_dn)/d_up` ramped over [1, 2]) — J3 sits 20 depths above the
+pool. Measured: J3 moved only 1.20 → 1.07 ft, while the same criterion gated
+steep-but-subcritical reaches on the soft-rain fixtures and took **CL-1e
+from 0.827 to 0.762 (red)** and SR-5 from 0.881 to 0.869. It ships off
+(`use_drop = false`), kept as a dial so the measurement is reproducible.
+
+That J3 barely responds to being fully decoupled from J4 says its residual
+is not relayed through the operator. The remaining suspect is basis
+truncation: this 5-node fixture retains k = 4 modes (the eigensolver's
+ceiling is n − 1), so the operator-independent fixed point
+`(mm−1)·PPᵀ(alpha ⊙ depth)` smears the pool's large source into whichever
+node the missing mode weights most. See §6 for the measurement.
+
+## 6. Truncation check
+
+Lifting both mode caps (`k_req = n` in `GraphEigenBasis`, `k = n_active`
+in `buildROM1D`; a scratch build, reverted) on the SEMI cell:
+
+| configuration | J1 | J2 | J3 | J4 | J5 | member cov / width-med |
+|---|---|---|---|---|---|---|
+| shipped: k = 4 of 5, Froude gate on | 0.130 | 0.157 | 1.198 | 7.17 | 10.76 | 0.832 / 1.208 |
+| full basis k = 5, gate **on** | 0.131 | 0.131 | **0.173** | 2.56 | 14.5 | 0.805 / 1.213 |
+| full basis k = 5, gate **off** | 0.748 | 0.754 | 0.763 | 2.11 | 13.97 | 0.815 / 5.104 |
+
+(ROM widths in ft; MC is 0.108 at J1–J3, 9.23 at J4, 10.03 at J5.) Two
+separate effects, now separated: the symmetric operator's transient relay
+(0.75 ft at J1–J3 even with a full basis — H5b's own experiment,
+reproduced) is what H14 removes; J3's remaining 1.2 ft on the shipped
+configuration is the missing fifth mode of a five-node chain, and vanishes
+with the gate once that mode is present (0.17 ft, 1.6×). The full basis is
+not shipped: `GraphEigenBasis` caps at n − 1 by design (the Lanczos start
+vector is built orthogonal to the constant), and the full basis also
+under-predicts J4 (2.6 vs 9.2 ft) for reasons not chased here — the same
+J4 anomaly H5b's full-basis experiment recorded. On a production network
+(k = 20 of ~1000) the one-mode truncation of a five-node fixture has no
+analogue; J3 is a fixture artefact, recorded, not a formulation gap.
+
+## 7. Cost — a real one, recorded
+
+The reduced path does one (k+1)×(k+1) matrix exponential **per member per
+routing step** whenever any conduit is gated (the 2D ROM has paid the same
+since W3, at k = 40). On Bellinge (1011 nodes, k = 20, M = 50, 65,589
+steps, most reaches gated) the full-window lock went from **460 s to
+1,853 s** (Debug). The lock itself passes with its distribution essentially
+unmoved (band/depth p50 0.308 → 0.316, max 44.6 → 44.5; band/head max
+0.276 → 0.268). Exactness was kept over cost here: the per-member scaling
+`1/mm_i` is inside the exponential, so the propagator cannot be shared
+across members by a scalar trick. Follow-up **H14b**: real Schur of
+`K1d·dt·M` once per step and a Schur–Parlett per-member exponential (O(k²)
+per member), or a cached propagator when `dt` and `K1d` repeat. Not done
+here.
+
+## 8. Reproduction
+
+    build/<dir>/tests/regression/test_rom_coverage                      # all 1D cells (green)
+    H14_DIRECTIONAL=0 build/<dir>/tests/regression/test_rom_coverage --gtest_filter='RomCoverageSurcharged.SemiImplicit*'   # pre-H14
+    H14_DROP=1 H5B_TRACE=1 ... --gtest_filter='RomCoverageSurcharged.SemiImplicit*'   # the rejected drop gate
+    ctest --test-dir build/<dir> -R 'rom_directional_operator|1d_rom_lifecycle'
+
 # H15 — spatially correlated Manning through the 2D reduced operator (2026-10-07)
 
 **Branch** `hsym2/h15-spatial-manning-reduced-op` (stacked on W4). Closes
@@ -1534,6 +1674,8 @@ a supercritical reach — the same family as H3's finding and the 2D
 advection term W3 added. Logged in the checklist as candidate **H14**. Not
 attempted here: it changes the operator every 1D consumer sees and needs its
 own MC against both the P8 and the surcharged fixtures.
+**Done the next day — see the H14 section: 0.842 / 5.446 → 0.832 / 1.208,
+cell green, J1/J2 at ~1×; J3 remains (truncation, not the operator).**
 
 **EXPLICIT** moved from 0.38 to 0.693 coverage (and from 0.033 to 0.69 on the
 median) under the same constants, with no tuning for it. It still fails the

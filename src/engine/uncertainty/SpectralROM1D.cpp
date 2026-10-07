@@ -6,6 +6,7 @@
  */
 
 #include "SpectralROM1D.hpp"
+#include "RomDensePropagator.hpp"
 #include "LhsShuffle.hpp"
 
 #include <algorithm>
@@ -287,6 +288,18 @@ void SpectralROM1D::seed(const double* h_nodes) {
 // advance
 // ============================================================================
 
+void SpectralROM1D::setReducedOperator(const std::vector<double>& M_in) {
+    const auto nk = static_cast<std::size_t>(n_kept);
+    if (!is_ready() || nk == 0 || M_in.size() != nk * nk)
+        throw std::invalid_argument(
+            "SpectralROM1D::setReducedOperator: M must be n_kept x n_kept and "
+            "the ROM must be initialized first");
+    reduced_M_ = M_in;
+    reduced_Mb_.assign(nk, 0.0);
+    reduced_MK_.assign(nk * nk, 0.0);
+    reduced_g_.assign(nk, 0.0);
+}
+
 void SpectralROM1D::advance(double dt, double K1d,
                              const double* h_det_active,
                              const double* runoff_per_node,
@@ -550,12 +563,65 @@ void SpectralROM1D::advance(double dt, double K1d,
         if (mode_active[j]) ++n_modes_active;
     }
 
+    const bool has_extra = !extra_params_.empty();
+
+    // ---- Step 4 (PR H14), reduced-operator path -------------------------------
+    //   d(δa_i)/dt = −(K1d·M/mm_i)·δa_i − K1d·(1/mm_i − 1)·M·b + g_i
+    // Modes couple through M, so the per-mode active set does not apply: all
+    // modes advance. The forcing vector g_i is assembled exactly as on the
+    // diagonal path below; only the decay operator and its Manning-sensitivity
+    // term generalize from diag(λ) to M.
+    if (hasReducedOperator()) {
+        for (std::size_t p = 0; p < nk; ++p) {
+            double dot = 0.0;
+            for (std::size_t q = 0; q < nk; ++q)
+                dot += reduced_M_[p * nk + q] * b_coarse[q];
+            reduced_Mb_[p] = dot;
+        }
+        for (std::size_t idx = 0; idx < nk * nk; ++idx)
+            reduced_MK_[idx] = K1d * reduced_M_[idx];
+        for (std::size_t j = 0; j < nk; ++j) mode_active[j] = true;
+        n_modes_active = n_kept;
+
+        for (int i = 0; i < n_ensemble; ++i) {
+            auto ui = static_cast<std::size_t>(i);
+            double* ai = &a_ensemble[ui * nk];
+            const double mm       = mannings_mult[ui] * rate_mult_prod(ui);
+            const double s        = (mm > 1.0e-12) ? 1.0 / mm : 1.0;
+            const double base     = has_ensemble_runoff
+                ? (ensemble_runoff_[ui] / mean_ensemble_runoff_)
+                : runoff_mult[ui];
+            const double scale_1  = base * forcing_mult_prod(ui) - 1.0;
+            for (std::size_t j = 0; j < nk; ++j) {
+                double g = -K1d * (s - 1.0) * reduced_Mb_[j] + scale_1 * r_coarse[j];
+                if (soft_spread_field_) {
+                    if (soft_use_rij)
+                        g += soft_r_spread_spatial_[ui * nk + j];
+                    else
+                        g += soft_coeff_[ui] * soft_r_spread_[j];
+                }
+                if (soft_spread_field_b_)
+                    g += soft_coeff_b_[ui] * soft_r_spread_b_[j];
+                if (has_extra) {
+                    for (const auto& ep : extra_params_)
+                        if (ep.entry == ParamEntry::FORCING_VECTOR)
+                            g += (ep.column[ui] - 1.0) * ep.rv[j];
+                }
+                reduced_g_[j] = g;
+            }
+            propagateDense(reduced_MK_, n_kept, s, dt, ai, reduced_g_.data());
+        }
+
+        phase_time_ += dt;
+        if (!tbar_.empty())
+            hist_.push(phase_time_, h_det_active);
+        return;
+    }
+
     // ---- Step 4: Advance deviations (exact exponential step) ------------------
     //   d(δa)/dt = −rate·δa + g,   rate = λ_j·K1d/mm_i
     //   g = −λ_j·K1d·(1/mm_i − 1)·b_j + (scale_i − 1)·r_j
     const double rate_floor = 1.0e-12;
-
-    const bool has_extra = !extra_params_.empty();
 
     for (int i = 0; i < n_ensemble; ++i) {
         auto ui = static_cast<std::size_t>(i);
@@ -919,6 +985,7 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     if (force_cold) ++basis_rebuilds_cold_forced_;
 
     basis = basis_owned_.get();  // switch raw pointer to new owned basis
+    reduced_M_.clear();          // PR H14: M was projected on the old P; caller re-assembles
 
     // --- Re-project ensemble coefficients: a_new = R * a_old  ----------
     // R[j_new, j_old] = P_new[:,j_new]^T · P_old[:,j_old]

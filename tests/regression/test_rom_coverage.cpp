@@ -237,6 +237,12 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     // H5b recalibration knobs (env; defaults = the shipped H5 dials). Read by
     // computeSurchargeAlpha() every step, so setting them here is sufficient.
     if (with_rom) {
+        // H14: Froude-gated directional operator; H14_DIRECTIONAL=0 restores the
+        // symmetric (pre-H14) operator for A/B measurement.
+        if (const char* v = std::getenv("H14_DIRECTIONAL")) eng->rom1dDirectionalConfig().enabled = std::atoi(v) != 0;
+        if (const char* v = std::getenv("H14_FR_LO")) eng->rom1dDirectionalConfig().fr_lo = std::atof(v);
+        if (const char* v = std::getenv("H14_FR_HI")) eng->rom1dDirectionalConfig().fr_hi = std::atof(v);
+        if (const char* v = std::getenv("H14_DROP")) eng->rom1dDirectionalConfig().use_drop = std::atoi(v) != 0;
         auto& scfg = eng->rom1dSurchargeConfig();
         if (const char* v = std::getenv("H5B_ALPHA_SURCHARGED")) scfg.alpha_surcharged = std::atof(v);
         if (const char* v = std::getenv("H5B_ALPHA_FREE"))       scfg.alpha_free       = std::atof(v);
@@ -842,6 +848,12 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
 // surcharge branch drowns J3 as well (MC width 13 ft there, ROM 0.69 ft,
 // per-node coverage 0.53), and a ramp keyed on J3's OWN depth/crown cannot
 // see that. Status unchanged: documented limitation.
+//
+// H14 2026-10-07 (directional operator): 0.693 / 0.694 -> 0.732 / 0.781.
+// H5's own bounds (>= 0.90 median containment, ratio_med in [0.3, 3.0]) now
+// PASS on this cell too, so the binary's only remaining red is gone; the C1
+// floor (0.80 member coverage) is still not met and is printed, not
+// asserted -- the EXPLICIT limitation stands as documented.
 TEST(RomCoverageSurcharged, ExplicitContinuity) {
     assertSurchargedCell("EXPLICIT", runSurchargedCell(/*node_continuity_semi=*/false));
 }
@@ -873,6 +885,14 @@ TEST(RomCoverageSurcharged, ExplicitContinuity) {
 // Per rule 2 the ceiling stays; per C2 the honest label is CONSERVATIVE
 // (printed above). Left registered and red as the live gate for H14.
 // Full record: VALIDATION.md, "H5b -- Surcharged band recalibrated".
+//
+// RESOLVED 2026-10-07 by H14 (Froude-gated directional operator, no
+// constant touched, ceiling untouched): member coverage 0.832, ratio_med
+// 1.208 -> CALIBRATED under C2, and this cell is GREEN on H5's own bounds
+// for the first time since the 2026-10-04 metric correction. J1-J3 drop
+// from 7-15x over to ~1x once the supercritical reaches stop relaying the
+// pool upstream (per-node record in VALIDATION.md "H14"). H14_DIRECTIONAL=0
+// reproduces 0.842 / 5.446 exactly.
 TEST(RomCoverageSurcharged, SemiImplicitContinuity) {
     assertSurchargedCell("SEMI_IMPLICIT", runSurchargedCell(/*node_continuity_semi=*/true));
 }

@@ -69,6 +69,7 @@
 #include "../uncertainty/RomThreshold.hpp"
 #include "../uncertainty/RomSurchargeAttenuation.hpp"
 #include "../uncertainty/RomPhaseCoordinate.hpp"
+#include "../uncertainty/RomDirectionalOperator.hpp"
 #include "../uncertainty/UncertaintyEnsemble.hpp"
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
@@ -380,6 +381,13 @@ public:
     /// floor). Read every routing step by computeSurchargeAlpha(), so it can be
     /// set any time before stepping. Not parser-exposed; test/calibration knob.
     uncertainty::SurchargeAttenuationConfig& rom1dSurchargeConfig() noexcept { return rom1d_surcharge_cfg_; }
+    /// H14: mutable access to the Froude-gate dials of the directional 1D
+    /// operator (enabled, fr_lo, fr_hi). Read every routing step. Not
+    /// parser-exposed; test/calibration knob.
+    uncertainty::DirectionalOperatorConfig& rom1dDirectionalConfig() noexcept { return rom1d_directional_cfg_; }
+    /// H14: fraction of conduits whose upstream coupling was gated (> 0) at
+    /// the most recent operator assembly; 0 when no operator is installed.
+    double rom1dDirectionalGatedFraction() const noexcept { return rom1d_dir_gated_frac_; }
 
     /**
      * @brief PR H11: mutable access to the phase-coordinate config. Intended
@@ -514,6 +522,16 @@ private:
     std::vector<double> rom1d_dh_buf_;     ///< per-active-node dh/dt forcing buffer (reused each step; also the field
                                             ///< for any registered FORCING_VECTOR 1D param, e.g. INFLOW)
     std::vector<double> rom1d_alpha_buf_;  ///< per-active-node PR H5 surcharge-attenuation factor (reused each step)
+    // PR H14 — Froude-gated directional operator
+    uncertainty::DirectionalOperatorConfig rom1d_directional_cfg_;
+    std::vector<int>    rom1d_conduit_link_;   ///< ci -> link index (same order buildROM1D collected conduits)
+    std::vector<int>    rom1d_dir_a1_, rom1d_dir_a2_, rom1d_dir_sign_;   ///< per-conduit scratch
+    std::vector<double> rom1d_dir_w_, rom1d_dir_fr_, rom1d_dir_drop_, rom1d_dir_M_;
+    double rom1d_dir_gated_frac_ = 0.0;
+    /// Assemble + install the directional operator from the live H snapshot
+    /// (every routing step; O(E·k²)). Installs nothing — leaving the diagonal
+    /// path bit-identical — when disabled or when no conduit is gated.
+    void refreshRom1dDirectionalOperator() noexcept;
 
     // ---- SP1: gage-level soft rainfall -> 1D ROM forcing (SR-1a/1b re-port) ----
     // loc = dh/dt head-rate (so the deterministic projection is unchanged; under

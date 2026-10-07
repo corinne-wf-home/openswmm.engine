@@ -102,6 +102,7 @@ add_gtest_unit(test_engine_rom_threshold     test_rom_threshold.cpp)
 add_gtest_unit(test_engine_rom_surcharge_attenuation test_rom_surcharge_attenuation.cpp)
 # PR H11 — per-member phase coordinate (travel-time accumulation + history ring).
 add_gtest_unit(test_engine_rom_phase_coordinate test_rom_phase_coordinate.cpp)
+add_gtest_unit(test_engine_rom_directional_operator test_rom_directional_operator.cpp)
 # Slice RC.5 — GeoPackage explicit-builtin registration + is_builtin flag.
 add_gtest_unit(test_engine_pluginfactory_builtins test_pluginfactory_builtins.cpp)
 # Slice QA-01.4 — per-node summary stats read from a SWMM_Output handle.
