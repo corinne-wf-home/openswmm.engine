@@ -36,6 +36,10 @@ label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 | CL-1e soft rain, CORR_LEN | 0.659 → 0.570 → **0.804** (SR-6) | 0.68 → **0.83** | passes | **calibrated** since SR-6 (floor asserted) |
 | W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (0.82, 1.32 ≤ 1.5; floor asserted) → breadth: **W4** |
 | W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass | reference rungs, ungated |
+| W4 plane, correlated rain ℓ = 20 / 100 m (adv) | **1.31 / 1.42** | **0.90 / 0.89** | floor asserted | **calibrated** — first MC behind 2D CORR_LEN |
+| W4 plane, correlated Manning ℓ = 20 / 100 m (diagonal path) | 0.68 / 1.24 | **0.65 / 0.84** | measured | ranking only at 20 m → **H15**; calibrated at 100 m |
+| W4 channel (thalweg), comonotone Manning, adv | **2.93** | 0.95 | measured | **conservative** → H13 (2D) + W4b |
+| W4 channel, correlated rain ℓ = 20 m (adv) | 1.60 | 0.91 | measured | conservative |
 
 (The 2D test compares 25 like-for-like members under the same `round(p·(M−1))`
 rule on both sides, so its gated width ratio is a fair same-rule comparison and
@@ -728,9 +732,10 @@ floors were set on width-ratio bands and median containment.
   lives in the discarded constant eigenmode; independent per-cell coefficients
   project more onto the retained zero-mean modes. The 1D chain narrows downstream
   (0.563 above) because uncertainty accumulates along the flow path. The two are
-  not in conflict; the test records the direction rather than asserting it. No
-  2D correlated MC exists on this line, so the 2D band magnitude under CORR_LEN
-  is unvalidated.
+  not in conflict; the test records the direction rather than asserting it.
+  **Update 2026-10-07 (W4)**: a correlated marcher MC now exists — the 2D
+  CORR_LEN rain path measures 0.897 / 0.886 member coverage at ℓ = 20 / 100 m
+  on the W3 plane (both branches); see the W4 section.
 - **Reduced vs materialized is decided by K_s against M.** On 4 points the SPDE
   basis retained K_s = 64 ≥ M = 20, so the 2D fixture takes the materialized
   field branch; the 1D chain and the CL-2a profile mesh take the reduced one.
@@ -860,6 +865,105 @@ the gate applies where the operator claims validity.
 Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
+
+# W4 — 2D validation breadth: correlated-field marcher MC and a second surface (2026-10-07)
+
+**Branch** `hsym2/w4-2d-validation-breadth` (stacked on H5b). A measurement,
+not a fix. Before W4 every 2D band claim rested on one cell — the W3 steady
+runoff plane under a comonotone Manning multiplier (member coverage 0.82,
+width-med 1.32) — and SP3's `COHERENCE CORR_LEN` on the 2D ROM had no
+correlated Monte Carlo behind it at all. New harness:
+`tests/regression/test_2d_rom_marcher_coverage_corr.cpp`
+(`regression_2d_rom_marcher_coverage_corr`, label `slow`, ~11 min Debug,
+25 members per cell, `W4_CELLS`/`W4_MEMBERS` narrow it).
+
+## 1. What was built
+
+- **Correlated fields from the engine's own basis.** Member fields come from
+  `SpdeSpatialBasis` (Matérn ν=2, CL-2b) seeded with the ROM's own per-member
+  coefficients, exactly as `SurfaceRouter2D::buildGridSoftField` does, so the
+  marcher MC member i and ROM member i see the SAME realization:
+  `rain_i(t) = R·(1 + CV·W_i(t))` (NORMAL, CV 0.20) and
+  `n_i(t) = n̄·(1 + 0.2·V_i(t))` (UNIFORM, mode 0 = the W3 strata). The
+  ROM's CORR_LEN path takes the production branch rule (reduced ψ_m/a_im
+  when `K_s < M`, materialized field otherwise); both branches are exercised
+  below (`K_s = 64` at 20 m, `23` at 100 m, `M = 25`).
+- **A second surface.** A channel with a defined thalweg,
+  `z = S·x + T·|y − y_c|`, `T = 0.02` (2 m lateral rise over the 100 m
+  half-width, 0.4 m streamwise drop), spun 6000 s. Max depth 0.44 m on the
+  centre line; the whole surface stays wet (rain-fed sheet flow on the
+  flanks), window drift 2 cm.
+
+## 2. Results (M = 25; member coverage / median width ratio, same-index rule)
+
+| cell | path | member cov | width-med | in [0.3,3] | C1/C2 |
+|---|---|---|---|---|---|
+| plane, correlated rain, ℓ = 20 m | adv, materialized | **0.897** | 1.31 | 0.99 | **calibrated** (floor asserted) |
+| plane, correlated rain, ℓ = 100 m | adv, reduced | **0.886** | 1.42 | 0.77 | **calibrated** (floor asserted) |
+| plane, correlated Manning, ℓ = 20 m | diagonal, grounded basis | **0.649** | 0.68 | 0.81 | ranking only → **H15** |
+| plane, correlated Manning, ℓ = 100 m | diagonal, grounded basis | 0.835 | 1.24 | 0.88 | calibrated |
+| plane, correlated Manning, ℓ = 20 / 100 m | diagonal, Neumann basis | 0.39 / 0.48 | 0.29 / 0.39 | 0.49 / 0.62 | reference, ungated |
+| channel, comonotone Manning | legacy / iso / aniso / **adv** | 0.92 / 0.89 / 0.90 / **0.946** | 3.04 / 2.20 / 2.28 / **2.93** | 0.45 / 0.58 / 0.57 / 0.49 | **conservative** → H13 (2D) |
+| channel, correlated rain, ℓ = 20 m | adv, materialized | 0.910 | 1.60 | 0.77 | conservative (just over 1.5) |
+
+(The W3 plane under comonotone Manning, adv rung: 0.82 / 1.32, unchanged —
+that gate is `regression_2d_rom_marcher_coverage` and was not re-run here.)
+
+## 3. Findings
+
+**(a) The 2D CORR_LEN rain path is calibrated, on both branches.** This is
+the first MC behind SP3's 2D wiring: 0.897 and 0.886 member coverage at two
+correlation lengths spanning the reduced/materialized split, width within the
+1.5 ceiling. The soft-forcing `R_ij` enters the production reduced operator
+unchanged, so this validates the path users reach through
+`[SOFT_RAINFALL_GRID] COHERENCE CORR_LEN`. Both cells now assert the C1 floor.
+
+**(b) Spatially correlated Manning never reaches the production operator.**
+`SpectralROM::advance()` takes the reduced-operator path only when
+`spatial_mannings` is unset; a correlated Manning field (the `[2D_ROM]
+MANNINGS_CORR_LEN` key, `CorrelatedFieldGenerator` in `seedROM`) runs on the
+diagonal `λ·K_eff` path W3 retired for everything else. Measured on that
+path: at ℓ = 100 m the band is calibrated (0.835 / 1.24); at ℓ = 20 m it is
+**too narrow** (0.649 / 0.68, ranking only). Short-range roughness variation
+produces a local depth response the diagonal Rayleigh-quotient rate cannot
+carry. The Neumann basis is far worse at both lengths (0.39 / 0.48) —
+grounding matters here exactly as it did in W3. Logged as candidate **H15**:
+route spatial Manning through the reduced operator (per-member `M_i` is k×k
+per member — affordable at k = 40 — or a member-wise effective scalar).
+Until then, `MANNINGS_CORR_LEN` below the mesh's hydraulic scale is a
+ranking, and the USER_GUIDE says so.
+
+**(c) On a converging channel the comonotone-Manning band is ~2.9× too wide
+on every rung, and the production rung is the widest.** This is the 2D face
+of H13 (free-surface Manning elasticity): on the plane W3 measured 1.32×, on
+the channel 2.2× (iso) to 2.9× (adv). Coverage is high (0.95) because the
+band is over-wide, not because it is right. The advection term widens the
+band further on this surface (adv 2.93 vs iso 2.20) — the opposite of its
+effect on the plane (1.43 vs 0.91 in W3), which says `c_k = (5/3)u` from a
+Green–Gauss velocity on a laterally converging field is not the same object
+it is on a uniform sheet. Two follow-ups, not one: the elasticity (H13's 2D
+half — the 1D `alpha_free = 0.6` has no 2D counterpart, the 2D ROM has no
+`alpha` path) and the advection constant on non-sheet flow (W4b, a
+calibration sweep on the channel, same protocol as W3).
+
+**(d) Correlated rain on the channel: 0.910 / 1.60.** Calibrated coverage,
+width a hair over the ceiling — the same ~1.2–1.6× over-width the rain path
+shows on the plane, plus a little of (c).
+
+## 4. What W4 does not do
+
+No fix. No change to any operator, constant, or default. The two cells that
+assert are the ones that validate a claim nothing else validated; every other
+cell prints its `[C1/C2]` verdict. The surfaces are still synthetic
+(structured 40×40 meshes); an irregular real-terrain mesh is the next breadth
+step if one is wanted.
+
+## 5. Reproduction
+
+    ctest --test-dir build/<dir> -R regression_2d_rom_marcher_coverage_corr        # ~11 min, label slow
+    W4_CELLS=plane-rain-corr20,channel-mann-comono W4_MEMBERS=25 \
+        OPENSWMM_2D_BACKEND=cpu build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
+    # knobs: W4_CV (0.20), W4_THALWEG (0.02), W4_MEMBERS (25)
 
 # Bellinge baseline correction — the "24 h" window was truncated (PR P6)
 
@@ -1842,8 +1946,10 @@ and nothing about the current shape blocks it.
 - **Not validated against Monte Carlo.** SP2 is checked structurally: exact plane
   mapping and conversion at router level, and that the planes reach a live 2D ROM
   (zero-perturbation baseline band is exactly 0; a spread grid makes it nonzero).
-  There is no brute-force MC comparison for gridded soft rain on this line, so
-  band *magnitude* from this path is unvalidated.
+  There is no brute-force MC comparison through the HDF5 grid file itself; the
+  ROM path it feeds (`CORR_LEN` soft forcing, both branches) was validated
+  against a correlated marcher MC in W4 (2026-10-07), so what remains
+  structurally-only tested is the file-to-field plumbing, not the band.
 
 ## 6. Reproduction
 

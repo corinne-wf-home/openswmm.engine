@@ -728,6 +728,16 @@ When `corr_len = 0`, the spatial generator is bypassed for speed.
 **In `advance()`**: `f_j^i = P[:,j]ᵀ · (rainfall ⊙ W_rain[i])` replaces the scalar
 `r_coarse[j] · rainfall_mult[i]` when spatial rainfall is active.
 
+**Measured caveat for `MANNINGS_CORR_LEN` (W4, 2026-10-07).** A spatial Manning field puts
+the 2D ROM on its diagonal decay path — the production reduced operator (anisotropic
+diffusion + advection) is bypassed whenever `spatial_mannings` is set. Against a correlated
+marcher Monte Carlo on the W3 plane the band is calibrated at a 100 m correlation length
+(member coverage 0.84, width ratio 1.24) but ~1.5× too narrow at 20 m (coverage 0.65): short-range
+roughness variation drives a local depth response the diagonal rate does not carry. Treat
+`MANNINGS_CORR_LEN` below a few mesh cells as a ranking. Correlated *rainfall*
+(`RAINFALL_CORR_LEN`, or `[SOFT_RAINFALL_GRID] COHERENCE CORR_LEN`) does reach the production
+operator and is calibrated at both lengths (0.90 / 0.89). See VALIDATION.md, "W4".
+
 ### 4.11 Coupling uncertainty
 
 When both a 2D ROM and a 1D ROM are active, the coupling exchange operates on the full
