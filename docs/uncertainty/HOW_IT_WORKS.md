@@ -559,26 +559,34 @@ signal: once a reach surcharges, velocities collapse toward zero (Fr → 0)
 and the symmetric surrogate becomes *more* accurate again, not less — so a
 high surcharge fraction is not itself a trust concern.
 
-**Surcharged bands are attenuated, and that attenuation is validated for
-`NODE_CONTINUITY SEMI_IMPLICIT` only.** Once a pipe runs full, the
-free-surface conveyance law (`K ~ h^(5/3)/n`) the ROM's Manning-sensitivity
-term assumes no longer holds — heads are set by mass balance and backwater
-instead, and left uncorrected this used to over-predict band widths by
-50–190× (PR H5). The sidecar now damps that source term smoothly as a node
-crosses its crown (never to exactly zero — a pressurized pipe still loses
-head to friction depending on n, just not via the free-surface law). This
-was validated against brute-force Monte Carlo separately under each
-`NODE_CONTINUITY` mode: it lands cleanly under `SEMI_IMPLICIT`. Under
-`EXPLICIT`, near a single-conduit chokepoint the discrete surcharge branch
-was measured to produce a genuinely steeper backwater-vs-roughness response
-than the attenuated ROM can track, and this was root-caused to be a real
-property of the regime rather than a fixable calibration constant (confirmed
-across a range of surcharge severities — the gap doesn't narrow with a
-gentler fixture). **If you expect appreciable, sustained surcharge and want
-validated band widths, run with `NODE_CONTINUITY SEMI_IMPLICIT`.** Under
-`EXPLICIT`, surcharged-regime bands may still be too narrow near a severe
-local restriction; `surcharge_frac` (above) tells you when you're in that
-regime at all, but not which continuity mode you're running.
+**The Manning channel is scaled by the local head's elasticity to n, and
+surcharged nodes get the pressurised value (PR H5b).** The ROM's
+Manning-sensitivity source assumes head moves one-for-one with roughness.
+It does not: a free-surface normal depth goes as `n^0.6`, and a pressurised
+pipe's friction head as `n^2`. The sidecar now multiplies each node's source
+by that exponent — 0.6 in free surface, blending to 2.0 as the node crosses
+its crown — instead of the earlier "damp it toward a floor" rule (PR H5),
+which had the sign of the correction backwards at the pool (surcharged heads
+are *more* sensitive to n, not less). Measured against brute-force Monte
+Carlo: the surcharged nodes themselves are now right (width ratio 1.02 at
+the deepest pool node, member coverage 0.84 over the surcharged chain under
+`NODE_CONTINUITY SEMI_IMPLICIT`), and the free-surface fixture went from
+~2× over-wide to calibrated.
+
+Two things it does not fix, both measured. **Upstream of a surcharged pool,
+across a supercritical reach, the band is too wide** — 7–15× on the test
+chain. That is not the source term: zeroing it changes nothing there. It is
+the pool's own (large, correct) deviation diffusing *upstream* through the
+symmetric operator described above, into nodes the pool cannot physically
+influence. The fix is a directional term in the operator, not a constant,
+and is tracked as a separate item. **Under `NODE_CONTINUITY EXPLICIT`** the
+discrete surcharge branch also drowns the node just upstream of a chokepoint,
+which a rule keyed on that node's own depth cannot see; EXPLICIT's
+surcharged bands remain a documented limitation (member coverage 0.69). **If
+you expect appreciable, sustained surcharge, run with `SEMI_IMPLICIT`, and
+read bands at surcharged nodes as calibrated and bands immediately upstream
+of a pool as conservative** (too wide, not too narrow). `surcharge_frac`
+(above) tells you when you are in that regime at all.
 
 > **Historical note**: an earlier version of this section also warned that
 > the band reflected uncertainty "since the last recalibration" — the ROM

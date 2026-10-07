@@ -826,7 +826,7 @@ std::string buildSmallCapacityChainModel(const std::string& extra_sections) {
 
 }  // namespace
 
-TEST(SwmmEngine1DRomLifecycle, SurchargeAlphaDropsAsNodeSurcharges) {
+TEST(SwmmEngine1DRomLifecycle, SurchargeAlphaRisesAsNodeSurcharges) {
     const fs::path dir = fs::current_path() / "1d_rom_lifecycle_out";
     fs::create_directories(dir);
 
@@ -852,8 +852,8 @@ TEST(SwmmEngine1DRomLifecycle, SurchargeAlphaDropsAsNodeSurcharges) {
     // dominate the minimum once surcharge develops, without this test having
     // to assume which active index J1 landed at.
     bool   have_first = false;
-    double first_min_alpha = -1.0;
-    double last_min_alpha  = -1.0;
+    double first_max_alpha = -1.0;
+    double last_max_alpha  = -1.0;
 
     double elapsed = 0.0;
     int n_steps = 0;
@@ -862,24 +862,24 @@ TEST(SwmmEngine1DRomLifecycle, SurchargeAlphaDropsAsNodeSurcharges) {
 
         const auto& alpha = impl->rom1dAlphaBuffer();
         if (alpha.empty()) continue;
-        double min_alpha = 1.0;
-        for (double a : alpha) min_alpha = std::min(min_alpha, a);
+        double max_alpha = 0.0;
+        for (double a : alpha) max_alpha = std::max(max_alpha, a);
 
-        if (!have_first) { first_min_alpha = min_alpha; have_first = true; }
-        last_min_alpha = min_alpha;
+        if (!have_first) { first_max_alpha = max_alpha; have_first = true; }
+        last_max_alpha = max_alpha;
     }
     swmm_engine_end(eng);
 
     ASSERT_TRUE(have_first) << "rom1dAlphaBuffer() must be populated by the "
                                 "first step once the ROM is built and ready";
-    EXPECT_GT(first_min_alpha, 0.9)
+    EXPECT_NEAR(first_max_alpha, 0.6, 1e-9)
         << "every node starts at InitDepth=0.1 ft, well below its own crown "
            "(invert+0.5 ft) -- alpha must start effectively unattenuated";
-    EXPECT_LT(last_min_alpha, 0.1)
+    EXPECT_GT(last_max_alpha, 1.9)
         << "J1's 5 CFS inflow vastly exceeds the undersized 0.5 ft conduits' "
            "capacity, so by the end of a 20-minute run at least one node "
            "must be clearly surcharged (alpha near 0)";
-    EXPECT_LT(last_min_alpha, first_min_alpha)
+    EXPECT_GT(last_max_alpha, first_max_alpha)
         << "alpha must have actually moved, not stayed pinned at its "
            "starting value";
 

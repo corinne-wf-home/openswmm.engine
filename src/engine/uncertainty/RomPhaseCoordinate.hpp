@@ -74,7 +74,8 @@ namespace openswmm::uncertainty {
 
 /// Configuration for the phase-coordinate machinery. Physical dials
 /// (`u_min`, `tau_edge_max`, `tau_total_max`) are legitimate calibration
-/// targets against brute-force MC (same category as H5's `alpha_floor`);
+/// targets against brute-force MC (same category as H5b's `alpha_free` /
+/// `alpha_surcharged` elasticities);
 /// `enabled` is the off switch that preserves pre-H11 bit-identity.
 struct PhaseConfig {
     /// Off switch. false ⇒ engine never refreshes/passes T̄; SpectralROM1D's
