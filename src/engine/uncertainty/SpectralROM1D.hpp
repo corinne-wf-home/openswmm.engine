@@ -382,6 +382,37 @@ struct SpectralROM1D {
                      double sim_time = 0.0,
                      const uint8_t* node_surcharged = nullptr);
 
+    // -------------------------------------------------------------------------
+    // PR H14 — reduced (non-symmetric) operator
+    // -------------------------------------------------------------------------
+
+    /**
+     * @brief Install a reduced k×k operator M (row-major, DIMENSIONLESS — the
+     *        same units as the basis eigenvalues; advance() multiplies by K1d).
+     *
+     * When set, advance() integrates every mode with the dense matrix
+     * exponential instead of the per-mode diagonal decay:
+     *
+     *     d(δa_i)/dt = −(K1d·M/mm_i)·δa_i − K1d·(1/mm_i − 1)·M·b + g_i,
+     *
+     * every forcing term (runoff, soft rain, registered vectors) entering g_i
+     * exactly as on the diagonal path. For M = diag(λ) this IS the diagonal
+     * path (tested to round-off). The engine installs the Froude-gated
+     * directional operator from RomDirectionalOperator.hpp here, so that a
+     * supercritical reach no longer carries a downstream deviation upstream.
+     *
+     * Cleared automatically by a successful updateBasis() (the projection P
+     * changed, so M is stale) — the caller re-assembles on its own cadence.
+     * Throws on a size mismatch; call after initialize().
+     */
+    void setReducedOperator(const std::vector<double>& M_in);
+
+    /// Remove the reduced operator; advance() returns to the diagonal path.
+    void clearReducedOperator() noexcept { reduced_M_.clear(); }
+
+    /// True when a reduced operator is installed.
+    bool hasReducedOperator() const noexcept { return !reduced_M_.empty(); }
+
     /**
      * @brief Allocate buffers and build the LHS parameter design.
      *        Must be called after setting basis and configuration fields.
@@ -613,6 +644,14 @@ private:
     bool external_samples_set_ = false;
     std::vector<double> external_mann_;
     std::vector<double> external_run_;
+
+    // PR H14 — reduced non-symmetric operator (dimensionless k×k; empty =
+    // diagonal path). Scratch: M·b and the K1d-scaled copy handed to the
+    // dense propagator, plus the per-member forcing vector.
+    std::vector<double> reduced_M_;
+    std::vector<double> reduced_Mb_;
+    std::vector<double> reduced_MK_;
+    std::vector<double> reduced_g_;
 
     // PR 4 — time-varying basis update
     std::unique_ptr<GraphEigenBasis> basis_owned_;   ///< Basis owned by ROM after first update.

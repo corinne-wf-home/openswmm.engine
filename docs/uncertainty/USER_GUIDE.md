@@ -1494,20 +1494,17 @@ xarray as a supplementary group.
    (Option B in the design doc) will accept a precomputed multiplier column from
    `UncertaintyEnsemble` to support arbitrary distributions and cross-parameter decorrelation.
 
-10. **Surcharged bands: calibrated at the surcharged nodes under `NODE_CONTINUITY
-    SEMI_IMPLICIT`; too wide immediately upstream of a pool; a documented limitation under
-    `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by the head's
-    elasticity to n (0.6 free-surface, 2.0 pressurised, blended across the crown — PR H5b).
-    Against brute-force Monte Carlo on the surcharged test chain (`SEMI_IMPLICIT`): width ratio
-    1.02 at the deepest pool node, member coverage 0.84 overall, no junction below 0.71. The
-    free-surface nodes just upstream of the pool, across a supercritical reach, come out 7–15×
-    too wide: the pool's deviation leaks upstream through the symmetric operator (limitation 2),
-    which is the operator's gap, not the source term's — read those bands as conservative. Under
-    `EXPLICIT` the discrete surcharge branch also drowns the node upstream of a chokepoint in a
-    way a depth-keyed rule cannot see (member coverage 0.69, below the 0.80 floor). **If you
-    expect sustained surcharge, run with `NODE_CONTINUITY SEMI_IMPLICIT`.** See
-    `docs/uncertainty/VALIDATION.md`, "H5b — Surcharged band recalibrated against member
-    coverage," for the measurements and the sweep that located the residual.
+10. **Surcharged bands: calibrated under `NODE_CONTINUITY SEMI_IMPLICIT`; a documented
+    limitation under `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by
+    the head's elasticity to n (0.6 free-surface, 2.0 pressurised, blended across the crown —
+    PR H5b), and its operator is one-way across supercritical reaches (Froude-gated, PR H14) so
+    a pool's deviation no longer leaks upstream into nodes it cannot physically reach. Against
+    brute-force Monte Carlo on the surcharged test chain (`SEMI_IMPLICIT`): member coverage 0.83,
+    median width ratio 1.21, the deepest pool node at 1.0× and the free-surface nodes above it at
+    ~1× (they were 7–15× before H14). Under `EXPLICIT` the discrete surcharge branch drowns the
+    node upstream of a chokepoint in a way a depth-keyed rule cannot see (member coverage 0.73,
+    below the 0.80 floor). **If you expect sustained surcharge, run with `NODE_CONTINUITY
+    SEMI_IMPLICIT`.** See `docs/uncertainty/VALIDATION.md`, "H14" and "H5b".
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from
