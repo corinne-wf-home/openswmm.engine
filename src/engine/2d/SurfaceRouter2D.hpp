@@ -457,6 +457,10 @@ private:
     /// readable state on the report-scale cadence; never touched when
     /// options_.rom_legacy_operator is set.
     DeviationOperator2D rom_operator_;
+    /// PR H15 scratch: per-member operators (n_ensemble × k × k) and the
+    /// per-cell 1/W_n multiplier, used only with a spatial Manning field.
+    std::vector<double> rom_operator_members_;
+    std::vector<double> rom_cond_mult_;
 
     /// Build the eigenbasis and allocate the ensemble. No-op when the ROM is
     /// disabled or the mesh has too few cells for an eigenbasis.

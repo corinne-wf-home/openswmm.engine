@@ -1183,6 +1183,44 @@ void SurfaceRouter2D::refreshROMOperator() {
     if (!ok) return;  // leave whatever operator was previously installed
 
     rom_->setReducedOperator(rom_operator_.M);
+
+    // PR H15: with a spatially correlated Manning field (MANNINGS_CORR_LEN),
+    // one shared operator cannot carry the per-member roughness. Assemble one
+    // operator per member with the cell-wise 1/W_n factor so the field rides
+    // the same reduced path as everything else (previously it silently fell
+    // back to the diagonal λ·K_eff path -- W4 measured that at 0.649 member
+    // coverage for a 20 m correlation length).
+    const auto& W = rom_->spatial_mannings;
+    if (!W.is_spatial()) {
+        rom_operator_members_.clear();
+        return;
+    }
+    const int M  = rom_->n_ensemble;
+    const int nt = mesh_.n_triangles();
+    const auto kk = static_cast<std::size_t>(rom_operator_.k) *
+                    static_cast<std::size_t>(rom_operator_.k);
+    rom_operator_members_.assign(static_cast<std::size_t>(M) * kk, 0.0);
+    rom_cond_mult_.assign(static_cast<std::size_t>(nt), 1.0);
+    for (int i = 0; i < M; ++i) {
+        for (int t = 0; t < nt; ++t) {
+            const double w = W.at(i, t);
+            rom_cond_mult_[static_cast<std::size_t>(t)] = (w > 1.0e-12) ? 1.0 / w : 1.0;
+        }
+        const bool ok_i = rom_operator_.assemble(
+            mesh_, *rom_basis_, D_scale, state_.depth.data(),
+            state_.face_vx.data(), state_.face_vy.data(), rom_ground_w_.data(),
+            rom_cond_mult_.data());
+        if (!ok_i) { rom_operator_members_.clear(); return; }
+        std::copy(rom_operator_.M.begin(), rom_operator_.M.end(),
+                  rom_operator_members_.begin() + static_cast<std::ptrdiff_t>(i) *
+                      static_cast<std::ptrdiff_t>(kk));
+    }
+    // Restore the nominal operator in rom_operator_.M (the last assembly was
+    // member M-1's) and install the per-member set.
+    (void)rom_operator_.assemble(
+        mesh_, *rom_basis_, D_scale, state_.depth.data(),
+        state_.face_vx.data(), state_.face_vy.data(), rom_ground_w_.data());
+    rom_->setReducedOperatorPerMember(rom_operator_members_);
 }
 
 

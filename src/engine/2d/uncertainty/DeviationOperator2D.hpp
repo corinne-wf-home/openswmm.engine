@@ -107,13 +107,27 @@ struct DeviationOperator2D {
      *                the basis build: an ungrounded operator on a grounded
      *                basis leaves the drain mode undamped (spurious spread
      *                growth), and the reverse hides the drain mode entirely.
+     * @param cond_mult Optional per-cell conductance multiplier (PR H15):
+     *                the local inverse Manning multiplier 1/W_n(t). Both the
+     *                friction diffusivity and the kinematic celerity scale
+     *                as 1/n, so it multiplies each edge's diffusive
+     *                conductance by the harmonic mean of its two cells'
+     *                values (series conductance, the same convention as the
+     *                depth weighting), each cell's velocity before the face
+     *                average (so advection scales too), and the cell's
+     *                grounding term. A uniform value c reproduces c·M of the
+     *                unscaled assembly; null is bit-identical to all-ones.
+     *                This is what lets one operator be assembled PER MEMBER
+     *                for a spatially correlated Manning field
+     *                (SpectralROM::setReducedOperatorPerMember).
      * @return true on success (basis ready, mesh non-degenerate).
      */
     bool assemble(const MeshData& mesh, const MeshEigenBasis& basis,
                   double D_scale,
                   const double* h_cell,
                   const double* cell_u, const double* cell_v,
-                  const double* ground_w = nullptr);
+                  const double* ground_w = nullptr,
+                  const double* cond_mult = nullptr);
 
     // ------------------------------------------------------------------------
     // Dense propagator utilities (static — used by SpectralROM and the tests)

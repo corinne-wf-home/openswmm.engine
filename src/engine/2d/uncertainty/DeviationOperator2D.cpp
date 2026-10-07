@@ -32,7 +32,8 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
                                    double D_scale,
                                    const double* h_cell,
                                    const double* cell_u, const double* cell_v,
-                                   const double* ground_w) {
+                                   const double* ground_w,
+                                   const double* cond_mult) {
     k = 0;
     M.clear();
     if (!basis.is_ready()) return false;
@@ -97,11 +98,16 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
             const double A_j = mesh.tri_area[uj];
             if (A_i < 1e-30 || A_j < 1e-30) continue;
 
-            // Face flow: mean of the two cell velocities.
+            // Per-cell conductance multipliers (H15): 1 when not supplied.
+            const double m_i = cond_mult ? cond_mult[ui] : 1.0;
+            const double m_j = cond_mult ? cond_mult[uj] : 1.0;
+
+            // Face flow: mean of the two cell velocities, each scaled by its
+            // own cell's Manning factor (u ∝ 1/n).
             double fu = 0.0, fv = 0.0, speed = 0.0;
             if (has_flow) {
-                fu = 0.5 * (cell_u[ui] + cell_u[uj]);
-                fv = 0.5 * (cell_v[ui] + cell_v[uj]);
+                fu = 0.5 * (cell_u[ui] * m_i + cell_u[uj] * m_j);
+                fv = 0.5 * (cell_v[ui] * m_i + cell_v[uj] * m_j);
                 speed = std::sqrt(fu * fu + fv * fv);
             }
 
@@ -125,6 +131,13 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
             if (h_cell != nullptr) {
                 const double wi = w_cell[ui], wj = w_cell[uj];
                 w_geo *= 2.0 * wi * wj / (wi + wj);  // harmonic mean
+            }
+            if (cond_mult != nullptr) {
+                // Series conductance across the face: harmonic mean of the
+                // two cells' 1/n factors (reduces to c for uniform c).
+                const double den = m_i + m_j;
+                if (den <= 0.0) continue;
+                w_geo *= 2.0 * m_i * m_j / den;
             }
 
             const double cond = D_scale * aniso * w_geo;  // m²/s · (len/d)
@@ -166,6 +179,7 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
             if (A_i < 1e-30) continue;
             double w = gw;
             if (h_cell != nullptr) w *= w_cell[ui];
+            if (cond_mult != nullptr) w *= cond_mult[ui];
             coo[ui].emplace_back(i, D_scale * iso_mean * w / A_i);
         }
     }
