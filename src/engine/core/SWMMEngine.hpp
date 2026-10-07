@@ -376,6 +376,10 @@ public:
      * when the 1D ROM isn't built. Test/diagnostic accessor.
      */
     const std::vector<double>& rom1dAlphaBuffer() const noexcept { return rom1d_alpha_buf_; }
+    /// H5b: mutable access to the surcharge-attenuation dials (ramp band,
+    /// floor). Read every routing step by computeSurchargeAlpha(), so it can be
+    /// set any time before stepping. Not parser-exposed; test/calibration knob.
+    uncertainty::SurchargeAttenuationConfig& rom1dSurchargeConfig() noexcept { return rom1d_surcharge_cfg_; }
 
     /**
      * @brief PR H11: mutable access to the phase-coordinate config. Intended

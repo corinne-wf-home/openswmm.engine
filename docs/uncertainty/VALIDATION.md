@@ -27,10 +27,10 @@ label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 
 | Gate / cell | Width ratio median, old → corrected | Member coverage | Gate verdict | **C1 status** |
 |---|---|---|---|---|
-| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → **1.961** (P8 fixture) | 0.20 → **0.94** | **green since P8** | **conservative (over-wide)** under C2 → **H13** |
-| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → **0.033** | **0.38** | red, unchanged | ranking only, documented limitation |
-| H5 surcharged, SEMI_IMPLICIT | 1.031 → **0.982** | **0.51** | passes [0.3, 3] | ranking only → **H5b** |
-| H11 front passage, phase coordinate | 1.354 → **1.295** | **0.83** | passes [0.5, 2] | **calibrated** (0.83 ≥ 0.80, 1.30 ≤ 1.5; floor asserted) |
+| PR-10 free-surface chain | 0.102 → 0.097 (old fixture) → 1.961 (P8 fixture) → **1.177** (H5b) | 0.20 → 0.94 → **0.867** | **green since P8** | **calibrated** since H5b (`alpha_free = 0.6` closes most of H13) |
+| H5 surcharged, EXPLICIT (deliberately red) | 0.033 → 0.033 → **0.694** (H5b) | 0.38 → **0.69** | red, unchanged | ranking only, documented limitation |
+| H5 surcharged, SEMI_IMPLICIT | 1.031 → 0.982 → **5.446** (H5b) | 0.51 → **0.842** | **red since H5b** (ceiling 3.0, not moved) | **conservative**: surcharged nodes calibrated, free-surface nodes upstream of the pool over-wide via operator leakage → **H14** |
+| H11 front passage, phase coordinate | 1.354 → 1.295 → **1.290** (H5b) | 0.83 → **0.829** | passes [0.5, 2] | **calibrated** (0.83 ≥ 0.80, 1.29 ≤ 1.5; floor asserted) |
 | H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated | superseded by H11 |
 | SR-5 soft rain, FULL | 0.822 → 0.710 → **0.976** (SR-6) | 0.76 → **0.88** | passes | **calibrated** since SR-6 (floor asserted) |
 | CL-1e soft rain, CORR_LEN | 0.659 → 0.570 → **0.804** (SR-6) | 0.68 → **0.83** | passes | **calibrated** since SR-6 (floor asserted) |
@@ -1058,6 +1058,11 @@ source term `-λ·K1d·(1/mm-1)·b_j` encodes free-surface conveyance sensitivit
 (`K ~ h^(5/3)/n`), which no longer governs once a pipe runs full and heads are
 set by mass balance/backwater instead.
 
+> **Superseded 2026-10-06 by H5b** (section above): the ramp-to-a-floor
+> below is replaced by a two-level elasticity (0.6 free-surface, 2.0
+> surcharged); `alpha_floor` no longer exists. This section is kept as the
+> record of how the floor was arrived at and why it was wrong.
+
 **Fix** (`src/engine/uncertainty/RomSurchargeAttenuation.hpp`, PR H5's F
 design decision): a per-active-node factor `alpha_n` folds into the
 sensitivity reference *before* projection (`b_j = Pᵀ(alpha ⊙ bref)`),
@@ -1213,6 +1218,200 @@ option above.
     ctest --test-dir build/<dir> -R test_engine_rom_surcharge_attenuation
 
 ---
+
+# H5b — Surcharged band recalibrated against member coverage (2026-10-06)
+
+**Branch** `hsym2/h5b-surcharge-recal` (stacked on C2). F design + impl in one
+session, per the owner's "please proceed with H5b". Everything below is
+measured on the committed fixtures (`tests/regression/test_rom_coverage.cpp`),
+21-member LHS MC vs ROM M=50, midpoint plotting-position quantiles, member
+coverage per the P7 audit.
+
+## 1. Breakdown first (spec step 1)
+
+Per-node, late-window (t ≥ 1800 s) means on the H5 surcharged chain
+(`fixtureInpSurcharged`, 5 % slope, 1.0 m pipes, C5 = 0.3 m chokepoint,
+DWF 0.40 CMS), `NODE_CONTINUITY SEMI_IMPLICIT`, **pre-H5b** (H5's ramp to
+`alpha_floor = 0.05`):
+
+| node | regime (det head above invert) | MC q05–q95 width | ROM width | ratio |
+|---|---|---|---|---|
+| J1 | free-surface, supercritical reach | 0.108 ft | 0.21 ft | 1.9 |
+| J2 | free-surface | 0.108 ft | 0.20 ft | 1.9 |
+| J3 | free-surface, directly upstream of the pool | 0.108 ft | 0.43 ft | 4.0 |
+| J4 | surcharged (pool, +1.4 m over crown) | 9.23 ft | 2.9 ft | **0.31** |
+| J5 | surcharged (pool, +6.4 m) | 10.03 ft | 3.1 ft | **0.31** |
+
+Exactly the shape the checklist predicted: wide upstream, ~3× **narrow** at
+and below the chokepoint. The H5 median of 0.98 was the median of a bimodal
+set (member coverage 0.51).
+
+Two diagnostics decided the design rather than a floor sweep:
+
+- **The attenuation sign was wrong at the pool.** In the MC the surcharged
+  heads move *more* with n than the free-surface ones, not less: J5's 10 ft
+  of spread for ±20 % n is the pressurised-friction law (`h_f ∝ n²` at fixed
+  Q, elasticity **2.0**), whereas the free-surface normal-depth law gives
+  `d ∝ n^0.6` (Manning, wide section; elasticity **0.6**). H5 had the
+  surcharged source *damped* to 5 % of a channel that itself assumed
+  elasticity 1. Both the "50–190× over-prediction" that motivated H5 and the
+  0.31× under-prediction left after it are the same mistake viewed from two
+  sides: an elasticity of 1 where the physics says 0.6 (free) or 2 (full).
+- **P8 had already measured the free-surface factor.** The redesigned
+  free-surface fixture sits at ratio 1.96 at saturation, i.e. the channel
+  is ~1/0.6 too strong — the "H13 candidate" (~2× over-prediction). The
+  same 0.6 appears here at J1/J2 (1.9×).
+
+## 2. Design (spec step 2): a two-level elasticity, not a floor
+
+`RomSurchargeAttenuation.hpp` is rewritten. `alpha_n` is no longer a damping
+factor that ramps from 1 toward a floor; it is the **Manning elasticity of
+the local head**, blended between two physical values on the same
+depth/crown ramp H5 used:
+
+    alpha_n = alpha_free + (alpha_surcharged − alpha_free) · s,
+    s = clamp((depth/crown − ramp_lo) / (ramp_hi − ramp_lo), 0, 1)
+
+with `alpha_free = 0.6`, `alpha_surcharged = 2.0`, `[ramp_lo, ramp_hi] =
+[0.9, 1.1]`. `alpha_floor` is gone. Degenerate/out-of-range nodes get
+`alpha_free`. `SWMMEngine::rom1dSurchargeConfig()` exposes the config (the
+MC harness reads `H5B_ALPHA_FREE` / `H5B_ALPHA_SURCHARGED` / `H5B_RAMP_LO` /
+`H5B_RAMP_HI` from the environment for sweeps; nothing in the `.inp`).
+Pure-function tests rewritten (`test_rom_surcharge_attenuation.cpp`, 10),
+lifecycle test now asserts the factor *rises* 0.6 → ≥1.9 as a node
+surcharges.
+
+This is model calibration against ground truth in the same sense as H5's
+own floor was, with one difference worth recording: neither constant was
+fitted to this fixture. 0.6 and 2.0 are the textbook exponents, and they were
+checked against four independent cells before being adopted (table below).
+
+## 3. Result (spec step 3), every 1D MC cell, committed values
+
+| cell | pre-H5b | **H5b** | C1/C2 verdict |
+|---|---|---|---|
+| PR-10 free-surface chain (P8 fixture) | 0.94 / 1.961 | **0.867 / 1.177** | **calibrated** (was conservative → H13) |
+| H11 front passage, phase coordinate | 0.83 / 1.295 | **0.829 / 1.290** | calibrated (unchanged within noise) |
+| H5 surcharged, SEMI_IMPLICIT | 0.51 / 0.982 | **0.842 / 5.446** | **conservative** (coverage met, over-wide) |
+| H5 surcharged, EXPLICIT | 0.38 / 0.033 | **0.693 / 0.694** | ranking only (documented limitation, unchanged status) |
+
+(coverage / median width ratio.) Per node on the SEMI cell, **H5b**:
+
+| node | MC width | ROM width | ratio | member coverage |
+|---|---|---|---|---|
+| J1 | 0.108 ft | 0.743 ft | 7.5 | 0.868 |
+| J2 | 0.108 ft | 0.721 ft | 7.4 | 0.904 |
+| J3 | 0.108 ft | 1.525 ft | 15.1 | 0.954 |
+| J4 | 9.234 ft | 6.651 ft | 0.70 | 0.776 |
+| J5 | 10.034 ft | 10.187 ft | **1.02** | 0.709 |
+
+H5b's own acceptance is met: member coverage 0.842 ≥ 0.80 and no junction
+below 0.60 (min 0.709 at J5). The surcharged nodes are now right (J5 exact,
+J4 0.70 — J4 sits on the ramp's shoulder, partially blended). What remains is
+the **opposite** problem at the free-surface nodes: J1–J3 are 7–15× over.
+
+## 4. The residual is leakage through the symmetric operator, not the source
+
+Three sweeps, all on the SEMI cell, late-window J1/J2/J3 ROM widths (MC is
+0.108 ft at all three):
+
+| `alpha_surcharged` | `alpha_free` | J1 | J2 | J3 | J5 |
+|---|---|---|---|---|---|
+| 2.0 | 0.6 (shipped) | 0.743 | 0.721 | 1.525 | 10.19 |
+| 1.0 | 0.6 | 0.312 | 0.300 | 0.931 | 4.98 |
+| 0.6 | 0.6 | 0.140 | 0.131 | 0.503 | 2.89 |
+| 2.0 | **0.0** | 0.861 | 0.842 | 1.602 | 10.13 |
+
+The last row is decisive: with the free-surface source **zeroed**, J1–J3
+keep (slightly exceed) their full width. Their band is not their own
+Manning sensitivity at all; it is J4/J5's 10 ft of surcharged deviation
+carried upstream by the operator. The first three rows show the same thing
+from the other side — J1–J3 scale with `alpha_surcharged`, the parameter
+that only acts two nodes downstream.
+
+Physically the reach C3 (J3→J4) is a 5 % slope running ~0.18 m deep at
+0.4 CMS: supercritical, so nothing about the pool can influence J3 in the
+Saint-Venant system, and the MC confirms it (J3 width 0.108 ft, identical to
+J1). The ROM's operator is the symmetric weighted Laplacian from the Picard
+`dqdh` (one coefficient per link, applied both ways) — it has no notion of
+flow direction, so a 10 ft deviation at J4 diffuses upstream exactly as it
+would downstream. This is the gap H3 named ("the skew lives in the gap", the
+`fr_trust` diagnostic) made concrete: **on a supercritical reach feeding a
+surcharged pool, the band upstream of the pool is the pool's band, smeared.**
+
+Ruled out along the way, measured not inferred:
+- **Basis truncation.** Lifting both mode caps (`k = n_active` in
+  `buildROM1D`, `k_req = n` in `GraphEigenBasis`) left J1–J3 at 0.748 /
+  0.754 / 0.763 and worsened J4 (2.1 ft). Reverted; all golden-reference
+  basis tests passed under the experiment, so it was a null result, not a
+  broken one.
+- **Pool-node misclassification.** The depth/crown ramp classifies J3 as
+  free-surface — correctly: it is free-surface, and its MC band says so.
+
+## 5. Status of the SEMI_IMPLICIT cell and what was *not* done
+
+`RomCoverageSurcharged.SemiImplicitContinuity` now **fails** H5's own
+`ratio_med ≤ 3.0` ceiling (5.45), having previously passed it on a median
+that hid a 0.51 coverage. Per standing rule 2 the ceiling is not moved, and
+per C2 the cell's honest label is **conservative**: every node's member
+coverage clears the floor, the surcharged nodes are calibrated, and the
+free-surface nodes upstream of the pool are over-wide by a known mechanism.
+The test stays registered and red alongside the EXPLICIT cell, with the
+cause written in the test file.
+
+The fix is not a constant. It needs a directional (upwind / Froude-gated)
+term in the 1D operator so that deviations do not propagate upstream across
+a supercritical reach — the same family as H3's finding and the 2D
+advection term W3 added. Logged in the checklist as candidate **H14**. Not
+attempted here: it changes the operator every 1D consumer sees and needs its
+own MC against both the P8 and the surcharged fixtures.
+
+**EXPLICIT** moved from 0.38 to 0.693 coverage (and from 0.033 to 0.69 on the
+median) under the same constants, with no tuning for it. It still fails the
+0.80 floor: J3 is a *pool* node under EXPLICIT (MC width 13 ft, ROM 0.69 ft,
+coverage 0.53) because the discrete surcharge branch drowns J3 as well, and
+the depth/crown ramp cannot see that from J3's own local depth. Status
+unchanged: documented limitation.
+
+**H11 bit-identity.** The spec asked that H11's fixture be unchanged
+bit-identically with surcharge absent. It is not — `alpha_free = 0.6` acts on
+every free-surface node — and that was the point of adopting the P8 finding:
+H11 moved 0.83/1.295 → 0.829/1.290 (noise), while the free-surface chain went
+from conservative to calibrated. Recorded as a deliberate supersession.
+
+**Bellinge (regression lock, not MC).** P6's full-24 h gate
+(`test_rom_coverage_bellinge`, cherry-picked onto this stack in the same
+session — it had been left off) still passes, but its distribution moved,
+and the direction deserves a sentence. Under H5b, with the same 65,589
+steps and 24.00 h reached:
+
+| statistic | P6 (H5 floor) | **H5b** |
+|---|---|---|
+| nonzero-spread fraction | 0.988 | 0.987 |
+| band / absolute head, max | 0.277 | 0.276 |
+| band / local depth, p50 / p90 / p99 / max | 0.153 / 0.73 / 2.00 / 10.7 | **0.308 / 2.02 / 4.86 / 44.6** |
+| absolute band (ft), p50 / p99 / max | — | 0.035 / 1.08 / 22.4 |
+
+The free-surface factor 0.6 should have *shrunk* the typical band; instead
+band/depth roughly doubled across the distribution. The surcharged source is
+now 40× what H5's floor gave it (2.0 vs 0.05), and §4 shows that a surcharged
+node's deviation does not stay at that node — on a real storm network the
+pool nodes' now-large (and, at the pool, correct) deviations are carried into
+their free-surface neighbours by the same mechanism. Bellinge has no MC, so
+this is a direction, not a verdict: the lock's bounds (p50 within [0.02, 0.5],
+band/head max ≤ 0.5) hold with margin, and the band remains a ranking there,
+as D1 already says. It does make H14 the next formulation item rather than a
+curiosity: the leak is now the dominant way surcharged uncertainty reaches
+the rest of a network.
+
+## 6. Reproduction
+
+    build/<dir>/tests/regression/test_rom_coverage                 # all 1D cells
+    H5B_TRACE=1 build/<dir>/tests/regression/test_rom_coverage \
+        --gtest_filter='RomCoverageSurcharged.SemiImplicit*'        # per-node breakdown
+    H5B_ALPHA_FREE=0 H5B_TRACE=1 ... --gtest_filter='RomCoverageSurcharged.SemiImplicit*'   # leak test
+    ctest --test-dir build/<dir> -R 'rom_surcharge_attenuation|1d_rom_lifecycle'
+    ctest --test-dir build/<dir> -R regression_rom_coverage_bellinge   # ~8 min, label slow
 
 # Per-member phase coordinate (PR H11)
 

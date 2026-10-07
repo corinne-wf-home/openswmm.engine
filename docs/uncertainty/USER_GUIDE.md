@@ -1482,19 +1482,20 @@ xarray as a supplementary group.
    (Option B in the design doc) will accept a precomputed multiplier column from
    `UncertaintyEnsemble` to support arbitrary distributions and cross-parameter decorrelation.
 
-10. **Surcharged-band attenuation is validated for `NODE_CONTINUITY SEMI_IMPLICIT` only.**
-    Once a pipe runs full, the free-surface conveyance law the 1D ROM's Manning-sensitivity term
-    assumes no longer holds, and left uncorrected this used to over-predict surcharged band
-    widths 50–190×. The sidecar now smoothly damps that source term as a node crosses its crown
-    (never to exactly zero — a pressurized pipe still loses head to friction depending on n).
-    Validated against brute-force Monte Carlo separately per `NODE_CONTINUITY` mode: it lands
-    cleanly under `SEMI_IMPLICIT`. Under `EXPLICIT`, near a single-conduit chokepoint the
-    discrete surcharge branch produces a genuinely steeper backwater-vs-roughness response than
-    the attenuated ROM tracks — confirmed to be a property of the regime, not a fixable
-    calibration constant (the gap does not narrow at gentler surcharge severities either). **If
-    you expect sustained surcharge and want validated band widths, run with `NODE_CONTINUITY
-    SEMI_IMPLICIT`.** See `docs/uncertainty/VALIDATION.md`, "Surcharged-regime sensitivity
-    attenuation (PR H5)," for the full measurement and root-cause writeup.
+10. **Surcharged bands: calibrated at the surcharged nodes under `NODE_CONTINUITY
+    SEMI_IMPLICIT`; too wide immediately upstream of a pool; a documented limitation under
+    `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by the head's
+    elasticity to n (0.6 free-surface, 2.0 pressurised, blended across the crown — PR H5b).
+    Against brute-force Monte Carlo on the surcharged test chain (`SEMI_IMPLICIT`): width ratio
+    1.02 at the deepest pool node, member coverage 0.84 overall, no junction below 0.71. The
+    free-surface nodes just upstream of the pool, across a supercritical reach, come out 7–15×
+    too wide: the pool's deviation leaks upstream through the symmetric operator (limitation 2),
+    which is the operator's gap, not the source term's — read those bands as conservative. Under
+    `EXPLICIT` the discrete surcharge branch also drowns the node upstream of a chokepoint in a
+    way a depth-keyed rule cannot see (member coverage 0.69, below the 0.80 floor). **If you
+    expect sustained surcharge, run with `NODE_CONTINUITY SEMI_IMPLICIT`.** See
+    `docs/uncertainty/VALIDATION.md`, "H5b — Surcharged band recalibrated against member
+    coverage," for the measurements and the sweep that located the residual.
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from

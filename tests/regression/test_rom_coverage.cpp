@@ -234,6 +234,15 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     }
 
     const auto* rom = with_rom ? eng->rom1d() : nullptr;
+    // H5b recalibration knobs (env; defaults = the shipped H5 dials). Read by
+    // computeSurchargeAlpha() every step, so setting them here is sufficient.
+    if (with_rom) {
+        auto& scfg = eng->rom1dSurchargeConfig();
+        if (const char* v = std::getenv("H5B_ALPHA_SURCHARGED")) scfg.alpha_surcharged = std::atof(v);
+        if (const char* v = std::getenv("H5B_ALPHA_FREE"))       scfg.alpha_free       = std::atof(v);
+        if (const char* v = std::getenv("H5B_RAMP_LO"))     scfg.ramp_lo     = std::atof(v);
+        if (const char* v = std::getenv("H5B_RAMP_HI"))     scfg.ramp_hi     = std::atof(v);
+    }
 
     // Track engine time via the elapsed value the API returns (days; 0 at
     // the final step). The engine may sub-step internally, so a step counter
@@ -294,6 +303,12 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     if (rom && rom->basis && !rom->basis->eigenvalues.empty()) {
         out.lambda0 = rom->basis->eigenvalues[0];
         out.k1d     = eng->rom1dLastK1d();
+        if (std::getenv("H5B_TRACE")) {
+            const auto& a = eng->rom1dAlphaBuffer();
+            std::printf("[H5b-alpha] end-of-run alpha per active node:");
+            for (double v : a) std::printf(" %.3f", v);
+            std::printf("\n");
+        }
     }
     cleanup();
     return out;
@@ -642,9 +657,22 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
     double ratio_min = 1e300, ratio_max = 0.0;
     std::vector<double> ratios;
 
+    // H5b breakdown (env H5B_TRACE): per node and per report time.
+    const bool trace = std::getenv("H5B_TRACE") != nullptr;
+    struct NodeAgg { std::vector<double> ratios; double cov = 0.0; int n = 0; double fill = 0.0; int n_late = 0; double rom_w = 0, mc_w = 0, rom_mid = 0, mc_mid = 0, det_h = 0; };
+    std::map<std::string, NodeAgg> per_node;
+    std::map<double, std::pair<double,int>> per_time;   // t -> (sum ratio, n)
+    if (trace) {
+        const double tau0 = (rom.lambda0 > 0.0 && rom.k1d > 0.0) ? 1.0 / (rom.lambda0 * rom.k1d) : 0.0;
+        std::printf("[H5b-fixture] %s lambda0=%.4f K1d=%.3e tau0=%.0f s (%.2f h) saturation@%.0fs=%.3f\n",
+                    node_continuity_semi ? "SEMI_IMPLICIT" : "EXPLICIT", rom.lambda0, rom.k1d, tau0,
+                    tau0 / 3600.0, 0.5 * kEndTime, tau0 > 0 ? 1.0 - std::exp(-0.5 * kEndTime / tau0) : 0.0);
+    }
+
     for (const auto& [nm, rom_q05] : rom.q05) {
         const auto& rom_q95 = rom.q95.at(nm);
         const double crown = crownElevOf(nm);
+        const double invert = (nm.size() >= 2 && nm[0] == 'J') ? 100.0 - 5.0 * (nm[1] - '1') : 0.0;
         for (std::size_t k = 0; k < n_samples; ++k) {
             if (rom.times[k] <= 60.0) continue;
             const bool late = rom.times[k] >= 0.5 * kEndTime;  // same spin-up rationale as above
@@ -659,13 +687,28 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
             // (2026-10-04 review; corrected numbers in VALIDATION.md).
             const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
             const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
-            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
+            const double cov_k = mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
+            member_cov_sum += cov_k;
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
 
             ++n_surcharge_samples;
             if (rom.heads.at(nm)[k] > crown) ++n_surcharge_hit;
+
+            if (trace) {
+                auto& na = per_node[nm];
+                na.cov += cov_k; ++na.n;
+                const double cd = crown - invert;
+                if (cd > 1e-6) na.fill += (rom.heads.at(nm)[k] - invert) / cd;
+                if (late) {
+                    na.rom_w += rom_q95[k] - rom_q05[k];
+                    na.mc_w  += mc_width;
+                    na.rom_mid += 0.5 * (rom_q95[k] + rom_q05[k]);
+                    na.mc_mid  += mc_q50;
+                    na.det_h   += rom.heads.at(nm)[k];
+                }
+            }
 
             if (late && mc_width > 1e-6) {
                 const double ratio = (rom_q95[k] - rom_q05[k]) / mc_width;
@@ -674,10 +717,29 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
                 ratio_min = std::min(ratio_min, ratio);
                 ratio_max = std::max(ratio_max, ratio);
                 if (ratio >= 0.3 && ratio <= 3.0) ++n_width_ok;
+                if (trace) {
+                    per_node[nm].ratios.push_back(ratio); ++per_node[nm].n_late;
+                    auto& pt = per_time[rom.times[k]]; pt.first += ratio; ++pt.second;
+                }
             }
         }
     }
     if (n_total == 0 || n_width == 0) return res;
+    if (trace) {
+        for (auto& [nm, na] : per_node) {
+            std::sort(na.ratios.begin(), na.ratios.end());
+            const double med = na.ratios.empty() ? 0.0 : na.ratios[na.ratios.size() / 2];
+            const double mn  = na.ratios.empty() ? 0.0 : na.ratios.front();
+            const double mx  = na.ratios.empty() ? 0.0 : na.ratios.back();
+            const double nl = na.n_late > 0 ? na.n_late : 1;
+            std::printf("[H5b-node] %s  member-coverage=%.3f  width-ratio min/med/max=%.3f/%.3f/%.3f  mean depth/crown=%.2f (n=%d)\n"
+                        "[H5b-node] %s  late means: ROM width=%.3f ft  MC width=%.3f ft  ROM mid-det=%.3f ft  MC med-det=%.3f ft  (det head %.2f)\n",
+                        nm.c_str(), na.n ? na.cov / na.n : 0.0, mn, med, mx, na.n ? na.fill / na.n : 0.0, na.n,
+                        nm.c_str(), na.rom_w / nl, na.mc_w / nl, (na.rom_mid - na.det_h) / nl, (na.mc_mid - na.det_h) / nl, na.det_h / nl);
+        }
+        for (const auto& [t, pt] : per_time)
+            std::printf("[H5b-time] t=%5.0f  mean width-ratio over nodes=%.3f\n", t, pt.first / pt.second);
+    }
 
     std::sort(ratios.begin(), ratios.end());
     res.ok              = true;
@@ -731,7 +793,8 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
 
 // @warning STATUS 2026-08-06 -- DELIBERATELY RED, root-caused not tuned away.
 // Measured: coverage=0.997, width-ratio min/med/max = 0.016/0.034/1.866. The
-// SEMI_IMPLICIT cell below (same fixture, same alpha_floor) passes cleanly at
+// SEMI_IMPLICIT cell below (same fixture, same alpha_floor -- H5's constant,
+// since replaced by H5b's two-level elasticity) passes cleanly at
 // ratio_med=1.031 -- this is EXPLICIT-specific, not a generic H5 shortfall.
 //
 // ROOT CAUSE (per-node breakdown, scratch diagnostic 2026-08-06): the pooled
@@ -771,10 +834,45 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
 // the flow/Froude-keyed attenuation signal option (reusing H3's
 // link_froude) noted as the remaining real alternative in VALIDATION.md.
 // See VALIDATION.md §3(d) and history_decisions.md for the full record.
+//
+// H5b 2026-10-06: under the two-level elasticity (alpha_free=0.6,
+// alpha_surcharged=2.0; alpha_floor no longer exists) this cell moved, with
+// no tuning aimed at it, from member coverage 0.38 / ratio_med 0.033 to
+// 0.693 / 0.694. Still below the 0.80 floor: under EXPLICIT the discrete
+// surcharge branch drowns J3 as well (MC width 13 ft there, ROM 0.69 ft,
+// per-node coverage 0.53), and a ramp keyed on J3's OWN depth/crown cannot
+// see that. Status unchanged: documented limitation.
 TEST(RomCoverageSurcharged, ExplicitContinuity) {
     assertSurchargedCell("EXPLICIT", runSurchargedCell(/*node_continuity_semi=*/false));
 }
 
+// @warning STATUS 2026-10-06 (H5b) -- RED on the ratio_med <= 3.0 ceiling
+// (measured 5.45), NOT tuned away. Before H5b this cell passed the ceiling
+// (ratio_med 0.98) while hiding member coverage 0.51 -- the median of a
+// bimodal set: J1/J2 ~1.9x over, J4/J5 ~0.31x under. H5b replaced the
+// ramp-to-a-floor with a two-level Manning elasticity (0.6 free-surface,
+// 2.0 pressurised) chosen from the physics and from P8's independent
+// free-surface measurement, not fitted here. Measured now (per node, late
+// window, H5B_TRACE=1): J5 ratio 1.02 (exact), J4 0.70, member coverage
+// 0.842 with no junction below 0.709 -- H5b's own acceptance (>=0.80, no
+// node <0.60) is met and the surcharged nodes are right.
+//
+// What is left is the OPPOSITE defect at the free-surface nodes upstream of
+// the pool: J1/J2/J3 at 7.5x/7.4x/15x over (0.74/0.72/1.53 ft vs MC 0.108).
+// Root-caused by sweep, not inferred: with H5B_ALPHA_FREE=0 (their own
+// source zeroed) they keep their full width (0.86/0.84/1.60 ft), and they
+// scale with H5B_ALPHA_SURCHARGED, a dial that only acts at J4/J5. The band
+// at J1-J3 is J4/J5's 10 ft of surcharged deviation carried UPSTREAM by the
+// symmetric weighted-Laplacian operator across C3, a 5% supercritical
+// reach that cannot transmit anything upstream in Saint-Venant (the MC
+// agrees: J3's width equals J1's). This is H3's symmetric-operator gap made
+// concrete, and its fix is a directional (upwind / Froude-gated) term in
+// the 1D operator -- checklist candidate H14 -- not a constant. Basis
+// truncation was tested and ruled out (full basis: J1-J3 unchanged).
+//
+// Per rule 2 the ceiling stays; per C2 the honest label is CONSERVATIVE
+// (printed above). Left registered and red as the live gate for H14.
+// Full record: VALIDATION.md, "H5b -- Surcharged band recalibrated".
 TEST(RomCoverageSurcharged, SemiImplicitContinuity) {
     assertSurchargedCell("SEMI_IMPLICIT", runSurchargedCell(/*node_continuity_semi=*/true));
 }
