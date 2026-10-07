@@ -35,6 +35,7 @@
 #define OPENSWMM_ENGINE_UNCERTAINTY_SPECTRAL_ROM_1D_HPP
 
 #include "GraphEigenBasis.hpp"
+#include "RomDensePropagator.hpp"
 #include "NetworkLaplacian1D.hpp"
 #include "UncertaintyTypes.hpp"
 #include "SoftSpatialField.hpp"
@@ -652,6 +653,7 @@ private:
     std::vector<double> reduced_Mb_;
     std::vector<double> reduced_MK_;
     std::vector<double> reduced_g_;
+    BatchPropagator     reduced_batch_;   ///< PR H14b: shared powers of −dt·K1d·M per advance()
 
     // PR 4 — time-varying basis update
     std::unique_ptr<GraphEigenBasis> basis_owned_;   ///< Basis owned by ROM after first update.

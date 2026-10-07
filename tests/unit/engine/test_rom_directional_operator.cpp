@@ -279,6 +279,83 @@ TEST(DensePropagator, ScalarCaseIsTheExactExponentialIntegrator) {
     EXPECT_NEAR(a, (0.2 - steady) * std::exp(-rate * dt) + steady, 1e-13);
 }
 
+namespace {
+
+// Deterministic pseudo-random dense k×k (non-symmetric) and vector.
+void fillRandom(std::vector<double>& A, std::vector<double>& c, int k, unsigned seed, double scale) {
+    unsigned x = seed;
+    auto rnd = [&]() { x = x * 1664525u + 1013904223u; return (static_cast<double>(x >> 8) / 16777216.0) * 2.0 - 1.0; };
+    A.assign(static_cast<std::size_t>(k) * static_cast<std::size_t>(k), 0.0);
+    c.assign(static_cast<std::size_t>(k), 0.0);
+    for (auto& v : A) v = scale * rnd();
+    for (auto& v : c) v = rnd();
+}
+
+} // namespace
+
+TEST(BatchPropagator, MatchesPerMemberPadeOnSmallNormOperator) {
+    const int k = 9;
+    std::vector<double> A, c;
+    fillRandom(A, c, k, 7u, 0.08);          // ‖A‖ well below θ₁₃: no scaling
+    const double s_vals[] = {0.83, 0.91, 1.0, 1.07, 1.19};
+    BatchPropagator batch;
+    batch.prepare(A, k, 1.19);
+    EXPECT_EQ(batch.scalingExponent(), 0);
+    for (double s : s_vals) {
+        std::vector<double> da_ref(static_cast<std::size_t>(k)), da_bat(static_cast<std::size_t>(k));
+        for (int i = 0; i < k; ++i) da_ref[static_cast<std::size_t>(i)] = da_bat[static_cast<std::size_t>(i)] = 0.3 * std::sin(1.3 * i + s);
+        // Reference: propagateDense integrates exp(−s·dt·M); with M = −A/dt and dt = 1 that is exp(s·A).
+        std::vector<double> M(A.size());
+        for (std::size_t i = 0; i < A.size(); ++i) M[i] = -A[i];
+        propagateDense(M, k, s, 1.0, da_ref.data(), c.data());
+        batch.apply(s, c.data(), da_bat.data());
+        double mx = 0.0;
+        for (double v : da_ref) mx = std::max(mx, std::fabs(v));
+        EXPECT_LT(maxAbsDiff(da_ref, da_bat), 1e-13 * std::max(mx, 1.0)) << "s=" << s;
+    }
+}
+
+TEST(BatchPropagator, MatchesPerMemberPadeWhenScalingIsNeeded) {
+    const int k = 12;
+    std::vector<double> A, c;
+    fillRandom(A, c, k, 11u, 1.5);          // ‖A‖₁ ≫ θ₁₃: several squarings
+    BatchPropagator batch;
+    batch.prepare(A, k, 1.25);
+    EXPECT_GT(batch.scalingExponent(), 0);
+    for (double s : {0.8, 1.0, 1.25}) {
+        std::vector<double> da_ref(static_cast<std::size_t>(k), 0.1), da_bat(static_cast<std::size_t>(k), 0.1);
+        std::vector<double> M(A.size());
+        for (std::size_t i = 0; i < A.size(); ++i) M[i] = -A[i];
+        propagateDense(M, k, s, 1.0, da_ref.data(), c.data());
+        batch.apply(s, c.data(), da_bat.data());
+        double mx = 0.0;
+        for (double v : da_ref) mx = std::max(mx, std::fabs(v));
+        ASSERT_GT(mx, 0.0);
+        EXPECT_LT(maxAbsDiff(da_ref, da_bat), 1e-11 * mx) << "s=" << s;
+    }
+}
+
+TEST(BatchPropagator, ScalarAndSingularLimits) {
+    // k = 1: exact exponential integrator; A = 0: Euler limit (φ₁(0) = I).
+    std::vector<double> A = {-0.9 * 7.0};   // −dt·rate, dt = 7
+    BatchPropagator b1;
+    b1.prepare(A, 1, 1.25);
+    double da = 0.2;
+    const double c = 0.3 * 7.0;   // dt·g
+    b1.apply(1.25, &c, &da);
+    const double rate = 1.25 * 0.9, steady = 0.3 / rate;
+    EXPECT_NEAR(da, (0.2 - steady) * std::exp(-rate * 7.0) + steady, 1e-13);
+
+    std::vector<double> Z(9, 0.0), cz = {1.0, -2.0, 0.5};
+    BatchPropagator b0;
+    b0.prepare(Z, 3, 1.1);
+    std::vector<double> d = {0.1, 0.2, 0.3};
+    b0.apply(1.1, cz.data(), d.data());
+    EXPECT_NEAR(d[0], 0.1 + 1.0, 1e-15);
+    EXPECT_NEAR(d[1], 0.2 - 2.0, 1e-15);
+    EXPECT_NEAR(d[2], 0.3 + 0.5, 1e-15);
+}
+
 // ─── SpectralROM1D reduced path ─────────────────────────────────────────────
 
 namespace {

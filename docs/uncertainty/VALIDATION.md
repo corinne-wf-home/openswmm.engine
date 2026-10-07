@@ -866,6 +866,81 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# H14b — batch propagator: the per-member matrix exponential shares the operator's powers (2026-10-07)
+
+**Branch** `hsym2/h14b-batch-propagator` (stacked on H14). Exact; no model
+change. Every MC cell reproduces its H14 numbers to printed precision and
+the gate stays 142/142.
+
+## 1. What changed
+
+Every member of a ROM ensemble integrates the same operator scaled by its
+own scalar, `δa_i ← exp(s_i·A)·δa_i + φ₁(s_i·A)·c_i` with `A = −Δt·K·M` and
+`s_i = 1/mm_i`. H14 (and the 2D ROM since W3) paid one full Padé
+exponential of the augmented `(k+1)×(k+1)` matrix per member per step.
+`BatchPropagator` (`RomDensePropagator.hpp`) evaluates Higham's degree-13
+Padé approximant instead, on the augmented matrix
+`B_i = [[s_i·A, c_i],[0,0]]`, whose powers are
+`B_i^m = [[s_i^m·A^m, s_i^{m−1}·A^{m−1}·c_i],[0,0]]`: the matrix powers
+`A^1..A^13` are formed once per step (`prepare`), and each member forms its
+numerator/denominator as an `s`-weighted combination (O(13·k²)), runs 12
+matrix–vector products for the forcing column, and one `(k+1)×(k+1)` solve
+(`apply`). The scaling exponent is chosen once from `max_i|s_i|`; squarings,
+when needed, stay per member (the scalar is inside the exponent). The 1D
+reduced path and the 2D SHARED-operator path use it; H15's per-member
+operators keep `propagateDense` (their matrices differ). Parity with the
+per-member Padé: 1e-13 relative without scaling, 1e-11 with several
+squarings (tested, random non-symmetric k = 9 / 12); scalar and `A = 0`
+limits exact.
+
+## 2. Measured
+
+Per routing step, M = 50, k = 20, Bellinge-scale assembly (n = 1011,
+E = 1010), scratch benchmark of the header-only code:
+
+| | `-O0` (Debug) | `-O2` |
+|---|---|---|
+| per-member Padé (H14) | 16.3 ms | 1.62 ms |
+| batch propagator (H14b) | 8.6 ms | 0.72 ms |
+| directional assembly | 2.2 ms | 0.36 ms |
+
+Bellinge full-window lock (65,589 steps, most reaches gated), Debug:
+
+| | wall |
+|---|---|
+| H5b (no operator) | 460 s |
+| H14 | 1,853 s |
+| **H14b** | **1,428 s** |
+
+**Release build** (`-O2`, same machine, Bellinge lock, `H14_DIRECTIONAL`
+knob added to the gate for the A/B):
+
+| | wall |
+|---|---|
+| directional operator off (pre-H14 numerics) | 123 s |
+| H14b, first version (per-call scratch allocation) | 251 s |
+| **H14b, scratch buffers hoisted** | **183 s** |
+
+So in the build users run, the directional operator costs about half again
+on a network where most reaches are gated (+49 %), down from double. The
+allocation fix alone was worth 68 s: six `std::vector` allocations per
+member per step is 20 million allocations on this run, and in an optimized
+build they outweighed the arithmetic they wrapped.
+
+The batch halves the propagator and does not touch the floor: an exact
+per-member exponential costs at least one O(k³) solve, and in Debug the
+unoptimized `std::vector` indexing dominates everything else. The remaining
+exact options are a real Schur decomposition of `A` once per step with a
+blocked Schur–Parlett per member (O(k²) per member, but a non-trivial
+eigensolver to get right), or a cached propagator for fixed-step runs
+keyed on `(dt, K1d, M)` — Bellinge's adaptive steps would rarely hit it.
+Neither is done; both are recorded.
+
+## 3. Reproduction
+
+    ctest --test-dir build/<dir> -R test_engine_rom_directional_operator   # BatchPropagator parity tests
+    H14_DIRECTIONAL=0 build/<dir>/tests/regression/test_rom_coverage_bellinge   # A/B timing knob
+
 # H14 — Froude-gated directional 1D operator (2026-10-07)
 
 **Branch** `hsym2/h14-directional-1d-operator` (stacked on H15). Closes the
@@ -994,10 +1069,10 @@ steps, most reaches gated) the full-window lock went from **460 s to
 unmoved (band/depth p50 0.308 → 0.316, max 44.6 → 44.5; band/head max
 0.276 → 0.268). Exactness was kept over cost here: the per-member scaling
 `1/mm_i` is inside the exponential, so the propagator cannot be shared
-across members by a scalar trick. Follow-up **H14b**: real Schur of
-`K1d·dt·M` once per step and a Schur–Parlett per-member exponential (O(k²)
-per member), or a cached propagator when `dt` and `K1d` repeat. Not done
-here.
+across members by a scalar trick. Follow-up **H14b** (done the same day,
+section above): sharing the matrix powers across members halves the
+propagator (1,853 → 1,428 s Debug); the O(k³) per-member solve is the
+exact floor without a Schur decomposition.
 
 ## 8. Reproduction
 

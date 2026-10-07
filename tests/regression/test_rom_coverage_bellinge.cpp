@@ -192,6 +192,10 @@ RunResult runCase(const std::string& tag, bool with_rom) {
     }
 
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    // H14/H14b A-B knob: the directional operator is read every routing
+    // step, so flipping it here (before the first step) is sufficient.
+    if (const char* v = std::getenv("H14_DIRECTIONAL"))
+        eng->rom1dDirectionalConfig().enabled = std::atoi(v) != 0;
     const auto& ctx = eng->context();
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());
 

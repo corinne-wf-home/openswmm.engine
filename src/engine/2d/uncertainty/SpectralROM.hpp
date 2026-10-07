@@ -39,6 +39,7 @@
 #include "SpatialUncertaintyField.hpp"
 #include "uncertainty/UncertaintyTypes.hpp"
 #include "uncertainty/RomQuantileGemm.hpp"
+#include "uncertainty/RomDensePropagator.hpp"
 #include <vector>
 #include <cstddef>
 #include <cstdint>
@@ -558,6 +559,9 @@ private:
     /// spatial_mannings. Empty = shared operator only.
     std::vector<std::vector<double>> reduced_M_members_;
     std::vector<double> reduced_Mib_; ///< n_kept scratch: M_i·b_coarse per member.
+    /// PR H14b: shared-operator batch propagator (powers of −dt·M per advance()).
+    std::vector<double> reduced_A_;
+    openswmm::uncertainty::BatchPropagator reduced_batch_;
 
     std::vector<double> h_work_;      ///< n_tri: scratch for reconstruction.
     std::vector<double> h_det_last_;  ///< n_tri: deterministic depth from the last advance()/seed().
