@@ -147,6 +147,8 @@ Controls the ROM solver. All keywords are optional; defaults shown.
 | `K_EFF` | `≤ 0 → AUTO` | any | Effective diffusive conductance (m^(4/3)/s). Values ≤ 0 activate AUTO mode (see §4.8). |
 | `MANNINGS_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for Manning's n field. 0 = uniform scalar per member (fast). |
 | `RAINFALL_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for rainfall field. 0 = uniform scalar per member. |
+| `MANNING_ELASTICITY` | `1.0` | ≥ 0 | H13: elasticity of steady depth to Manning's n applied to the ROM's Manning-sensitivity source. 1.0 = depth moves one-for-one with n (ships; compensates ~0.8 basis capture at the default mode count). 0.6 = sheet-flow normal depth (physical); use with `MODES` ≥ ~5 % of cells. See VALIDATION.md "H13 (2D)". |
+| `DIFFUSIVITY_SCALE` | `1.0` | > 0 | Multiplier on the diffusivity scale handed to the reduced operator. Moves nothing at the fixed point; shortens the approach to it. |
 | `WET_RESEED_FRACTION` | `0.05` | [0, 1] | 2D-only. Rebuild the ROM basis (and reset every member's deviation to zero) when the wet-cell count changes by more than this fraction of n_tri, so the ROM extends coverage to newly-wet cells. Not a periodic drift correction — see §4.5, §6.3. No 1D equivalent; the 1D ROM never reseeds. |
 | `WET_RESEED_MIN_INTERVAL` | `60.0` | ≥ 0 | Minimum simulation time (s) between consecutive wet-domain rebuilds. Prevents excessive rebuilding on an oscillating wetting front. |
 | `PARAMETRIC_TAILS` | `NO` | YES/NO | Fit a log-normal to the wet-member sub-population and use the analytic 95th percentile as q95 (reduces noise from top 1–2 samples when M is small). q05/q50 remain sort-based. |
@@ -727,6 +729,15 @@ When `corr_len = 0`, the spatial generator is bypassed for speed.
 
 **In `advance()`**: `f_j^i = P[:,j]ᵀ · (rainfall ⊙ W_rain[i])` replaces the scalar
 `r_coarse[j] · rainfall_mult[i]` when spatial rainfall is active.
+
+**Why the 2D band runs ~1.3× wide, and the dial for it (H13, 2026-10-07).** The Manning
+source assumes depth moves one-for-one with n; sheet-flow normal depth moves as n^0.6, so the
+physical band is 1/0.6 = 1.67× too wide — but the retained eigenmodes capture only ~0.8 of the
+depth field at the default mode count, and the two cancel to the measured 1.32 (member coverage
+0.82). `MANNING_ELASTICITY 0.6` is the physical value; at the default modes it drops coverage to
+0.65 (the capture loss is no longer hidden), and only with `MODES` ≈ 5 % of cells does it give a
+calibrated band (0.80 / 0.91 measured). On a converging channel the effective elasticity is ~0.27,
+so the constant is surface-dependent. The default stays 1.0 until that is calibrated (W4b).
 
 **How `MANNINGS_CORR_LEN` is integrated (H15, 2026-10-07).** A spatial Manning field cannot
 ride one shared reduced operator, so the router assembles one reduced operator per member

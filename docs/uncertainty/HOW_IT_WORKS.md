@@ -595,6 +595,16 @@ limitation. **If you expect appreciable, sustained surcharge, run with
 regime at all; `fr_trust` tells you how much of the network the gate is
 acting on.
 
+**The 2D band's 1.3× is two errors cancelling (H13, 2D half).** The 2D
+Manning source has the same elasticity-1 assumption the 1D source had
+before H5b (sheet-flow depth actually moves as n^0.6), so its fixed point
+is 1.67× the physical band; the retained eigenmodes capture only ~0.8 of
+the depth field at the default mode count, and the product is the measured
+1.32. `MANNING_ELASTICITY 0.6` removes the first error but exposes the
+second unless `MODES` is raised to a few percent of the cells. On a
+converging channel the measured elasticity is ~0.27, so one constant does
+not serve every surface. The default stays 1.0, documented as what it is.
+
 > **Historical note**: an earlier version of this section also warned that
 > the band reflected uncertainty "since the last recalibration" — the ROM
 > periodically re-anchored its ensemble to the deterministic solution,

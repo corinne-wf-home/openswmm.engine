@@ -730,8 +730,8 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 // Manning sensitivity: −(s·M_i − M₀)·b. Shared operator:
                 // M_i = M₀ ⇒ −(s − 1)·M₀b, the pre-H15 expression exactly.
                 double g = per_member_ops
-                    ? -(s * reduced_Mib_[j] - reduced_Mb_[j]) + (fj - r_coarse[j])
-                    : -(s - 1.0) * reduced_Mb_[j] + (fj - r_coarse[j]);
+                    ? -manning_elasticity * (s * reduced_Mib_[j] - reduced_Mb_[j]) + (fj - r_coarse[j])
+                    : -manning_elasticity * (s - 1.0) * reduced_Mb_[j] + (fj - r_coarse[j]);
                 if (soft_spread_field_) {
                     if (use_soft_rij)
                         g += soft_r_spread_spatial_[ui * nk + j];
@@ -812,7 +812,7 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
 
             // --- deviation forcing g and exact exponential integrator ---
             const double rate = lam * keff_ji;
-            double g          = -lam * (keff_ji - keff_modes_[j]) * b_coarse[j]
+            double g          = -manning_elasticity * lam * (keff_ji - keff_modes_[j]) * b_coarse[j]
                                 + (fj - r_coarse[j]);
             if (soft_spread_field_) {
                 if (use_soft_rij)

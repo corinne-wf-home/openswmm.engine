@@ -164,7 +164,9 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsReducedOperatorDials) {
         "ALPHA_PAR       0.5\n"
         "ALPHA_PERP      1.5\n"
         "C_FACTOR        1.2\n"
-        "GROUND_SCALE    0.4\n";
+        "GROUND_SCALE    0.4\n"
+        "MANNING_ELASTICITY 0.6\n"
+        "DIFFUSIVITY_SCALE  2.5\n";
 
     std::string err;
     auto eng = parseOnly(dir, "rom_dials", extra, &err);
@@ -177,9 +179,21 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsReducedOperatorDials) {
     EXPECT_DOUBLE_EQ(o.rom_alpha_perp, 1.5);
     EXPECT_DOUBLE_EQ(o.rom_c_factor, 1.2);
     EXPECT_DOUBLE_EQ(o.rom_ground_scale, 0.4);
+    EXPECT_DOUBLE_EQ(o.rom_manning_elasticity, 0.6);   // H13 (2D)
+    EXPECT_DOUBLE_EQ(o.rom_diffusivity_scale, 2.5);
 
     swmm_engine_close(eng);
     swmm_engine_destroy(eng);
+}
+
+TEST(SurfaceROMInputParser, TwoDRomElasticityDefaultsAreTheW3Calibration) {
+    // H13 (2D): the dials ship at the values the W3 gate asserts against
+    // (elasticity 1.0 compensates ~0.8 basis capture at k = 40; see
+    // VALIDATION.md "H13 (2D)"). Changing either default requires re-running
+    // that gate.
+    const openswmm::twoD::SolverOptions2D defaults;
+    EXPECT_DOUBLE_EQ(defaults.rom_manning_elasticity, 1.0);
+    EXPECT_DOUBLE_EQ(defaults.rom_diffusivity_scale, 1.0);
 }
 
 TEST(SurfaceROMInputParser, TwoDRomSectionLegacyOperatorYesRoundTrips) {

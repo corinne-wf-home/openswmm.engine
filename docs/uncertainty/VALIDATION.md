@@ -34,7 +34,7 @@ label, applied uniformly from `tests/regression/mc_quantiles.hpp`.
 | H11 amplitude-only baseline (ungated) | 0.009 → **0.009** | **0.05** | ungated | superseded by H11 |
 | SR-5 soft rain, FULL | 0.822 → 0.710 → **0.976** (SR-6) | 0.76 → **0.88** | passes | **calibrated** since SR-6 (floor asserted) |
 | CL-1e soft rain, CORR_LEN | 0.659 → 0.570 → **0.804** (SR-6) | 0.68 → **0.83** | passes | **calibrated** since SR-6 (floor asserted) |
-| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (0.82, 1.32 ≤ 1.5; floor asserted) → breadth: **W4** |
+| W3 2D marcher, production "adv" rung | 1.321 (same-index rule; 1.291 vs midpoint span) | **0.82** | passes | **calibrated** (0.82, 1.32 ≤ 1.5; floor asserted); the 1.32 = 1/0.6 elasticity × ≈0.8 basis capture — **H13 (2D)**, dial shipped default 1.0 |
 | W3 2D marcher, iso / aniso rungs | 0.835 / 0.857 | **0.66 / 0.67** | pass | reference rungs, ungated |
 | W4 plane, correlated rain ℓ = 20 / 100 m (adv) | **1.31 / 1.42** | **0.90 / 0.89** | floor asserted | **calibrated** — first MC behind 2D CORR_LEN |
 | W4 plane, correlated Manning ℓ = 20 / 100 m | 0.68 / 1.24 (diagonal, pre-H15) → **0.92 / 1.32** (H15 per-member M_i) | 0.65 / 0.84 → **0.80 / 0.84** | measured, not asserted | calibrated at both lengths after H15; the 20 m cell by 0.001 |
@@ -865,6 +865,95 @@ the gate applies where the operator claims validity.
 Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
+
+# H13 (2D half) — the 2D band's 1.3× is elasticity × basis capture; a dial, not a default (2026-10-07)
+
+**Branch** `hsym2/h13-2d-elasticity` (stacked on H14b). The 1D half closed
+with H5b (`alpha_free = 0.6`). The 2D ROM's Manning-sensitivity source
+likewise assumes depth moves one-for-one with n; sheet-flow normal depth
+moves as n^0.6. This section measures what that costs in 2D and what
+happens when it is corrected. Every number is the W4 harness
+(`regression_2d_rom_marcher_coverage_corr`, new `plane-mann-comono` cell and
+`W4_SWEEP` / `W4_MODES` / `W4_ELASTICITY` / `W4_REPORTS` / `W4_SCORE_FROM`
+knobs), 25 members, member coverage / median width ratio.
+
+## 1. The plane is at its fixed point, and the fixed point is operator-independent
+
+Scoring the last 10 minutes of 30-, 90- and 180-minute windows after the
+3000 s spin (comonotone ±20 % Manning):
+
+| rung | 30 min | 90 min | 180 min |
+|---|---|---|---|
+| legacy (diagonal, Neumann) | 0.47 / 0.46 | 0.47 / 0.46 | 0.47 / 0.46 |
+| iso | 0.66 / 0.84 | 0.80 / 1.20 | 0.82 / 1.32 |
+| aniso | 0.67 / 0.86 | 0.80 / 1.21 | 0.83 / 1.33 |
+| adv (production) | 0.82 / 1.32 | 0.83 / 1.34 | 0.83 / 1.34 |
+
+All three physical rungs converge to the same 1.32–1.34: the deviation
+form's fixed point `(mm−1)·b` does not depend on the operator (as W3 stated
+and H14 unit-tests). The adv rung's advantage at 30 minutes is faster
+convergence, not a different answer. (An earlier version of this series
+read as a slow transient; it was a shell word-splitting slip that scored
+every window from report 0 — recorded in `history_failures.md`.)
+
+## 2. Where the 1.3× comes from
+
+Elasticity × retained modes on the plane, adv rung, 30-minute window:
+
+| elasticity | k = 40 (W3 gate) | k = 80 | k = 160 |
+|---|---|---|---|
+| 1.0 (shipped) | 0.822 / **1.321** | 0.965 / 1.534 | 0.988 / 1.518 |
+| 0.6 (physical) | 0.652 / 0.793 | 0.784 / 0.920 | **0.800 / 0.911** |
+| 0.75 | 0.746 / 1.000 | — | — |
+
+The diffusivity scale does not enter (×1…×16 at e = 0.6 all give 0.79–0.81,
+as a fixed point must). Reading the table: the physical over-width is
+1/0.6 = 1.67; at k = 40 the basis captures about 0.8 of the depth field, so
+the shipped configuration lands at 0.8 × 1.67 ≈ 1.32 — an accidental
+compensation, not a calibration. Raise k and the compensation disappears
+(1.53). Apply the physical elasticity and the band is right only once the
+basis captures the field (k = 160: 0.91 width, coverage exactly at the
+floor). Elasticity 0.75 at k = 40 gives width 1.00 with coverage 0.75: a
+mis-shaped band (truncation redistributes the deviation spatially) that a
+median-width gate would have called calibrated — the C2 trap.
+
+## 3. The channel does not have elasticity 0.6
+
+| elasticity | k = 40 | k = 80 |
+|---|---|---|
+| 1.0 | 0.946 / 2.933 | 0.910 / 2.668 |
+| 0.6 | 0.873 / 1.760 | 0.831 / 1.601 |
+
+With capture ≈ 0.8 the channel's implied MC elasticity is about 0.27, not
+0.6: on a laterally converging surface the steady depth responds to n far
+less than the sheet-flow law says (the thalweg's flow is set by the whole
+catchment, the flanks are thin films). A single constant cannot serve both
+surfaces; this is W4b's calibration problem, now with a measured target.
+
+## 4. What ships
+
+- `SpectralROM::manning_elasticity` and `[2D_ROM] MANNING_ELASTICITY`
+  (default **1.0**), applied to the Manning-sensitivity term on every
+  advance() path; 1.0 is bit-identical to pre-H13 (tested), 0.6 scales the
+  fixed point by exactly 0.6 (tested).
+- `[2D_ROM] DIFFUSIVITY_SCALE` (default 1.0), a multiplier on K_eff handed
+  to the operator, kept from the sweep as a legitimate convergence-rate dial
+  (it moves nothing at the fixed point — measured — but shortens the
+  approach on the iso/aniso rungs).
+- The default stays 1.0 because the C1 floor is asserted on the W3 gate at
+  k = 40, and 0.6 there measures 0.652 — below the floor, honestly. Flipping
+  the default is coupled to raising `MODES` (≈5 % of cells on this plane)
+  and to W4b's channel answer; both are owner decisions with a cost.
+  **Recommended configuration for sheet-flow surfaces**:
+  `MANNING_ELASTICITY 0.6` with `MODES` ≥ 5 % of cells (measured 0.80 / 0.91
+  at k = 160 on 3200 cells).
+
+## 5. Reproduction
+
+    W4_CELLS=plane-mann-comono W4_MODES=160 W4_SWEEP="1.0:1,0.6:1" OPENSWMM_2D_BACKEND=cpu \
+        build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
+    W4_CELLS=plane-mann-comono W4_REPORTS=180 W4_SCORE_FROM=170 ...        # the fixed-point series
+    W4_CELLS=channel-mann-comono W4_ELASTICITY=0.6 W4_MODES=80 ...
 
 # H14b — batch propagator: the per-member matrix exponential shares the operator's powers (2026-10-07)
 

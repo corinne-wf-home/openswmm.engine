@@ -266,6 +266,24 @@ TEST(SurfaceROMRouterOperator, SpatialManningFieldInstallsPerMemberOperators) {
     swmm_engine_destroy(eng);
 }
 
+TEST(SurfaceROMRouterOperator, ManningElasticityOptionReachesTheRom) {
+    const fs::path dir = fs::current_path() / "rom_router_operator_out";
+    fs::create_directories(dir);
+    { std::ofstream f(dir / "elasticity.inp"); f << buildModel(/*open=*/false); }
+    auto eng = driveRun(dir / "elasticity.inp", dir / "elasticity.rpt", dir / "elasticity.out",
+                        [](openswmm::twoD::SolverOptions2D& o) {
+                            o.enable_rom = true; o.rom_members = 12; o.rom_modes = 6;
+                            o.rom_mannings_pert = 0.20; o.rom_rainfall_pert = 0.0;
+                            o.rom_manning_elasticity = 0.6;
+                        });
+    ASSERT_NE(eng, nullptr);
+    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+    ASSERT_NE(impl->surfaceRouter2D().rom(), nullptr);
+    EXPECT_DOUBLE_EQ(impl->surfaceRouter2D().rom()->manning_elasticity, 0.6);
+    swmm_engine_end(eng); swmm_engine_report(eng);
+    swmm_engine_close(eng); swmm_engine_destroy(eng);
+}
+
 TEST(SurfaceROMRouterOperator, LegacyOptionRestoresDiagonalPathWithDepthWeightedBasis) {
     const fs::path dir = fs::current_path() / "rom_router_operator_out";
     fs::create_directories(dir);

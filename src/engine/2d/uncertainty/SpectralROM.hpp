@@ -87,6 +87,14 @@ struct SpectralROM {
 
     double mode_drop_threshold = 1.0e-10; ///< Drop mode j when E_j < threshold AND rain forcing < threshold.
 
+    /// H13 (2D half): elasticity of the steady depth to Manning's n, applied
+    /// to the Manning-sensitivity source on every advance() path (the fixed
+    /// point becomes (mm−1)·e·b instead of (mm−1)·b). The source assumes
+    /// depth moves one-for-one with n; sheet-flow normal depth moves as
+    /// n^0.6 (Manning, wide section), the same exponent the 1D ROM uses as
+    /// alpha_free (PR H5b). 1.0 reproduces the pre-H13 band bit-for-bit.
+    double manning_elasticity = 1.0;
+
     // -------------------------------------------------------------------------
     // PR H4 — quantile-reconstruction GEMM. Debug/equivalence-testing knob:
     // when true, computeQuantiles() uses the original hand-rolled per-cell

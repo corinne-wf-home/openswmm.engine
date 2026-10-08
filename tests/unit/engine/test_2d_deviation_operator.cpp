@@ -685,3 +685,43 @@ TEST(DeviationOperator2D, SetReducedOperatorPerMemberRejectsWrongSize) {
     EXPECT_THROW(rom.setReducedOperatorPerMember(std::vector<double>(M * k * k + 1, 0.0)), std::invalid_argument);
     EXPECT_NO_THROW(rom.setReducedOperatorPerMember(std::vector<double>(M * k * k, 0.0)));
 }
+
+// ============================================================================
+// H13 (2D half) — Manning elasticity dial
+// ============================================================================
+
+TEST(DeviationOperator2D, ManningElasticityScalesTheFixedPointExactlyAndOneIsBitIdentical) {
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const int M = 6, k = basis.num_kept;
+    std::vector<double> mann(static_cast<std::size_t>(M)), ones(static_cast<std::size_t>(M), 1.0);
+    for (int i = 0; i < M; ++i) mann[static_cast<std::size_t>(i)] = 0.8 + 0.4 * (i + 0.5) / M;
+    DeviationOperator2D op;
+    op.alpha_par = 0.62; op.alpha_perp = 2.0; op.c_factor = 5.0 / 3.0;
+    ASSERT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+
+    SpectralROM e1, e1b, e06;
+    h15MakeRom(e1,  basis, M, mann, h, nullptr);
+    h15MakeRom(e1b, basis, M, mann, h, nullptr);
+    h15MakeRom(e06, basis, M, mann, h, nullptr);
+    e1.setReducedOperator(op.M);
+    e1b.setReducedOperator(op.M);
+    e06.setReducedOperator(op.M);
+    e1b.manning_elasticity = 1.0;    // explicit 1.0 must equal the default bit-for-bit
+    e06.manning_elasticity = 0.6;
+    for (int step = 0; step < 400; ++step) {   // run to the fixed point
+        e1.advance(60.0, 1.0, nullptr, nullptr, h.data());
+        e1b.advance(60.0, 1.0, nullptr, nullptr, h.data());
+        e06.advance(60.0, 1.0, nullptr, nullptr, h.data());
+    }
+    EXPECT_EQ(maxAbsDiff(e1.a_ensemble, e1b.a_ensemble), 0.0);
+    // δa* = (mm−1)·e·b: the e = 0.6 trajectory's fixed point is 0.6× the e = 1 one.
+    double max_a = 0.0;
+    for (double a : e1.a_ensemble) max_a = std::max(max_a, std::fabs(a));
+    ASSERT_GT(max_a, 1e-9);
+    for (std::size_t i = 0; i < e1.a_ensemble.size(); ++i)
+        EXPECT_NEAR(e06.a_ensemble[i], 0.6 * e1.a_ensemble[i], 1e-9 * max_a) << "coef " << i;
+}

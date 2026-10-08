@@ -108,15 +108,19 @@ namespace {
 
 // ─── Configuration (W3's plane, unchanged) ──────────────────────────────────
 constexpr double kPert     = 0.20;    // ±20% Manning prior
-constexpr int    kModes    = 40;
+const int        kModes    = [](){ const char* v = std::getenv("W4_MODES"); return v ? std::atoi(v) : 40; }();   // H13-2D capture sweep
 constexpr double kBaseN    = 0.03;
 constexpr double kS        = 0.002;   // streamwise bed slope; outlet at x = 0
 constexpr int    kNx       = 40, kNy = 40;
 constexpr double kDx       = 5.0;     // m  (domain 200 m × 200 m)
 constexpr double kRain     = 2.0e-4;  // m/s
 constexpr double kRep      = 60.0;
-constexpr int    kReports  = 30;
-constexpr int    kScoreR0  = 20;
+// Window: kReports report intervals after spin-up, scored from kScoreR0.
+// W4_REPORTS / W4_SCORE_FROM override them (H13-2D: the 2D cells are scored
+// mid-transient; a longer window tests whether widths keep growing).
+inline int envIntEarly(const char* k, int d) { const char* v = std::getenv(k); return v ? std::atoi(v) : d; }
+const int    kReports  = envIntEarly("W4_REPORTS", 30);
+const int    kScoreR0  = envIntEarly("W4_SCORE_FROM", 20);
 constexpr double kAlphaPar    = 0.62;
 constexpr double kAlphaPerp   = 2.00;
 constexpr double kCFactor     = 5.0 / 3.0;
@@ -318,6 +322,10 @@ const char* rungName(Rung r) {
 
 /// What drives the ROM's spread in a cell.
 struct RomInputs {
+    // H13 (2D): elasticity on the Manning source and a multiplier on the
+    // diffusivity scale handed to the operator (sweep knobs).
+    double elasticity = [](){ const char* v = std::getenv("W4_ELASTICITY"); return v ? std::atof(v) : 1.0; }();
+    double d_mult = 1.0;
     // Comonotone Manning multipliers (length M) or empty for "ones".
     std::vector<double> mann_mult;
     // Correlated Manning multiplier field (M × n). Without `per_member` the
@@ -366,6 +374,7 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
     rom.setExternalSamples(in.mann_mult.empty() ? ones : in.mann_mult, ones);
     rom.initialize();
     rom.seed(h0.data());
+    rom.manning_elasticity = in.elasticity;
     if (in.mann_field) rom.spatial_mannings = *in.mann_field;
 
     RomBands out;
@@ -401,7 +410,7 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
                 default: break;
             }
             manningVelocity(mesh0, h_prev, vel_u, vel_v);
-            const double D = classicDiffusivity(mesh0, h_prev);
+            const double D = classicDiffusivity(mesh0, h_prev) * in.d_mult;
             if (!op.assemble(mesh0, basis, D, h_prev.data(), vel_u.data(), vel_v.data(),
                              ground_w.data()))
                 return out;
@@ -686,6 +695,56 @@ TEST(Rom2dMarcherCoverageCorr, CorrelatedFieldsAndSecondSurface) {
     }
 
     // ── Channel (thalweg), comonotone Manning, all four rungs ───────────────
+    // ── Plane, comonotone Manning, all four rungs (W3's cell, re-measurable
+    //    here with the window knobs) ────────────────────────────────────────
+    if (cellEnabled("plane-mann-comono")) {
+        const auto mult = comonotoneMultipliers(gM);
+        std::vector<std::vector<double>> nf(static_cast<std::size_t>(gM),
+            std::vector<double>(static_cast<std::size_t>(fp.mesh.n_triangles())));
+        for (int i = 0; i < gM; ++i)
+            std::fill(nf[static_cast<std::size_t>(i)].begin(), nf[static_cast<std::size_t>(i)].end(),
+                      kBaseN * mult[static_cast<std::size_t>(i)]);
+        const MC mc = runMC(plane, nf, {});
+        // W4_SWEEP="e:d,e:d,..." runs the adv rung for each (elasticity,
+        // diffusivity multiplier) pair against the same MC (H13-2D sweep);
+        // unset = the four rungs at (1, 1).
+        if (const char* sw = std::getenv("W4_SWEEP")) {
+            std::string spec(sw);
+            std::size_t pos = 0;
+            while (pos < spec.size()) {
+                std::size_t nxt = spec.find(',', pos);
+                if (nxt == std::string::npos) nxt = spec.size();
+                const std::string tok = spec.substr(pos, nxt - pos);
+                const std::size_t colon = tok.find(':');
+                RomInputs in;
+                in.mann_mult = mult;
+                in.elasticity = std::atof(tok.substr(0, colon).c_str());
+                in.d_mult = (colon == std::string::npos) ? 1.0 : std::atof(tok.substr(colon + 1).c_str());
+                RomBands b = runRomRung(Rung::ANISO_ADV, fp.mesh, fp.grounded, fp.gw, in, fp.hdet, fp.h0, nullptr);
+                ASSERT_TRUE(b.ok);
+                const Score s = scoreBands(b, fp.mesh, mc);
+                char name[80];
+                std::snprintf(name, sizeof name, "plane e=%.2f D×%.1f", in.elasticity, in.d_mult);
+                printScore(name, rungName(Rung::ANISO_ADV), s, b);
+                pos = nxt + 1;
+            }
+        } else {
+            RomInputs in;
+            in.mann_mult = mult;
+            const Rung rungs[] = {Rung::LEGACY, Rung::ISO, Rung::ANISO, Rung::ANISO_ADV};
+            for (Rung rg : rungs) {
+                const MeshEigenBasis& basis = (rg == Rung::LEGACY) ? fp.neumann : fp.grounded;
+                RomBands b = runRomRung(rg, fp.mesh, basis, fp.gw, in, fp.hdet, fp.h0, nullptr);
+                ASSERT_TRUE(b.ok) << rungName(rg);
+                const Score s = scoreBands(b, fp.mesh, mc);
+                printScore("plane-mann-comono", rungName(rg), s, b);
+                mcq::reportCalibration((std::string("plane-mann-comono ") + rungName(rg)).c_str(),
+                                       s.member_cov, s.ratio_med, "reference (W3 gate is the asserted copy)");
+                EXPECT_GT(s.samples, 0);
+            }
+        }
+    }
+
     if (cellEnabled("channel-mann-comono") || cellEnabled("channel-rain-corr20")) {
         Fixture fc = makeFixture(channel);
         std::printf("[W4 fixture] channel : thalweg T=%.3f, nominal window drift max|dh|=%.2e m, "
