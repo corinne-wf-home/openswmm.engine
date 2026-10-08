@@ -334,6 +334,20 @@ struct SolverOptions2D {
      *  cells. 0.25 was the calibrated value; only rom_legacy_operator skips
      *  grounding entirely. */
     double rom_ground_scale = 0.25;
+
+    /*! H13 (2D half): elasticity of steady depth to Manning's n applied to
+     *  the ROM's Manning-sensitivity source (SpectralROM::manning_elasticity).
+     *  1.0 = the pre-H13 source (depth moves one-for-one with n); 0.6 is the
+     *  sheet-flow normal-depth exponent. Calibrated together with the
+     *  diffusivity scale below — see VALIDATION.md "H13 (2D)". */
+    double rom_manning_elasticity = 1.0;
+
+    /*! H13 (2D half): multiplier on the diffusivity scale (K_eff) handed to
+     *  the reduced operator. The W3 calibration left the operator slow
+     *  enough that the band was still growing at the scoring window
+     *  (measured: adv rung width 1.10 → 1.26 → 1.30 at 30/90/180 min); the
+     *  elasticity and this scale are recalibrated as a pair. */
+    double rom_diffusivity_scale = 1.0;
 };
 
 } // namespace openswmm::twoD

@@ -1009,6 +1009,7 @@ void SurfaceRouter2D::initROM(SimulationContext& ctx) {
     auto rom = std::make_unique<SpectralROM>();
     rom->basis               = basis.get();
     rom->n_ensemble          = std::max(1, options_.rom_members);
+    rom->manning_elasticity  = options_.rom_manning_elasticity;   // H13 (2D)
     rom->mannings_pert       = options_.rom_mannings_pert;
     rom->rainfall_pert       = options_.rom_rainfall_pert;
     rom->cd_pert             = options_.rom_cd_pert;
@@ -1169,7 +1170,7 @@ void SurfaceRouter2D::refreshROMOperator() {
     // derives for the legacy path (h̄^{5/3}/(2n̄√S), or the pinned
     // options_.rom_k_eff override) — a physical diffusivity, meaningful
     // regardless of which operator consumes it.
-    const double D_scale = computeKEff();
+    const double D_scale = computeKEff() * options_.rom_diffusivity_scale;   // H13 (2D)
 
     // state_.face_vx/vy are refreshed on the output-refresh cadence
     // (report-scale), not per step — so the flow direction used here is at

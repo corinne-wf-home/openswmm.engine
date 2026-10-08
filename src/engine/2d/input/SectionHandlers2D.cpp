@@ -664,6 +664,14 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         double v = tryParseDouble(val, ok);
         if (!ok) return "Invalid C_FACTOR value";
         opts.rom_c_factor = v;
+    } else if (iequals(key, "MANNING_ELASTICITY")) {
+        double v = tryParseDouble(val, ok);
+        if (!ok || v < 0.0) return "MANNING_ELASTICITY must be >= 0";
+        opts.rom_manning_elasticity = v;
+    } else if (iequals(key, "DIFFUSIVITY_SCALE")) {
+        double v = tryParseDouble(val, ok);
+        if (!ok || v <= 0.0) return "DIFFUSIVITY_SCALE must be > 0";
+        opts.rom_diffusivity_scale = v;
     } else if (iequals(key, "GROUND_SCALE")) {
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0) return "GROUND_SCALE must be >= 0";
