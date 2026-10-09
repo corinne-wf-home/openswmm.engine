@@ -441,10 +441,23 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
 
 // ─── Scoring (W3's, verbatim semantics) ─────────────────────────────────────
 
+struct DepthBin {
+    double lo = 0.0, hi = 0.0;
+    int n = 0;
+    double cov_sum = 0.0;
+    std::vector<double> ratios;
+    // W4b: the MC's and the ROM's own depth-to-roughness elasticity per bin,
+    // (q95−q05 of depth)/(median depth) divided by (q95−q05 of mm)/1.
+    std::vector<double> e_mc, e_rom;
+};
+
 struct Score {
     int samples = 0;
     double median_cont = 0.0, ratio_med = 0.0, w_frac = 0.0, member_cov = 0.0, ratio_med_mid = 0.0;
     double wet_frac = 0.0;   // fraction of (cell,time) samples with MC median ≥ 1e-4 m
+    // W4b: the same statistics binned by the MC median depth (m), so a
+    // converging surface's thalweg and its thin-film flanks are not pooled.
+    std::vector<DepthBin> bins;
 };
 
 Score scoreBands(const RomBands& bands, const MeshData& mesh0,
@@ -457,6 +470,13 @@ Score scoreBands(const RomBands& bands, const MeshData& mesh0,
     int n_tot = 0, n_cov = 0, n_w = 0, n_w_ok = 0, n_all = 0;
     double member_cov_sum = 0.0;
     std::vector<double> ratios, ratios_mid, hc(static_cast<std::size_t>(M));
+    std::vector<DepthBin> bins = {{1e-4, 1e-3}, {1e-3, 3e-3}, {3e-3, 1e-2}, {1e-2, 2e-2}, {2e-2, 5e-2},
+                                  {5e-2, 1e-1}, {1e-1, 2e-1}, {2e-1, 1e9}};
+    // Relative Manning spread of the comonotone design at the same-index
+    // quantile rule: mm[hi] − mm[lo] (mm is 0.8 + 0.4·(i+0.5)/M, ascending).
+    const double mm_lo = (1.0 - kPert) + (lo + 0.5) / M * 2.0 * kPert;
+    const double mm_hi = (1.0 - kPert) + (hi + 0.5) / M * 2.0 * kPert;
+    const double dmm_rel = mm_hi - mm_lo;
     for (int r = kScoreR0; r < kReports; ++r) {
         const auto ur = static_cast<std::size_t>(r);
         for (int c = 0; c < nt; ++c) {
@@ -471,13 +491,21 @@ Score scoreBands(const RomBands& bands, const MeshData& mesh0,
             ++n_tot;
             const double q05 = bands.q05[ur][uc], q95 = bands.q95[ur][uc];
             if (q05 <= mc_med && mc_med <= q95) ++n_cov;
-            member_cov_sum += mcq::intervalCoverage(hc, q05, q95);
+            const double icov = mcq::intervalCoverage(hc, q05, q95);
+            member_cov_sum += icov;
             const double w_mid = mcq::quantileMidpoint(hc, 0.95) - mcq::quantileMidpoint(hc, 0.05);
             if (w_mid > 1e-6) ratios_mid.push_back((q95 - q05) / w_mid);
             if (mc_w > 1e-6) {
                 const double ratio = (q95 - q05) / mc_w;
                 ++n_w; ratios.push_back(ratio);
                 if (ratio >= 0.3 && ratio <= 3.0) ++n_w_ok;
+                for (auto& b : bins)
+                    if (mc_med >= b.lo && mc_med < b.hi) {
+                        ++b.n; b.cov_sum += icov; b.ratios.push_back(ratio);
+                        b.e_mc.push_back((mc_w / mc_med) / dmm_rel);
+                        b.e_rom.push_back(((q95 - q05) / mc_med) / dmm_rel);
+                        break;
+                    }
             }
         }
     }
@@ -489,15 +517,38 @@ Score scoreBands(const RomBands& bands, const MeshData& mesh0,
     s.w_frac = n_w ? static_cast<double>(n_w_ok) / n_w : 0.0;
     if (!ratios.empty())     { std::sort(ratios.begin(), ratios.end());         s.ratio_med     = ratios[ratios.size() / 2]; }
     if (!ratios_mid.empty()) { std::sort(ratios_mid.begin(), ratios_mid.end()); s.ratio_med_mid = ratios_mid[ratios_mid.size() / 2]; }
+    for (auto& b : bins) {
+        std::sort(b.ratios.begin(), b.ratios.end());
+        std::sort(b.e_mc.begin(), b.e_mc.end());
+        std::sort(b.e_rom.begin(), b.e_rom.end());
+    }
+    s.bins = std::move(bins);
     return s;
 }
 
-void printScore(const char* cell, const char* rung, const Score& s, const RomBands& b) {
+void printDepthBins(const char* cell, const char* rung, const Score& s) {
+    if (!std::getenv("W4_BINS")) return;
+    for (const auto& b : s.bins) {
+        if (b.n == 0) continue;
+        std::printf("[W4 depth-bin] %-22s %s MC depth [%.0e,%.0e) m: n=%6d  cov=%.3f  width-med=%.3f  "
+                    "elasticity MC=%.3f ROM=%.3f\n",
+                    cell, rung, b.lo, b.hi, b.n, b.cov_sum / b.n,
+                    b.ratios[b.ratios.size() / 2],
+                    b.e_mc[b.e_mc.size() / 2], b.e_rom[b.e_rom.size() / 2]);
+    }
+}
+
+void printScore(const char* cell, const char* rung, const Score& s, const RomBands& b);
+void printScoreImpl(const char* cell, const char* rung, const Score& s, const RomBands& b) {
     std::printf("[W4 2D-ROM-vs-marcher] %-28s %s median-containment=%.3f member-coverage=%.3f "
                 "width-med=%.3f (midpoint %.3f) in[0.3,3]=%.3f wet=%.2f n=%d%s\n",
                 cell, rung, s.median_cont, s.member_cov, s.ratio_med, s.ratio_med_mid,
                 s.w_frac, s.wet_frac, s.samples,
                 b.ks_used ? (b.reduced_path ? "  [CORR_LEN reduced]" : "  [CORR_LEN materialized]") : "");
+}
+void printScore(const char* cell, const char* rung, const Score& s, const RomBands& b) {
+    printScoreImpl(cell, rung, s, b);
+    printDepthBins(cell, rung, s);
 }
 
 // ─── Correlated field construction ──────────────────────────────────────────

@@ -866,6 +866,102 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# W4b — the channel's 2.9× is modal leakage onto thin cells, not an advection or elasticity constant (2026-10-09)
+
+**Branch** `hsym2/w4b-channel-calibration` (stacked on H13-2D). The plan
+called for a calibration sweep of `c_factor`/`alpha_*` on the thalweg
+channel. The sweep was not run, because the measurement that was supposed
+to motivate it says the constants are not the problem. No model change; the
+harness gained depth-binned scoring (`W4_BINS=1`) that reports, per MC
+depth class, member coverage, width ratio, and — the quantity that settled
+this — the MC's and the ROM's own depth-to-roughness elasticity,
+`(q95−q05 of depth)/(median depth)` over `(q95−q05 of mm)`.
+
+## 1. Where the width lives (channel, adv rung, elasticity 1, k = 40)
+
+| MC depth class | share of samples | width ratio | elasticity MC | elasticity ROM |
+|---|---|---|---|---|
+| 3–10 mm | 9 % | **8.6** | 0.57 | 4.79 |
+| 1–2 cm | 29 % | 3.8 | 0.57 | 2.10 |
+| 2–5 cm | 42 % | 3.5 | 0.44 | 1.63 |
+| 5–10 cm | 4 % | 1.0 | 1.23 | 1.14 |
+| 10–20 cm | 5 % | 1.1 | 0.79 | 0.82 |
+| > 20 cm (thalweg) | 11 % | 1.75 | 0.40 | 0.63 |
+
+Three things this table says. (a) The Monte Carlo's elasticity is
+0.4–0.6 in every class — Manning's 0.6, give or take, on the thin flanks
+too; the "channel elasticity ≈ 0.27" inferred in H13-2D from the pooled
+median was an artefact of pooling. (b) The ROM's elasticity is right
+where the water is deep (0.63 vs 0.40 in the thalweg — the same ~1.6× the
+plane shows at depth) and wrong by up to 8× on the thin flanks, which are
+80 % of the samples. (c) A thin flank cell's ROM deviation is several
+times its own depth: it is not that cell's roughness response, it is the
+neighbouring thalweg's large absolute deviation reconstructed onto it by
+k = 40 smooth global modes. The same mechanism as H15's short-ℓ remainder
+and H5b's J3.
+
+The plane has the same signature, milder (depth varies smoothly):
+1–2 cm cells 2.6× (ROM elasticity 2.67 vs MC 1.02), 2–5 cm 2.1×, 5–10 cm
+1.18× (0.80 vs 0.66), 10–20 cm 1.31× (0.63 vs 0.53).
+
+## 2. Why the planned sweep would not have helped
+
+The adv-vs-iso difference on the channel (2.93 vs 2.20 at 30 min) is the
+same thing H13-2D measured on the plane: advection reaches the
+operator-independent fixed point faster. A `c_factor` sweep moves how fast
+the band arrives at the wrong thin-cell value, not the value. An elasticity
+constant scales every class alike (H13-2D: ×0.6 takes the thalweg to 1.05
+and the flanks to 2.2) and cannot fix a ratio that varies 8× with depth.
+
+## 3. Does capture fix it?
+
+Channel, adv, elasticity 1, k = 160 (vs k = 40):
+
+| MC depth class | width ratio k = 40 → 160 | elasticity ROM k = 40 → 160 | elasticity MC |
+|---|---|---|---|
+| 3–10 mm | 8.6 → 3.9 | 4.79 → 2.19 | 0.57 |
+| 1–2 cm | 3.8 → 2.0 | 2.10 → 1.13 | 0.57 |
+| 2–5 cm | 3.5 → 2.1 | 1.63 → 1.00 | 0.44 |
+| 5–10 cm | 1.0 → 1.0 | 1.14 → 1.32 | 1.23 |
+| 10–20 cm | 1.1 → 1.3 | 0.82 → 1.08 | 0.79 |
+| > 20 cm (thalweg) | 1.75 → 2.5 | 0.63 → 0.96 | 0.40 |
+
+Capture does what it should: with 160 modes the ROM's elasticity is ≈ 1 in
+every class (the source's own assumption), the thin-cell leakage halves
+(a residual remains on the 3–10 mm films), and each class's over-width
+becomes simply 1 over the Monte Carlo's elasticity — 1/0.57 ≈ 1.75 on the
+flanks, 1/0.40 = 2.5 in the thalweg (which therefore got *wider* with more
+modes: the k = 40 thalweg value of 1.75 was capture loss masking the
+elasticity error, the plane's story again). The thalweg's 0.40 is itself
+readable: Manning in a triangular section gives `Q ∝ d^{8/3}/n`, so
+`d ∝ n^{3/8} = 0.375` — the V-channel's exponent, not the wide-sheet 0.6.
+So the right elasticity is geometry-dependent (0.6 on a sheet, 0.375 in a
+V-section), which the local cross-section's `A·R^{2/3}` scaling would
+provide; together with a depth-relative deviation variable (§4) that is
+the H16 design. Pooled: 0.946 / 2.93 → 0.906 / 2.09 at k = 160.
+
+## 4. What this means for the band
+
+In relative terms the 2D band is approximately calibrated where the flow
+is (≥ 5 cm here) and a ranking on films adjacent to deep water. That is a
+reconstruction limit of the node-based deviation (absolute depth) in a
+truncated basis. The candidate that addresses it at the root is a
+deviation in a depth-relative variable — `δ(ln d)` or `δd/d` — in which
+the Manning response is a near-uniform field that a grounded basis
+represents with its first mode and no leakage of absolute magnitude across
+a depth contrast; the fixed point becomes `(mm−1)·e` uniformly. That is a
+formulation change touching reconstruction, coupling and both ROMs: logged
+as candidate **H16**, not attempted here. Until then: `W4_BINS=1` is the
+honest way to read a 2D cell, and the USER_GUIDE says that thin cells next
+to deep water carry a ranking, not a calibrated band.
+
+## 5. Reproduction
+
+    W4_BINS=1 W4_CELLS=channel-mann-comono OPENSWMM_2D_BACKEND=cpu \
+        build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
+    W4_BINS=1 W4_MODES=160 ...        # capture check
+    W4_BINS=1 W4_CELLS=plane-mann-comono W4_SWEEP="1.0:1" ...
+
 # H13 (2D half) — the 2D band's 1.3× is elasticity × basis capture; a dial, not a default (2026-10-07)
 
 **Branch** `hsym2/h13-2d-elasticity` (stacked on H14b). The 1D half closed
@@ -924,11 +1020,13 @@ median-width gate would have called calibrated — the C2 trap.
 | 1.0 | 0.946 / 2.933 | 0.910 / 2.668 |
 | 0.6 | 0.873 / 1.760 | 0.831 / 1.601 |
 
-With capture ≈ 0.8 the channel's implied MC elasticity is about 0.27, not
-0.6: on a laterally converging surface the steady depth responds to n far
-less than the sheet-flow law says (the thalweg's flow is set by the whole
-catchment, the flanks are thin films). A single constant cannot serve both
-surfaces; this is W4b's calibration problem, now with a measured target.
+With capture ≈ 0.8 the channel's implied MC elasticity *from the pooled
+median* is about 0.27. **Corrected by W4b (2026-10-09, section above)**:
+binned by depth the MC's elasticity is 0.4–0.6 in every class; the pooled
+number was the ROM's thin-cell over-width (modal leakage from the
+thalweg) read backwards as physics. A single constant still cannot serve
+the channel, but for a different reason: the error is a reconstruction
+limit, not an elasticity.
 
 ## 4. What ships
 
