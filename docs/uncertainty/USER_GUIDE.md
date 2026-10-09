@@ -736,8 +736,13 @@ physical band is 1/0.6 = 1.67× too wide — but the retained eigenmodes capture
 depth field at the default mode count, and the two cancel to the measured 1.32 (member coverage
 0.82). `MANNING_ELASTICITY 0.6` is the physical value; at the default modes it drops coverage to
 0.65 (the capture loss is no longer hidden), and only with `MODES` ≈ 5 % of cells does it give a
-calibrated band (0.80 / 0.91 measured). On a converging channel the effective elasticity is ~0.27,
-so the constant is surface-dependent. The default stays 1.0 until that is calibrated (W4b).
+calibrated band (0.80 / 0.91 measured). On a converging channel the pooled number
+looked like an elasticity of ~0.27; binned by depth (W4b) the Monte Carlo's elasticity is 0.4–0.6
+everywhere and the excess is the ROM's: thin cells next to deep water inherit their neighbour's
+absolute deviation through the truncated basis (an 8× over-width on 3–10 mm films beside a 40 cm
+thalweg, 1.75× in the thalweg itself). **Read 2D bands as calibrated where the water is deep
+relative to its surroundings, and as a ranking on films adjacent to deep water.** The default
+stays 1.0.
 
 **How `MANNINGS_CORR_LEN` is integrated (H15, 2026-10-07).** A spatial Manning field cannot
 ride one shared reduced operator, so the router assembles one reduced operator per member

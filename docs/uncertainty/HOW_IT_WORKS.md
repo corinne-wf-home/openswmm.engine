@@ -602,8 +602,14 @@ is 1.67× the physical band; the retained eigenmodes capture only ~0.8 of
 the depth field at the default mode count, and the product is the measured
 1.32. `MANNING_ELASTICITY 0.6` removes the first error but exposes the
 second unless `MODES` is raised to a few percent of the cells. On a
-converging channel the measured elasticity is ~0.27, so one constant does
-not serve every surface. The default stays 1.0, documented as what it is.
+converging channel the pooled numbers suggested a different elasticity;
+binned by depth (W4b) the Monte Carlo's elasticity is Manning's 0.4–0.6 in
+every class, and what is wrong is the reconstruction: a 2 cm film next to a
+40 cm thalweg is handed a share of the thalweg's absolute deviation by the
+smooth global modes, several times its own depth. The deviation lives in
+absolute depth; a depth-relative deviation (`δ ln d`) would not leak
+magnitude across a depth contrast — candidate H16. The default stays 1.0,
+documented as what it is.
 
 > **Historical note**: an earlier version of this section also warned that
 > the band reflected uncertainty "since the last recalibration" — the ROM
