@@ -969,12 +969,46 @@ surcharged pool) was already root-caused to basis truncation on a 5-node
 fixture with no production analogue, lower priority than the 2D case W4b
 measured on a 3,200-triangle mesh.
 
-## 5. Reproduction
+## 5. Review re-check (2026-10-10): the 30-minute numbers are at the fixed point, not mid-transient
+
+A review concern on the first write-up: relative mode moves the whole
+Manning source onto the constant field, which the grounded basis carries in
+its *slowest* mode, so the 30-minute window might be reporting a band still
+converging. Re-measured at a 180-minute window (scored over the last 10
+minutes, `W4_REPORTS=180 W4_SCORE_FROM=170`):
+
+| Cell (relative mode, adv) | 30 min | 180 min |
+|---|---|---|
+| plane, e = 1.0 | 0.852 / 1.32 | 0.858 / 1.355 |
+| plane, e = 0.8 | — | 0.800 / 1.084 |
+| plane, e = 0.6 | — | 0.666 / 0.813 |
+| channel, e = 1.0 | 0.855 / 1.62 | 0.857 / 1.664 |
+| channel, e = 0.8 (calibrated point) | **0.809 / 1.30** | **0.811 / 1.331** |
+
+Growth of 2–3 % in width over six times the window: the 30-minute figures
+were already at the fixed point, and the e = 0.8 channel calibration stands
+(CALIBRATED under C1/C2 at both windows). The per-bin picture at 180 min is
+the same as §2: ROM elasticity 0.85/0.93/0.94/0.94/0.84/0.76 across the six
+depth classes at e = 1.0, and the 5–10 cm bin remains the one outlier
+(MC elasticity 1.23, coverage 0.62 at e = 1.0, 0.51 at e = 0.8 — n = 1,266,
+the transition zone between flank and thalweg; still not chased).
+
+**H15's short-ℓ remainder does NOT close under relative mode** (the
+"same mechanism" hypothesis from the W4b write-up was tested and fails):
+`plane-mann-corr20` per-member M_i goes 0.801 / 0.92 (absolute) → **0.769 /
+0.829** (relative), i.e. slightly *narrower*; `plane-mann-corr100` 0.844 /
+1.32 → 0.857 / 1.278, unchanged within noise. A 20 m correlated field on a
+5 m mesh is a capture problem (k = 40 modes cannot represent it), not a
+leakage problem — W3's "k is a capture dial" reading holds, and the ~8 %
+narrowness stays with H15 as an open mode-count question.
+
+## 6. Reproduction
 
     ctest --test-dir build/<dir> -R 'test_engine_2d_spectral_rom|test_engine_2d_rom_input_parser|test_engine_2d_rom_router_operator'
     W4_BINS=1 W4_RELATIVE=1 W4_CELLS=channel-mann-comono OPENSWMM_2D_BACKEND=cpu \
         build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
     W4_RELATIVE=1 W4_CELLS=channel-mann-comono W4_ELASTICITY=0.8 ...   # the calibrated point
+    W4_RELATIVE=1 W4_REPORTS=180 W4_SCORE_FROM=170 ...                 # the §5 window check
 
 # W4b — the channel's 2.9× is modal leakage onto thin cells, not an advection or elasticity constant (2026-10-09)
 
@@ -1590,13 +1624,11 @@ surcharge over-prediction (H5) does not explain them.
 - H5's and H11's gates are *not* affected: H5's 0.990 / 1.031 come from its own
   dedicated surcharged-chain fixture, and H11 built its own front-passage
   fixture. Neither measured on Bellinge. (Checked 2026-10-02.)
-- The **P4 per-cell Bellinge table below is almost certainly truncated too**:
-  its EXPLICIT/off cell reports max ratio 0.0068, the same value the truncated
-  baseline gave. It was produced by a scratch harness copying this test's
-  methodology and was not re-run. Its *structural* conclusion (all four
-  solver-mode cells behave consistently) is not in doubt, since that rests on
-  the gated `test_rom_solver_mode_compat`, but its magnitudes should be treated
-  as pre-storm numbers until re-run on the full window.
+- The P4 per-cell Bellinge table **was** truncated too (its EXPLICIT/off cell
+  reported max ratio 0.0068, the truncated baseline's value). **Re-run
+  2026-10-10 on the full 24 h window** — see the full-window table in the P4
+  section; the structural conclusion (four cells consistent) holds and the
+  magnitudes are now the complete-storm ones.
 
 **Reproduction.** The test needs the model and rainfall record, which live
 outside the repository and not in the same directory. Set
@@ -1668,6 +1700,30 @@ All four cells clear the checklist's coverage ≥ 0.95 floor; width ratios stay
 in the same small, bounded range as the EXPLICIT/off baseline (Bellinge is a
 flat, wide network — see the main Bellinge section for why absolute ratios
 are small here relative to the Phase-9 chain).
+
+**Full-window re-run (2026-10-10, P6 follow-up).** The table above was
+produced on the truncated window P6 found (it stops before the storm). The
+Bellinge test now takes `P4_NODE_CONTINUITY=EXPLICIT|SEMI_IMPLICIT` and
+`P4_ANDERSON=0|1`, injected inside the real `[OPTIONS]` block and read back
+from the parsed context (`CELL: node_continuity=… anderson=…`) so a silently
+no-op'd option cannot masquerade as a cell. Release build, 24.00 h reached in
+every cell, engine state as of H16 (H14 directional operator on, H5b):
+
+| NODE_CONTINUITY | Anderson | steps | nonzero-spread | band/abs head p50 / p99 / max | band/local depth p50 / p90 / p99 / max |
+|---|---|---|---|---|---|
+| EXPLICIT | off | 65,589 | 0.987 | 0.0005 / 0.0227 / 0.268 | 0.316 / 2.07 / 4.98 / 44.5 |
+| EXPLICIT | on | 65,618 | 0.983 | 0.0005 / 0.0204 / 0.266 | 0.306 / 2.04 / 4.82 / 42.7 |
+| SEMI_IMPLICIT | off | 65,051 | 0.991 | 0.0004 / 0.0164 / 0.255 | 0.259 / 1.87 / 4.39 / 18.7 |
+| SEMI_IMPLICIT | on | 64,930 | 0.991 | 0.0005 / 0.0156 / 0.258 | 0.277 / 1.87 / 4.31 / 30.3 |
+
+Reading: the four cells agree to within ~20 % on every percentile — the
+structural conclusion survives the full storm. The one real difference is
+the tail: SEMI_IMPLICIT's unified continuity shrinks the worst band/depth
+(44.5 → 18.7 off, 30.3 with Anderson), consistent with H5's finding that EXPLICIT's discrete
+surcharge branch produces the steeper, less regular response at pool
+nodes. Absolute-head ratios ~40× the truncated values, exactly as P6
+predicted. All four pass the P6 locks (band/depth p50 ∈ [0.02, 0.5],
+max band/head ≤ 0.5). Still a regression lock, not MC validation.
 
 ## 3. Findings and scope
 
