@@ -166,7 +166,8 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsReducedOperatorDials) {
         "C_FACTOR        1.2\n"
         "GROUND_SCALE    0.4\n"
         "MANNING_ELASTICITY 0.6\n"
-        "DIFFUSIVITY_SCALE  2.5\n";
+        "DIFFUSIVITY_SCALE  2.5\n"
+        "RELATIVE_DEVIATION YES\n";
 
     std::string err;
     auto eng = parseOnly(dir, "rom_dials", extra, &err);
@@ -181,9 +182,26 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsReducedOperatorDials) {
     EXPECT_DOUBLE_EQ(o.rom_ground_scale, 0.4);
     EXPECT_DOUBLE_EQ(o.rom_manning_elasticity, 0.6);   // H13 (2D)
     EXPECT_DOUBLE_EQ(o.rom_diffusivity_scale, 2.5);
+    EXPECT_TRUE(o.rom_relative_deviation);             // H16
 
     swmm_engine_close(eng);
     swmm_engine_destroy(eng);
+}
+
+TEST(SurfaceROMInputParser, TwoDRomRelativeDeviationDefaultsOff) {
+    // H16 ships OFF by default: every pre-H16 number (W3's own gate among
+    // them) must stay bit-identical unless a caller opts in.
+    const openswmm::twoD::SolverOptions2D defaults;
+    EXPECT_FALSE(defaults.rom_relative_deviation);
+}
+
+TEST(SurfaceROMInputParser, TwoDRomRelativeDeviationRejectsBadValue) {
+    const fs::path dir = fs::current_path() / "rom_input_parser_out";
+    fs::create_directories(dir);
+    std::string err;
+    auto eng = parseOnly(dir, "rom_relative_bad", "\n[2D_ROM]\nENABLE YES\nRELATIVE_DEVIATION MAYBE\n", &err);
+    EXPECT_EQ(eng, nullptr);
+    EXPECT_NE(err.find("RELATIVE_DEVIATION"), std::string::npos) << err;
 }
 
 TEST(SurfaceROMInputParser, TwoDRomElasticityDefaultsAreTheW3Calibration) {

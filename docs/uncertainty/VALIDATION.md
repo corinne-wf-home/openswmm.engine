@@ -866,6 +866,116 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# H16 — relative-deviation reconstruction removes the cross-depth leakage W4b found (2026-10-10)
+
+**Branch** `hsym2/h16-depth-relative-deviation` (stacked on W4b). The fix
+candidate W4b's root-cause analysis named: a thin cell beside deep water no
+longer inherits the deep cell's absolute-magnitude deviation through the
+truncated basis.
+
+## 1. The change
+
+`SpectralROM::relative_deviation` (default **false**, bit-identical to
+every prior PR when unset). When true:
+
+- The Manning-sensitivity source projected into `b_coarse` is the CONSTANT
+  field (all ones), not `h_det`. A spatially uniform target is captured
+  almost exactly by any retained mode on a grounded basis, regardless of
+  how sharply `h_det` itself varies — unlike `h_det`, which on the W4
+  channel varies 40×.
+- Every place a member's absolute depth is reconstructed from `δa` (both
+  `computeQuantiles()` paths — naive and the H4 GEMM path — and
+  `applyCouplingFlux()`) becomes `h_i = h_det · (1 + Σ_j P[j,t]·δa_{i,j})`:
+  a LOCAL FRACTION of `h_det`, not an added constant.
+- `manning_elasticity` (H13) keeps its exact meaning: the frozen-source
+  fixed point is `δa* = (mm−1)·manning_elasticity·(Pᵀ𝟙)[j]`, reconstructing
+  to `h_i(t) ≈ h_det(t)·(1 + (mm_i−1)·manning_elasticity)` — the SAME
+  uniform relative perturbation at every cell, deep or shallow.
+
+A secondary idea was tried and dropped first: depth-weighting the
+EIGENBASIS itself (the existing, unused-in-production `buildDepthWeighted`)
+rather than the state variable. On the channel mesh the depth-weighted
+Lanczos solve failed outright (silent fallback to the plain geometric
+basis — confirmed, not assumed, via the return code). Not pursued further:
+even had it converged, it changes which modes exist, not what units the
+reconstructed deviation carries, so it would mitigate rather than remove
+the mechanism W4b measured.
+
+## 2. Validation: the W4 depth-binned harness, before/after (`W4_RELATIVE=1`)
+
+**Channel, adv rung, `manning_elasticity = 1.0` (unchanged):**
+
+| MC depth class | width ratio before → after | elasticity ROM before → after | elasticity MC |
+|---|---|---|---|
+| 3–10 mm | 8.6 → **0.86** | 4.79 → **0.86** | 0.57 |
+| 1–2 cm | 3.8 → **0.93** | 2.10 → **0.93** | 0.57 |
+| 2–5 cm | 3.5 → **0.93** | 1.63 → **0.93** | 0.44 |
+| 5–10 cm | 1.0 → **0.64** | 1.14 → **0.90** | 1.23 |
+| 10–20 cm | 1.1 → **0.98** | 0.82 → **0.79** | 0.79 |
+| > 20 cm (thalweg) | 1.75 → **1.85** | 0.63 → **0.72** | 0.40 |
+| pooled | 0.946 / 2.933 | → **0.855 / 1.620** | — |
+
+This is the core result: the ROM's own elasticity collapses from a
+0.63–4.79 range (a 7.6× spread, the leakage signature) to **0.64–0.93** —
+tight, and close to `manning_elasticity`'s value of 1.0, exactly as the
+fixed-point formula in §1 predicts. No per-surface tuning was applied yet;
+this is the mechanism working, nothing more.
+
+**Plane, adv rung (the already-good W3 cell) — regression check:**
+`manning_elasticity = 1.0`: 0.822/1.321 (before, absolute) → **0.852/1.323**
+(after, relative) — unchanged within noise. The plane's depth contrast is
+mild (a smooth kinematic profile, not a 40× step), so absolute and relative
+reconstruction nearly coincide there; this is the expected limit, not a
+coincidence, and is the honest regression test for "did this break the one
+cell that was already fine."
+
+## 3. Recalibrating `manning_elasticity` under relative mode
+
+With the leakage confound removed, a single elasticity constant now
+produces a genuinely interpretable number per surface (sweep, adv rung):
+
+| elasticity | plane | channel |
+|---|---|---|
+| 1.0 | 0.852 / 1.323 | 0.855 / 1.620 (conservative) |
+| 0.8 | — | **0.809 / 1.296 (calibrated)** |
+| 0.7 | 0.733 / 0.926 | 0.775 / 1.134 |
+| 0.6 | 0.651 / 0.794 | 0.729 / 0.972 |
+| 0.5 | 0.548 / 0.661 | 0.668 / 0.810 |
+
+The plane wants `e` near 1.0; the channel wants `e` near 0.8. This is the
+SAME geometry-dependent-elasticity residual H13-2D and W4b already
+documented (sheet-flow 0.6, V-section 3/8 ≈ 0.375, by Manning's own
+exponents for the two cross-section families) — relative_deviation does
+not resolve that part, and was never meant to: it removes the reconstruction
+artefact that made the channel's per-bin numbers UNREADABLE as physics
+(W4b's whole point), leaving a smaller, already-understood, geometry-
+dependent calibration gap. The 5–10 cm bin stays the outlier at every `e`
+(small sample, n≈1260, likely a transition-zone effect between regimes);
+not chased further here.
+
+## 4. What ships, what does not
+
+`relative_deviation` ships as an opt-in option (`[2D_ROM] RELATIVE_DEVIATION
+YES`, default NO) — new capability, zero change to any existing number
+unless a caller opts in. `manning_elasticity`'s default is untouched (H13's
+call stands). Not validated in combination with `spatial_mannings` (H15's
+per-member operators), a non-shared reduced operator, H7's two-family soft
+forcing, or 1D coupling via `applyCouplingFlux`'s `rom1d` argument — the
+option composes with the code paths this session actually measured
+(shared-operator advance, both quantile paths, the coupling flux's own
+depth reconstruction) and is undocumented, not refused, elsewhere. The 1D
+ROM does not get this option: H5b's analogous case (J3, directly above the
+surcharged pool) was already root-caused to basis truncation on a 5-node
+fixture with no production analogue, lower priority than the 2D case W4b
+measured on a 3,200-triangle mesh.
+
+## 5. Reproduction
+
+    ctest --test-dir build/<dir> -R 'test_engine_2d_spectral_rom|test_engine_2d_rom_input_parser|test_engine_2d_rom_router_operator'
+    W4_BINS=1 W4_RELATIVE=1 W4_CELLS=channel-mann-comono OPENSWMM_2D_BACKEND=cpu \
+        build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
+    W4_RELATIVE=1 W4_CELLS=channel-mann-comono W4_ELASTICITY=0.8 ...   # the calibrated point
+
 # W4b — the channel's 2.9× is modal leakage onto thin cells, not an advection or elasticity constant (2026-10-09)
 
 **Branch** `hsym2/w4b-channel-calibration` (stacked on H13-2D). The plan
@@ -951,9 +1061,16 @@ the Manning response is a near-uniform field that a grounded basis
 represents with its first mode and no leakage of absolute magnitude across
 a depth contrast; the fixed point becomes `(mm−1)·e` uniformly. That is a
 formulation change touching reconstruction, coupling and both ROMs: logged
-as candidate **H16**, not attempted here. Until then: `W4_BINS=1` is the
-honest way to read a 2D cell, and the USER_GUIDE says that thin cells next
-to deep water carry a ranking, not a calibrated band.
+as candidate **H16**.
+
+**Closed the next day — see "H16" above.** The reconstruction changed
+from an added constant to a local fraction of `h_det`; the ROM's own
+per-bin elasticity went from a 0.63–4.79 range to 0.64–0.93, and a single
+elasticity constant now gets the channel to calibrated (0.8 → 0.809/1.296).
+`W4_BINS=1` remains the honest way to read a 2D cell, and the per-surface
+elasticity gap (plane wants ≈1.0, channel ≈0.8) is now a measured,
+geometry-dependent calibration question, not an unreadable leakage
+artefact.
 
 ## 5. Reproduction
 

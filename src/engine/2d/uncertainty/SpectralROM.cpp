@@ -365,13 +365,23 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
     }
 
     // ---- Step 2: Project rainfall and deterministic depth into coarse space -
+    // PR H16: in relative mode the Manning-sensitivity reference is the
+    // CONSTANT field, not h_det, so b_coarse carries no absolute-depth
+    // magnitude for the reconstruction step to leak across a depth contrast
+    // (see relative_deviation's doc comment). Everything else below is
+    // identical; b_coarse is used the same way either way.
     const double* loc_field = soft_loc_field_ ? soft_loc_field_ : rainfall;
     std::fill(r_coarse.begin(), r_coarse.end(), 0.0);
     for (std::size_t j = 0; j < nk; ++j) {
         const double* Pj = &basis->P[j * nt];
         double dot_b = 0.0;
-        for (std::size_t t = 0; t < nt; ++t)
-            dot_b += Pj[t] * h_det[t];
+        if (relative_deviation) {
+            for (std::size_t t = 0; t < nt; ++t)
+                dot_b += Pj[t];                 // Σ_t P[j,t]·1
+        } else {
+            for (std::size_t t = 0; t < nt; ++t)
+                dot_b += Pj[t] * h_det[t];
+        }
         b_coarse[j] = dot_b;
         if (loc_field) {
             double dot_r = 0.0;
@@ -893,14 +903,19 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
     if (rom_quantile_naive) {
         for (std::size_t t = 0; t < nt; ++t) {
             const double h_det_t = h_det[t];
-            // Reconstruct depth at cell t for all members: h_det + P·δa, floored at 0.
+            // Reconstruct depth at cell t for all members. Absolute mode:
+            // h_det + P·δa. PR H16 relative mode: h_det·(1 + P·δa) — the
+            // modal sum is a LOCAL FRACTION of h_det, not an added constant
+            // (see relative_deviation's doc comment). Both floored at 0.
             for (int i = 0; i < n_ensemble; ++i) {
                 const double* ai = &a_ensemble[static_cast<std::size_t>(i) * nk];
-                double h = h_det_t;
+                double delta = 0.0;
                 for (std::size_t j = 0; j < nk; ++j) {
                     if (!mode_active[j]) continue;
-                    h += basis->P[j * nt + t] * ai[j];
+                    delta += basis->P[j * nt + t] * ai[j];
                 }
+                const double h = relative_deviation ? h_det_t * (1.0 + delta)
+                                                     : h_det_t + delta;
                 sort_buf_[static_cast<std::size_t>(i)] = std::max(h, 0.0);
             }
 
@@ -933,8 +948,17 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
     for (std::size_t t = 0; t < nt; ++t) {
         double* row = &recon_buf_[t * M_sz];
         const double h_det_t = h_det[t];
-        for (std::size_t i = 0; i < M_sz; ++i)
-            row[i] = std::max(h_det_t + row[i], 0.0);
+        // PR H16: recon_buf_ holds the raw modal sum Σ_j P[j,t]·a[i,j]
+        // either way; relative mode treats it as a local fraction of h_det
+        // rather than an added constant (see relative_deviation's doc
+        // comment and the naive loop above, which this must match exactly).
+        if (relative_deviation) {
+            for (std::size_t i = 0; i < M_sz; ++i)
+                row[i] = std::max(h_det_t * (1.0 + row[i]), 0.0);
+        } else {
+            for (std::size_t i = 0; i < M_sz; ++i)
+                row[i] = std::max(h_det_t + row[i], 0.0);
+        }
 
         // Three independent std::nth_element selections instead of a full
         // sort: no downstream consumer needs the whole row in sorted order
@@ -1032,10 +1056,14 @@ void SpectralROM::applyCouplingFlux(
                               ? rom1d->reconstructHead(i, active_1d_idx)
                               : node_heads[cp.node_idx];
 
-            // Reconstruct per-member depth at the coupling cell: h_det + P·δa.
-            double h_2d = h_2d_det;
+            // Reconstruct per-member depth at the coupling cell. PR H16:
+            // relative_deviation makes this a local fraction of h_2d_det
+            // rather than an added constant, matching computeQuantiles().
+            double delta_2d = 0.0;
             for (std::size_t j = 0; j < nk; ++j)
-                h_2d += basis->P[j * nt + ci] * ai[j];
+                delta_2d += basis->P[j * nt + ci] * ai[j];
+            double h_2d = relative_deviation ? h_2d_det * (1.0 + delta_2d)
+                                              : h_2d_det + delta_2d;
             h_2d = std::max(h_2d, 0.0);
 
             const double Q = orifice_Q(h_2d, h_1d_abs, cd_mult[ui]);

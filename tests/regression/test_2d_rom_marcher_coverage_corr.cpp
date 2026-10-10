@@ -326,6 +326,9 @@ struct RomInputs {
     // diffusivity scale handed to the operator (sweep knobs).
     double elasticity = [](){ const char* v = std::getenv("W4_ELASTICITY"); return v ? std::atof(v) : 1.0; }();
     double d_mult = 1.0;
+    // H16: reconstruct depth deviations as a local fraction of h_det instead
+    // of an absolute delta (see SpectralROM::relative_deviation).
+    bool relative = [](){ const char* v = std::getenv("W4_RELATIVE"); return v && std::atoi(v) != 0; }();
     // Comonotone Manning multipliers (length M) or empty for "ones".
     std::vector<double> mann_mult;
     // Correlated Manning multiplier field (M × n). Without `per_member` the
@@ -375,6 +378,7 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
     rom.initialize();
     rom.seed(h0.data());
     rom.manning_elasticity = in.elasticity;
+    rom.relative_deviation = in.relative;
     if (in.mann_field) rom.spatial_mannings = *in.mann_field;
 
     RomBands out;
@@ -796,7 +800,7 @@ TEST(Rom2dMarcherCoverageCorr, CorrelatedFieldsAndSecondSurface) {
         }
     }
 
-    if (cellEnabled("channel-mann-comono") || cellEnabled("channel-rain-corr20")) {
+    if (cellEnabled("channel-mann-comono") || cellEnabled("channel-rain-corr20") || cellEnabled("channel-mann-dw")) {
         Fixture fc = makeFixture(channel);
         std::printf("[W4 fixture] channel : thalweg T=%.3f, nominal window drift max|dh|=%.2e m, "
                     "max depth %.3f m\n", gThalweg, fc.steadiness,
@@ -824,6 +828,45 @@ TEST(Rom2dMarcherCoverageCorr, CorrelatedFieldsAndSecondSurface) {
                                        rg == Rung::ANISO_ADV ? "W4 follow-up" : "reference rung, ungated");
                 EXPECT_GT(s.samples, 0);
             }
+        }
+
+        // H16 probe: does depth-weighting the BASIS (not just the operator,
+        // which already gets h_cell at assembly) reduce thin-cell leakage?
+        // buildDepthWeighted was deliberately kept off the production rung
+        // (router comment: "would silently leave the calibrated
+        // configuration") -- before anyone had diagnosed WHY depth contrast
+        // mattered. Cheap to test since the machinery already exists.
+        if (cellEnabled("channel-mann-dw")) {
+            const auto mult = comonotoneMultipliers(gM);
+            std::vector<std::vector<double>> nf(static_cast<std::size_t>(gM),
+                std::vector<double>(static_cast<std::size_t>(fc.mesh.n_triangles())));
+            for (int i = 0; i < gM; ++i)
+                std::fill(nf[static_cast<std::size_t>(i)].begin(), nf[static_cast<std::size_t>(i)].end(),
+                          kBaseN * mult[static_cast<std::size_t>(i)]);
+            const MC mc = runMC(channel, nf, {});
+            MeshEigenBasis dw;
+            double h_sum = 0.0;
+            const int nt = fc.mesh.n_triangles();
+            for (int t = 0; t < nt; ++t) h_sum += std::max(fc.hdet.front()[static_cast<std::size_t>(t)], 0.0);
+            const double h_mean = h_sum / nt;
+            std::vector<double> d_cell(static_cast<std::size_t>(nt), 1.0);
+            if (h_mean > 1e-9) {
+                const double inv53 = 1.0 / std::pow(h_mean, 5.0 / 3.0);
+                for (int t = 0; t < nt; ++t)
+                    d_cell[static_cast<std::size_t>(t)] =
+                        std::pow(std::max(fc.hdet.front()[static_cast<std::size_t>(t)], 0.0), 5.0 / 3.0) * inv53;
+            }
+            const bool dw_ok = dw.buildDepthWeighted(fc.mesh, kModes, d_cell.data(), fc.gw.data());
+            std::printf("[H16 probe] channel depth-weighted basis build: %s (depth_weighted=%d)\n",
+                        dw_ok ? "ok" : "FAILED (fell back to geometric)", dw.depth_weighted ? 1 : 0);
+            RomInputs in;
+            in.mann_mult = mult;
+            RomBands b = runRomRung(Rung::ANISO_ADV, fc.mesh, dw_ok ? dw : fc.grounded, fc.gw, in, fc.hdet, fc.h0, nullptr);
+            ASSERT_TRUE(b.ok);
+            const Score s = scoreBands(b, fc.mesh, mc);
+            printScore("channel-mann-dw", "adv/dw-basis", s, b);
+            mcq::reportCalibration("channel-mann-dw (depth-weighted basis)", s.member_cov, s.ratio_med, "H16 probe");
+            EXPECT_GT(s.samples, 0);
         }
 
         if (cellEnabled("channel-rain-corr20")) {

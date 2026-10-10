@@ -95,6 +95,47 @@ struct SpectralROM {
     /// alpha_free (PR H5b). 1.0 reproduces the pre-H13 band bit-for-bit.
     double manning_elasticity = 1.0;
 
+    /**
+     * @brief H16 — reconstruct depth deviations as a LOCAL FRACTION of h_det
+     *        instead of an absolute delta (default false: unchanged, bit-
+     *        identical pre-H16 behaviour).
+     *
+     * W4b measured that the absolute-delta reconstruction `h_i = h_det +
+     * P·δa` lets a cell's band inherit a neighbour's deviation in raw units:
+     * on a channel with a 40 cm thalweg next to 1 cm flanks, a flank cell's
+     * reconstructed band ran up to 8× its own true Monte Carlo spread,
+     * because the handful of retained modes cannot resolve a 40× depth
+     * contrast, and whatever magnitude leaks through is applied in
+     * centimetres regardless of which cell it lands on.
+     *
+     * When true: (1) the Manning-sensitivity source projected into b_coarse
+     * is the CONSTANT field (all ones), not h_det — a spatially uniform
+     * target that any basis with ≥1 retained mode represents almost
+     * exactly, instead of the sharply-varying h_det a truncated basis
+     * cannot; (2) every place a member's absolute depth is reconstructed
+     * from δa (both computeQuantiles() paths, applyCouplingFlux()) becomes
+     * `h_i = h_det · (1 + Σ_j P[j,t]·δa_{i,j})` — a LOCAL FRACTION of h_det,
+     * not an added constant. The fixed point for a frozen source is then
+     * δa* = (mm−1)·manning_elasticity·(Pᵀ𝟙)[j], which reconstructs to
+     * `h_i(t) ≈ h_det(t)·(1 + (mm_i−1)·manning_elasticity)` everywhere —
+     * the SAME uniform relative perturbation at every cell, deep or
+     * shallow, with no cross-depth leakage (confirmed in
+     * VALIDATION.md "H16" against the W4 channel/plane harness).
+     *
+     * `manning_elasticity` keeps its existing meaning (H13): it is the e in
+     * the fixed point above either way. The forcing-sensitivity channel
+     * (rainfall/soft-rain, `r_coarse`) is untouched — this only changes the
+     * Manning channel's reference field and the reconstruction step.
+     *
+     * Not yet validated together with `spatial_mannings` (H15 per-member
+     * operators) or a reduced operator other than the shared diagonal/
+     * isotropic path; combine with those only after measuring. The 1D ROM
+     * does not have this option — its depth-contrast case (H5b's J3) was
+     * judged basis truncation on a 5-node fixture with no production
+     * analogue, lower priority than the 2D case W4b measured.
+     */
+    bool relative_deviation = false;
+
     // -------------------------------------------------------------------------
     // PR H4 — quantile-reconstruction GEMM. Debug/equivalence-testing knob:
     // when true, computeQuantiles() uses the original hand-rolled per-cell

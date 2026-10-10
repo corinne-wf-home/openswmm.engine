@@ -1587,6 +1587,194 @@ double maxSpread2D(const SpectralROM& rom) {
 
 // pert=0 → deviations identically zero → q05==q50==q95==h_det to 1e-12, for
 // arbitrary time-varying reference/forcing.  Impossible under the total-head form.
+// ============================================================================
+// PR H16 — relative_deviation (reconstruct as a local fraction of h_det)
+// ============================================================================
+
+namespace {
+
+// Grounds the j=0 column of an N×N structured mesh (built the same way
+// makeStructuredMesh above does: triangle 2*(i*N+j) is cell (i,j)'s first
+// triangle). Without grounding the geometric Laplacian's constant mode is
+// an EXACT null eigenvector and gets filtered out entirely (the project's
+// own recurring lesson: a uniform field projects to zero on an ungrounded
+// basis). H16's relative-deviation premise -- "a uniform fractional
+// perturbation rides the retained low mode" -- is only physically
+// meaningful on a grounded domain in the first place (an ungrounded one has
+// no anchor fixing what a uniform depth shift even means), so these tests
+// ground it, same convention as the production W3/W4 harnesses.
+std::vector<double> groundLeftEdge(int N, double scale = 1.0) {
+    std::vector<double> gw(static_cast<std::size_t>(2 * N * N), 0.0);
+    for (int i = 0; i < N; ++i)
+        gw[static_cast<std::size_t>(2 * (i * N + 0))] = scale;   // j = 0 column, first tri of each cell
+    return gw;
+}
+
+struct GroundedFixture {
+    MeshData       mesh;
+    MeshEigenBasis basis;
+    SpectralROM    rom;
+
+    explicit GroundedFixture(int N, int k, int M, double m_pert) {
+        mesh = makeStructuredMesh(N);
+        auto gw = groundLeftEdge(N, 0.3);
+        EXPECT_TRUE(basis.build(mesh, k, gw.data()));
+        EXPECT_GT(basis.num_kept, 0);
+        rom.basis         = &basis;
+        rom.n_ensemble    = M;
+        rom.mannings_pert = m_pert;
+        rom.rainfall_pert = 0.0;
+        rom.initialize();
+    }
+};
+
+} // namespace
+
+TEST(RelativeDeviation2D, DefaultOffIsBitIdenticalToPreH16) {
+    // relative_deviation defaults false; leaving it unset must be byte-for-
+    // byte identical to never having added the option.
+    GroundedFixture a(5, 6, 12, 0.20), b(5, 6, 12, 0.20);
+    int nt = a.rom.n_tri;
+    auto h_det = bumpRef(a.basis, nt, 0.5);
+    a.rom.seed(h_det.data());
+    b.rom.seed(h_det.data());
+    b.rom.relative_deviation = false;   // explicit, should match the default
+    for (int step = 0; step < 20; ++step) {
+        a.rom.advance(20.0, 4.0, nullptr, nullptr, h_det.data());
+        b.rom.advance(20.0, 4.0, nullptr, nullptr, h_det.data());
+    }
+    ASSERT_EQ(a.rom.a_ensemble.size(), b.rom.a_ensemble.size());
+    for (std::size_t i = 0; i < a.rom.a_ensemble.size(); ++i)
+        EXPECT_EQ(a.rom.a_ensemble[i], b.rom.a_ensemble[i]);
+    a.rom.computeQuantiles(h_det.data());
+    b.rom.computeQuantiles(h_det.data());
+    for (int t = 0; t < nt; ++t) {
+        auto ut = static_cast<std::size_t>(t);
+        EXPECT_EQ(a.rom.q05[ut], b.rom.q05[ut]);
+        EXPECT_EQ(a.rom.q50[ut], b.rom.q50[ut]);
+        EXPECT_EQ(a.rom.q95[ut], b.rom.q95[ut]);
+    }
+}
+
+TEST(RelativeDeviation2D, FrozenSourceFixedPointIsUniformRelativePerturbation) {
+    // Frozen Manning-sensitivity source (no rain), driven to the fixed
+    // point: in relative mode the reconstructed depth at every cell must
+    // converge to h_det(t)*(1 + (mm_i-1)*e), REGARDLESS of how sharply
+    // h_det varies across cells -- the whole point of H16.
+    GroundedFixture f(6, 8, 10, 0.20);
+    f.rom.relative_deviation = true;
+    f.rom.manning_elasticity = 0.7;
+    int nt = f.rom.n_tri;
+    // A genuinely sharp contrast: half the mesh at depth 0.5 m, half at 0.01 m
+    // (50x), not a smooth bump -- the exact shape W4b measured as the failure
+    // mode for the ABSOLUTE reconstruction.
+    std::vector<double> h_det(static_cast<std::size_t>(nt));
+    for (int t = 0; t < nt; ++t)
+        h_det[static_cast<std::size_t>(t)] = (t < nt / 2) ? 0.5 : 0.01;
+    f.rom.seed(h_det.data());
+    for (int step = 0; step < 400; ++step)
+        f.rom.advance(60.0, 3.0, nullptr, nullptr, h_det.data());
+    f.rom.computeQuantiles(h_det.data());
+
+    for (int i = 0; i < f.rom.n_ensemble; ++i) {
+        const double mm = f.rom.mannings_mult[static_cast<std::size_t>(i)];
+        const double expect_frac = (mm - 1.0) * f.rom.manning_elasticity;
+        for (int t = 0; t < nt; ++t) {
+            auto ut = static_cast<std::size_t>(t);
+            double delta = 0.0;
+            for (int j = 0; j < f.rom.n_kept; ++j)
+                delta += f.basis.P[static_cast<std::size_t>(j) * static_cast<std::size_t>(nt) + ut]
+                       * f.rom.a_ensemble[static_cast<std::size_t>(i) * static_cast<std::size_t>(f.rom.n_kept) + static_cast<std::size_t>(j)];
+            EXPECT_NEAR(delta, expect_frac, 0.08 * std::abs(expect_frac) + 1e-4)
+                << "member " << i << " cell " << t << " (h_det=" << h_det[ut] << ")";
+        }
+    }
+}
+
+TEST(RelativeDeviation2D, AbsoluteModeLeaksAcrossASharpContrastRelativeModeDoesNot) {
+    // The direct comparison W4b measured in miniature: on the SAME sharp
+    // depth contrast and the SAME truncated basis, absolute reconstruction
+    // puts a shallow cell's deviation at a scale set by the deep cell's
+    // absolute magnitude; relative reconstruction does not.
+    GroundedFixture fa(6, 8, 10, 0.20), fr(6, 8, 10, 0.20);
+    fr.rom.relative_deviation = true;
+    int nt = fa.rom.n_tri;
+    std::vector<double> h_det(static_cast<std::size_t>(nt));
+    for (int t = 0; t < nt; ++t)
+        h_det[static_cast<std::size_t>(t)] = (t < nt / 2) ? 0.5 : 0.01;   // 50x contrast
+    fa.rom.seed(h_det.data());
+    fr.rom.seed(h_det.data());
+    for (int step = 0; step < 400; ++step) {
+        fa.rom.advance(60.0, 3.0, nullptr, nullptr, h_det.data());
+        fr.rom.advance(60.0, 3.0, nullptr, nullptr, h_det.data());
+    }
+    fa.rom.computeQuantiles(h_det.data());
+    fr.rom.computeQuantiles(h_det.data());
+
+    // Shallow-side cell: band normalized by ITS OWN depth (the "elasticity"
+    // quantity W4b measured) must be far smaller in relative mode.
+    const int t_shallow = nt - 1;
+    const double max_dev = 0.20;   // mannings_pert
+    const double e_abs = (fa.rom.q95[static_cast<std::size_t>(t_shallow)]
+                         - fa.rom.q05[static_cast<std::size_t>(t_shallow)])
+                        / h_det[static_cast<std::size_t>(t_shallow)] / (2.0 * max_dev);
+    const double e_rel = (fr.rom.q95[static_cast<std::size_t>(t_shallow)]
+                         - fr.rom.q05[static_cast<std::size_t>(t_shallow)])
+                        / h_det[static_cast<std::size_t>(t_shallow)] / (2.0 * max_dev);
+    ASSERT_GT(e_abs, 0.0);
+    EXPECT_GT(e_abs, 2.0) << "absolute mode must show inflated shallow-cell elasticity "
+                             "on this contrast (else the test is vacuous): " << e_abs;
+    EXPECT_NEAR(e_rel, 1.0, 0.25) << "relative mode's shallow-cell elasticity must sit "
+                                     "near the source elasticity (1.0, manning_elasticity "
+                                     "default), not inherit the deep side's scale";
+    EXPECT_LT(e_rel, 0.4 * e_abs) << "relative mode must cut the leakage substantially";
+}
+
+TEST(RelativeDeviation2D, ZeroDepthCellStaysExactlyZero) {
+    // Multiplicative reconstruction cannot make a bone-dry cell "falsely
+    // wet" the way an additive leak can (h_det=0 => h_det*(1+x)=0 always).
+    GroundedFixture f(6, 8, 8, 0.20);
+    f.rom.relative_deviation = true;
+    int nt = f.rom.n_tri;
+    std::vector<double> h_det(static_cast<std::size_t>(nt));
+    for (int t = 0; t < nt; ++t) h_det[static_cast<std::size_t>(t)] = (t == 0) ? 0.0 : 0.3;
+    f.rom.seed(h_det.data());
+    for (int step = 0; step < 50; ++step)
+        f.rom.advance(30.0, 2.0, nullptr, nullptr, h_det.data());
+    f.rom.computeQuantiles(h_det.data());
+    EXPECT_EQ(f.rom.q05[0], 0.0);
+    EXPECT_EQ(f.rom.q50[0], 0.0);
+    EXPECT_EQ(f.rom.q95[0], 0.0);
+}
+
+TEST(RelativeDeviation2D, NaiveAndGemmReconstructionAgree) {
+    // Both computeQuantiles() paths implement the same multiplicative
+    // formula (see the source comments); they must still agree with each
+    // other under relative_deviation, the same guarantee H4's GEMM path
+    // already gives in absolute mode.
+    GroundedFixture fa(6, 8, 14, 0.20), fb(6, 8, 14, 0.20);
+    fa.rom.relative_deviation = fb.rom.relative_deviation = true;
+    fb.rom.rom_quantile_naive = true;
+    int nt = fa.rom.n_tri;
+    std::vector<double> h_det(static_cast<std::size_t>(nt));
+    for (int t = 0; t < nt; ++t)
+        h_det[static_cast<std::size_t>(t)] = (t < nt / 2) ? 0.4 : 0.02;
+    fa.rom.seed(h_det.data());
+    fb.rom.seed(h_det.data());
+    for (int step = 0; step < 30; ++step) {
+        fa.rom.advance(45.0, 2.5, nullptr, nullptr, h_det.data());
+        fb.rom.advance(45.0, 2.5, nullptr, nullptr, h_det.data());
+    }
+    fa.rom.computeQuantiles(h_det.data());
+    fb.rom.computeQuantiles(h_det.data());
+    for (int t = 0; t < nt; ++t) {
+        auto ut = static_cast<std::size_t>(t);
+        EXPECT_NEAR(fa.rom.q05[ut], fb.rom.q05[ut], 1e-10) << "t=" << t;
+        EXPECT_NEAR(fa.rom.q50[ut], fb.rom.q50[ut], 1e-10) << "t=" << t;
+        EXPECT_NEAR(fa.rom.q95[ut], fb.rom.q95[ut], 1e-10) << "t=" << t;
+    }
+}
+
 TEST(DeviationForm2D, ZeroPerturbationIsExact) {
     Fixture f(/*N=*/5, /*k=*/6, /*M=*/20, /*m_pert=*/0.0, /*r_pert=*/0.0);
     int nt = f.rom.n_tri;

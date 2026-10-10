@@ -348,6 +348,16 @@ struct SolverOptions2D {
      *  (measured: adv rung width 1.10 → 1.26 → 1.30 at 30/90/180 min); the
      *  elasticity and this scale are recalibrated as a pair. */
     double rom_diffusivity_scale = 1.0;
+
+    /*! H16: reconstruct depth deviations as a local fraction of h_det
+     *  (`h_i = h_det·(1 + Σ_j P[j,t]·δa_{i,j})`) instead of an added
+     *  constant. Default false reproduces every pre-H16 number bit-for-bit.
+     *  See SpectralROM::relative_deviation's doc comment and
+     *  VALIDATION.md "H16" for what this fixes (cross-depth-contrast
+     *  leakage onto thin cells) and what it does not (the elasticity dial
+     *  above is still a single global constant; VALIDATION.md "H16" has the
+     *  measured per-surface recalibration). */
+    bool rom_relative_deviation = false;
 };
 
 } // namespace openswmm::twoD

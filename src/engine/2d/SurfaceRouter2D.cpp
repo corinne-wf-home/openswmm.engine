@@ -1010,6 +1010,7 @@ void SurfaceRouter2D::initROM(SimulationContext& ctx) {
     rom->basis               = basis.get();
     rom->n_ensemble          = std::max(1, options_.rom_members);
     rom->manning_elasticity  = options_.rom_manning_elasticity;   // H13 (2D)
+    rom->relative_deviation  = options_.rom_relative_deviation;   // H16
     rom->mannings_pert       = options_.rom_mannings_pert;
     rom->rainfall_pert       = options_.rom_rainfall_pert;
     rom->cd_pert             = options_.rom_cd_pert;

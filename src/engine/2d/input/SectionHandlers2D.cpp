@@ -672,6 +672,13 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         double v = tryParseDouble(val, ok);
         if (!ok || v <= 0.0) return "DIFFUSIVITY_SCALE must be > 0";
         opts.rom_diffusivity_scale = v;
+    } else if (iequals(key, "RELATIVE_DEVIATION")) {
+        if (iequals(val, "YES") || val == "1")
+            opts.rom_relative_deviation = true;
+        else if (iequals(val, "NO") || val == "0")
+            opts.rom_relative_deviation = false;
+        else
+            return "Invalid RELATIVE_DEVIATION value (YES/NO)";
     } else if (iequals(key, "GROUND_SCALE")) {
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0) return "GROUND_SCALE must be >= 0";
