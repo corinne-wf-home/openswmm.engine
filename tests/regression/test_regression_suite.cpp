@@ -36,6 +36,7 @@
 #include <cstdlib>
 
 #include "../../include/openswmm/engine/openswmm_engine.h"
+#include "../../include/openswmm/engine/openswmm_output.h"
 #include "../../include/openswmm/legacy/engine/openswmm_solver.h"
 
 namespace fs = std::filesystem;
@@ -61,6 +62,15 @@ static std::vector<RegressionParams> LoadRegressionCases(const std::string& data
         // of link flow and 0.0195 ft of node depth, an order above the EXTRAN
         // spread, because the slot geometry amplifies small head differences.
         {"SlotSurcharge", "slot_surcharge.inp", 0.05, 0.01},
+        // PR H8: EPA Applications-Manual Examples 6-8 (public domain; the
+        // "Final" tutorial models of 6 and 7). Example6: runoff treatment --
+        // storage, orifices, weirs, pollutants, 2-day run. Example7: dual
+        // drainage with irregular (TRANSECT) channels. Example8: combined
+        // sewer -- pumps, storage, orifices, weirs, DWF. Same strict
+        // tolerances as 1-3; rule 1.2 forbids loosening them per network.
+        {"Example6", "Example6.inp", 0.001, 0.001},
+        {"Example7", "Example7.inp", 0.001, 0.001},
+        {"Example8", "Example8.inp", 0.001, 0.001},
     };
     for (const auto& c : known) {
         std::string path = data_dir + c.file;
@@ -330,5 +340,73 @@ TEST(SlotForceMain, RefactoredEngineRunsAndConservesMass) {
         << "no Conduit Surcharge Summary — the force main never filled, so the "
            "Preissmann slot was never engaged and this test proves nothing";
 }
+
+// ============================================================================
+// Self-consistency (determinism) — PR H8
+// ============================================================================
+//
+// The new engine run twice on the same model must produce bit-identical
+// report-period node depths and link flows. Any uninitialised read, data race
+// or order-dependent reduction shows up here before it shows up anywhere else.
+
+class SelfConsistencyTest : public ::testing::TestWithParam<RegressionParams> {
+protected:
+    void RunNewToOut(const std::string& inp, const std::string& out_path,
+                     std::vector<TimeStep>& out) {
+        const std::string rpt = out_path + ".rpt";
+        ASSERT_EQ(swmm_engine_run(inp.c_str(), rpt.c_str(), out_path.c_str(), nullptr), 0)
+            << "New engine run failed on " << inp;
+        SWMM_Output h = swmm_output_open(out_path.c_str());
+        ASSERT_NE(h, nullptr) << "Failed to open output: " << out_path;
+        const int n_nodes  = swmm_output_get_node_count(h);
+        const int n_links  = swmm_output_get_link_count(h);
+        const int nperiods = swmm_output_get_period_count(h);
+        std::vector<float> nbuf(static_cast<size_t>(n_nodes));
+        std::vector<float> lbuf(static_cast<size_t>(n_links));
+        const double rs_day = swmm_output_get_report_step(h) / 86400.0;
+        for (int p = 0; p < nperiods; ++p) {
+            TimeStep ts;
+            ts.time = (p + 1) * rs_day;
+            swmm_output_get_node_result(h, p, SWMM_OUT_NODE_DEPTH, nbuf.data());
+            swmm_output_get_link_result(h, p, SWMM_OUT_LINK_FLOW,  lbuf.data());
+            ts.node_depths.assign(nbuf.begin(), nbuf.end());
+            ts.link_flows.assign(lbuf.begin(), lbuf.end());
+            out.push_back(std::move(ts));
+        }
+        swmm_output_close(h);
+    }
+};
+
+TEST_P(SelfConsistencyTest, TwoRunsAreIdentical) {
+    const auto& params = GetParam();
+    if (!fs::exists(params.inp_path)) {
+        GTEST_SKIP() << "Test data not found: " << params.inp_path;
+    }
+    const auto tmp = fs::temp_directory_path();
+    std::vector<TimeStep> run1, run2;
+    RunNewToOut(params.inp_path, (tmp / "regression_sc_run1.out").string(), run1);
+    RunNewToOut(params.inp_path, (tmp / "regression_sc_run2.out").string(), run2);
+    ASSERT_EQ(run1.size(), run2.size()) << "Period counts differ between runs";
+    ASSERT_GT(run1.size(), 0u) << "No output periods produced";
+    for (size_t p = 0; p < run1.size(); ++p) {
+        ASSERT_EQ(run1[p].node_depths.size(), run2[p].node_depths.size());
+        for (size_t i = 0; i < run1[p].node_depths.size(); ++i)
+            EXPECT_EQ(run1[p].node_depths[i], run2[p].node_depths[i])
+                << "Node depth differs at period " << p << " node " << i;
+        ASSERT_EQ(run1[p].link_flows.size(), run2[p].link_flows.size());
+        for (size_t i = 0; i < run1[p].link_flows.size(); ++i)
+            EXPECT_EQ(run1[p].link_flows[i], run2[p].link_flows[i])
+                << "Link flow differs at period " << p << " link " << i;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Examples,
+    SelfConsistencyTest,
+    ::testing::ValuesIn(LoadRegressionCases("./")),
+    [](const ::testing::TestParamInfo<RegressionParams>& info) {
+        return info.param.model_name;
+    }
+);
 
 } /* anonymous namespace */
