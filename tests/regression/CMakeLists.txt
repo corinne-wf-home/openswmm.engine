@@ -47,14 +47,29 @@ set_target_properties(test_engine_regression PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-# Each reference model becomes a parameterized test case
+# Each reference model becomes a parameterized test case. The suite resolves
+# its fixtures as `data/<Example>.inp` relative to the working directory, and
+# the instantiations are named `Examples/RegressionTest.*` and
+# `Examples/SelfConsistencyTest.*`.
+#
+# PR H8 (2026-10-10): the previous registration ran from `data/` with the
+# filter `RegressionTest/RegressionTest*` -- neither matched anything, so this
+# ctest entry had executed ZERO tests (and passed) since it was written. Both
+# suites are now registered separately so a red in one is attributable.
 add_test(
-    NAME    regression_example1
+    NAME    regression_cross_engine
     COMMAND $<TARGET_FILE:test_engine_regression>
-            --gtest_filter=RegressionTest/RegressionTest*
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data
+            --gtest_filter=Examples/RegressionTest.*
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-set_tests_properties(regression_example1 PROPERTIES LABELS "regression")
+set_tests_properties(regression_cross_engine PROPERTIES LABELS "regression")
+add_test(
+    NAME    regression_determinism
+    COMMAND $<TARGET_FILE:test_engine_regression>
+            --gtest_filter=Examples/SelfConsistencyTest.*
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(regression_determinism PROPERTIES LABELS "regression")
 
 add_custom_command(TARGET test_engine_regression POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
