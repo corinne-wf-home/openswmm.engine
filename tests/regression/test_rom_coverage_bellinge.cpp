@@ -108,6 +108,25 @@ std::string bellingeWithRomSpec(double rough_mult) {
         }
     }
 
+    // P6 follow-up (the P4 per-cell table): optional solver-mode knobs,
+    // injected INSIDE the real [OPTIONS] block (P4's lesson: anchoring off a
+    // later section silently no-ops them on this real-world .inp).
+    //   P4_NODE_CONTINUITY=EXPLICIT|SEMI_IMPLICIT   P4_ANDERSON=0|1
+    {
+        std::string extra;
+        if (const char* v = std::getenv("P4_NODE_CONTINUITY"))
+            extra += std::string("NODE_CONTINUITY      ") + v + "\n";
+        if (const char* v = std::getenv("P4_ANDERSON"))
+            extra += std::string("ANDERSON_ACCEL       ") + (std::atoi(v) ? "YES" : "NO") + "\n";
+        if (!extra.empty()) {
+            size_t pos = content.find("[OPTIONS]");
+            if (pos != std::string::npos) {
+                size_t eol = content.find('\n', pos);
+                if (eol != std::string::npos) content.insert(eol + 1, extra);
+            }
+        }
+    }
+
     // Replace relative rainfall path with absolute path
     // Original: "rg_bellinge_Jun2010_Aug2021.dat"
     // Replace with: absolute path to the file
@@ -197,6 +216,11 @@ RunResult runCase(const std::string& tag, bool with_rom) {
     if (const char* v = std::getenv("H14_DIRECTIONAL"))
         eng->rom1dDirectionalConfig().enabled = std::atoi(v) != 0;
     const auto& ctx = eng->context();
+    // Read the solver mode back from the parsed context so a silently
+    // no-op'd option (P4's failure mode) is visible, not assumed.
+    std::printf("CELL: node_continuity=%d anderson=%d\n",
+                static_cast<int>(ctx.options.node_continuity),
+                static_cast<int>(ctx.options.anderson_accel));
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());
 
     // Map all junctions (only measure junctions, not outfalls)
