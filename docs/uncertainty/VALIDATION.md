@@ -866,6 +866,53 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# Rebase onto swmm6_rel 2026-10-09: every MC gate re-measured (2026-10-11)
+
+**Branch** `hsym2/stack-on-swmm6rel`. The whole stack (48 first-parent commits,
+each merged PR replayed as one commit) was moved from a base 725 upstream
+commits old onto `origin/swmm6_rel` `a070e98c`. Upstream had rewritten its
+history after 2026-07-31; its `d15e8ab7` has the old base's exact tree.
+Adaptation to upstream (mixed triangle/quad meshes, the infiltration bank,
+Kdecay in 1/s, stricter input validation) is commit `4ad71f3c`.
+
+**Every gate passes. No bound, floor or tolerance was changed.** Numbers,
+member coverage / median width ratio:
+
+| Cell | Before rebase | After | Note |
+|---|---|---|---|
+| P8 free-surface chain (1D) | 0.993 / 1.21 | 0.993 / 1.210 | unchanged |
+| H5 SEMI_IMPLICIT surcharged (H14) | 0.832 / 1.21 | 0.845 / 1.317 | still CALIBRATED |
+| H5 EXPLICIT | 0.73 / 0.78 | 0.736 / 0.782 | documented limitation |
+| H11 front, phase coordinate | 0.829 / 1.290 | 0.831 / 1.308 | unchanged |
+| SR-5 soft rain, FULL | 0.881 / 0.976 | 0.881 / 0.976 | identical |
+| CL-1e soft rain, CORR_LEN | 0.827 / 0.804 | 0.827 / 0.804 | identical |
+| **W3 2D production (asserted)** | 0.822 / 1.321 | **0.800 / 1.261** | **margin over the 0.80 floor now ~0** |
+| W4 plane rain ℓ = 20 m / 100 m | 0.897 / 1.31, 0.886 / 1.42 | 0.894 / 1.316, 0.883 / 1.415 | unchanged |
+| **H15 plane Manning ℓ = 20 m** (not asserted) | 0.801 / 0.92 | **0.784 / 0.892** | now RANKING ONLY |
+| H15 plane Manning ℓ = 100 m | 0.844 / 1.32 | 0.831 / 1.283 | CALIBRATED |
+| W4 channel comonotone Manning (adv) | 0.95 / 2.9 | 0.912 / 2.46 | CONSERVATIVE, narrower |
+| Bellinge lock, band/depth p50 / max | 0.316 / 44.5 | 0.303 / 42.3 | 24.00 h reached |
+
+**Reading.** The 1D cells and the soft-rain cells are unchanged to printed
+precision: the deterministic 1D solver they anchor on was not changed
+materially for them. The 2D cells all moved the same way. The legacy, iso
+and aniso reference rungs dropped by 0.015-0.02 coverage alongside the
+production rung. That is upstream's marcher work (wet/dry hysteresis band,
+resting-face and source-ledger changes) shifting the MC reference itself,
+not a change in the ROM. Two consequences, both left as findings:
+
+1. The W3 production gate passes with no margin. Any further marcher change
+   can turn it red. Per rule 2 the floor is not lowered; if it reds, the fix
+   belongs in the operator calibration (W3's dials), measured, not in the gate.
+2. H15's 20 m cell, recorded as "calibrated at 0.001 margin, deliberately not
+   asserted", is now below the floor. The mode-capture reading from the H16
+   re-check (k = 40 cannot represent a 20 m field on a 5 m mesh) stands.
+
+**Also verified**: the strict upstream regression suite (0.001 abs / 0.1 %
+rel at every routing step) passes for Examples 1-3, 6-8 and the slot model;
+all are bit-identical across two runs; the 2D ROM on/off bit-identity test
+passes; the 1D ROM's deterministic path is unchanged by the ROM.
+
 # H6 — WQ decay-rate bands: PR 13b ported, NORMAL/LOGNORMAL families added (2026-10-10)
 
 **Branch** `hsym2/prh6-wq-families` (stacked on H8). H6 was blocked because the
