@@ -476,6 +476,107 @@ TEST(WQDecayBounds, MultiStepMonotonicAndSpreadGrows) {
 }
 
 // ============================================================================
+// H6 — WQ decay-rate bounds: NORMAL / LOGNORMAL multiplier families
+// ============================================================================
+
+namespace {
+// Width and the two half-widths of a band, for shape assertions.
+struct WqShape { double width, lower, upper; };
+WqShape wqShape(const WQUncertaintyBounds::Bounds& b) {
+    return { b.q95 - b.q05, b.q50 - b.q05, b.q95 - b.q50 };
+}
+WQUncertaintyBounds::Bounds wqRun(DistType d, double p,
+                                  double c0, double k, double dt, int M) {
+    WQUncertaintyBounds wq;
+    wq.decay_pert = p;
+    wq.dist       = d;
+    return wq.compute(c0, k, dt, M);
+}
+} // namespace
+
+// UNIFORM must be bit-identical to the v1 hand-written strata
+// (km = lo + u*(hi-lo)): routing it through invCdfMultiplier changed nothing.
+TEST(WQDecayBoundsFamilies, UniformIsBitIdenticalToV1) {
+    const double c0 = 12.5, k = 0.37, dt = 0.8, p = 0.25;
+    for (int M : {2, 7, 50, 51}) {
+        std::vector<double> conc(static_cast<std::size_t>(M));
+        for (int i = 0; i < M; ++i) {
+            const double km = (1.0 - p) + (static_cast<double>(i) + 0.5)
+                              / static_cast<double>(M) * ((1.0 + p) - (1.0 - p));
+            conc[static_cast<std::size_t>(i)] = c0 * std::exp(-k * km * dt);
+        }
+        std::sort(conc.begin(), conc.end());
+        auto q = [&](double f) {
+            const double pos = f * (M - 1);
+            const int lo = static_cast<int>(pos);
+            if (lo + 1 >= M) return conc.back();
+            const double fr = pos - lo;
+            return conc[lo] * (1.0 - fr) + conc[lo + 1] * fr;
+        };
+        const auto b = wqRun(DistType::UNIFORM, p, c0, k, dt, M);
+        EXPECT_EQ(b.q05, q(0.05)) << "M=" << M;
+        EXPECT_EQ(b.q50, q(0.50)) << "M=" << M;
+        EXPECT_EQ(b.q95, q(0.95)) << "M=" << M;
+    }
+}
+
+// Unit convention from WQ_LAYER_DESIGN.md: k in 1/day, dt in DAYS. With an
+// odd M the median member sits at u = 0.5 (km = 1 for every family), so q50
+// must reproduce the deterministic c0*exp(-k*rpt_s/86400).
+TEST(WQDecayBoundsFamilies, MedianIsDeterministicInDays) {
+    const double c0 = 40.0, k_day = 3.0, rpt_s = 900.0;
+    const double c_det = c0 * std::exp(-k_day * rpt_s / 86400.0);
+    for (DistType d : {DistType::UNIFORM, DistType::NORMAL, DistType::LOGNORMAL}) {
+        const auto b = wqRun(d, 0.30, c0, k_day, rpt_s / 86400.0, 51);
+        EXPECT_NEAR(b.q50, c_det, 1e-12 * c0) << "dist=" << static_cast<int>(d);
+    }
+}
+
+// Every family collapses to the deterministic value at zero perturbation.
+TEST(WQDecayBoundsFamilies, ZeroPerturbationCollapsesEveryFamily) {
+    const double c0 = 10.0, k = 0.1, dt = 1.0, c_det = c0 * std::exp(-k * dt);
+    for (DistType d : {DistType::UNIFORM, DistType::NORMAL, DistType::LOGNORMAL}) {
+        const auto b = wqRun(d, 0.0, c0, k, dt, 50);
+        EXPECT_EQ(b.q05, c_det);
+        EXPECT_EQ(b.q50, c_det);
+        EXPECT_EQ(b.q95, c_det);
+    }
+}
+
+// NORMAL is the ±3σ-truncated normal with σ = p/3, so its 5-95 % multiplier
+// span is ≈ 2·1.645·p/3 ≈ 1.10·p, against UNIFORM's 1.8·p: same p, narrower
+// band. Ordering holds; ratio checked against that closed form (±5 %, the
+// finite-M strata and exp() curvature account for the rest).
+TEST(WQDecayBoundsFamilies, NormalIsNarrowerThanUniformBySigmaOverHalfRange) {
+    const double c0 = 10.0, k = 0.5, dt = 0.2, p = 0.30;
+    const auto u = wqRun(DistType::UNIFORM, p, c0, k, dt, 200);
+    const auto n = wqRun(DistType::NORMAL,  p, c0, k, dt, 200);
+    EXPECT_LE(n.q05, n.q50);
+    EXPECT_LE(n.q50, n.q95);
+    const double ratio    = wqShape(n).width / wqShape(u).width;
+    const double expected = (2.0 * 1.6448536269514722 / 3.0) / 1.8;   // 0.609
+    EXPECT_NEAR(ratio, expected, 0.05 * expected) << "measured " << ratio;
+}
+
+// LOGNORMAL: median multiplier 1, q95 multiplier 1+p, q05 multiplier
+// 1/(1+p). The MORE-decay side (high km -> low concentration -> q05) spans
+// p, the less-decay side p/(1+p): the band is skewed toward low
+// concentration, which UNIFORM and NORMAL are not.
+TEST(WQDecayBoundsFamilies, LognormalSkewsTowardMoreDecay) {
+    const double c0 = 10.0, k = 0.5, dt = 0.2, p = 0.30;
+    const auto l = wqRun(DistType::LOGNORMAL, p, c0, k, dt, 200);
+    const auto u = wqRun(DistType::UNIFORM,   p, c0, k, dt, 200);
+    const auto sl = wqShape(l), su = wqShape(u);
+    EXPECT_LE(l.q05, l.q50);
+    EXPECT_LE(l.q50, l.q95);
+    // Skew: lower half-width over upper half-width ≈ (1+p) for small k·dt.
+    EXPECT_NEAR(sl.lower / sl.upper, 1.0 + p, 0.05 * (1.0 + p))
+        << "lower " << sl.lower << " upper " << sl.upper;
+    // UNIFORM's skew comes only from exp() curvature, and goes the OTHER way.
+    EXPECT_LT(su.lower / su.upper, 1.0);
+}
+
+// ============================================================================
 // PR 9b — ParamRegistry (parameter registry: sampling, lookup, back-compat)
 // ============================================================================
 

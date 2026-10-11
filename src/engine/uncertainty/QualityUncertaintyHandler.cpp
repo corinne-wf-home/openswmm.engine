@@ -131,8 +131,12 @@ std::string parseQualityUncertaintyLine(
     DistType dist;
     if (iequals(dist_str, "UNIFORM"))
         dist = DistType::UNIFORM;
+    else if (iequals(dist_str, "NORMAL"))
+        dist = DistType::NORMAL;
+    else if (iequals(dist_str, "LOGNORMAL"))
+        dist = DistType::LOGNORMAL;
     else
-        return "QUALITY layer only supports UNIFORM distribution";
+        return "QUALITY layer supports UNIFORM, NORMAL or LOGNORMAL (H6)";
 
     // --- Resolve NAME and ENTRY ---
     // Preserve the pollutant NAME exactly as written on the [UNCERTAINTY] line.
