@@ -31,17 +31,12 @@ CsrGraph MeshEigenBasis::buildGeometricLaplacian(
         static_cast<std::size_t>(n));
 
     for (int i = 0; i < n; ++i) {
-        const int tri_nbrs[3] = {
-            mesh.tri_nbr0[static_cast<std::size_t>(i)],
-            mesh.tri_nbr1[static_cast<std::size_t>(i)],
-            mesh.tri_nbr2[static_cast<std::size_t>(i)]
-        };
-        for (int e = 0; e < 3; ++e) {
-            int j = tri_nbrs[e];
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(i)); ++e) {
+            int j = mesh.cell_neighbour(static_cast<int>(i), e);
             // Process each shared edge exactly once (i < j)
             if (j < 0 || j <= i) continue;
 
-            double len = mesh.edge_length[static_cast<std::size_t>(i * 3 + e)];
+            double len = mesh.edge_length[static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e))];
             double dx  = mesh.tri_cx[static_cast<std::size_t>(j)]
                        - mesh.tri_cx[static_cast<std::size_t>(i)];
             double dy  = mesh.tri_cy[static_cast<std::size_t>(j)]
@@ -83,16 +78,11 @@ CsrGraph MeshEigenBasis::buildDepthWeightedLaplacian(
     const double D_floor = 1.0e-9;
 
     for (int i = 0; i < n; ++i) {
-        const int tri_nbrs[3] = {
-            mesh.tri_nbr0[static_cast<std::size_t>(i)],
-            mesh.tri_nbr1[static_cast<std::size_t>(i)],
-            mesh.tri_nbr2[static_cast<std::size_t>(i)]
-        };
-        for (int e = 0; e < 3; ++e) {
-            int j = tri_nbrs[e];
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(i)); ++e) {
+            int j = mesh.cell_neighbour(static_cast<int>(i), e);
             if (j < 0 || j <= i) continue;
 
-            double len = mesh.edge_length[static_cast<std::size_t>(i * 3 + e)];
+            double len = mesh.edge_length[static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e))];
             double dx  = mesh.tri_cx[static_cast<std::size_t>(j)]
                        - mesh.tri_cx[static_cast<std::size_t>(i)];
             double dy  = mesh.tri_cy[static_cast<std::size_t>(j)]

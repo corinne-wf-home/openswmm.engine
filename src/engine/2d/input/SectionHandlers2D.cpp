@@ -967,7 +967,7 @@ std::string parse2DEdgeConveyanceLine(
 // ============================================================================
 // §5.5 track I — [2D_INFILTRATION_OPTIONS] / [2D_INFILTRATION_DEFAULTS] /
 // [2D_INFILTRATION] line parsers
-// =====================================================================
+// ============================================================================
 namespace {
 
 // Shared tail of a [2D_INFILTRATION_DEFAULTS] / [2D_INFILTRATION] row:
@@ -1198,7 +1198,7 @@ std::string parse2DBoundaryQualityLine(
     return {};
 }
 
-=======
+// ============================================================================
 // [2D_ROM] — scalar surface uncertainty ROM configuration
 // ============================================================================
 

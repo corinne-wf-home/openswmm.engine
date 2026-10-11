@@ -71,8 +71,8 @@ MeshData makeStructuredMesh(int N, double domain_m = 1000.0) {
         for (int j = 0; j < N; ++j) {
             int v00 = i * (N + 1) + j,    v01 = i * (N + 1) + j + 1;
             int v10 = (i+1) * (N + 1) + j, v11 = (i+1) * (N + 1) + j + 1;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v01; mesh.tri_v2[t] = v11; ++t;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v11; mesh.tri_v2[t] = v10; ++t;
+            mesh.set_triangle(t, v00, v01, v11); ++t;
+            mesh.set_triangle(t, v00, v11, v10); ++t;
         }
 
     buildMeshTopology(mesh);
@@ -119,9 +119,9 @@ TEST(CorrLenProfile, ProfilingGate) {
     std::vector<double> cx(static_cast<std::size_t>(n_tri));
     std::vector<double> cy(static_cast<std::size_t>(n_tri));
     for (int t = 0; t < n_tri; ++t) {
-        const int v0 = mesh.tri_v0[static_cast<std::size_t>(t)];
-        const int v1 = mesh.tri_v1[static_cast<std::size_t>(t)];
-        const int v2 = mesh.tri_v2[static_cast<std::size_t>(t)];
+        const int v0 = mesh.cell_vertex(t, 0);
+        const int v1 = mesh.cell_vertex(t, 1);
+        const int v2 = mesh.cell_vertex(t, 2);
         cx[static_cast<std::size_t>(t)] =
             (mesh.vx[static_cast<std::size_t>(v0)] +
              mesh.vx[static_cast<std::size_t>(v1)] +

@@ -1521,12 +1521,10 @@ xarray as a supplementary group.
    pollutant; it matters only if a future version combines WQ members with hydraulic
    members (Option B in `WQ_LAYER_DESIGN.md`).
 
-   **Also note, for this build line:** quality *routing* applies the `[POLLUTANTS]`
-   decay coefficient per second although it is entered per day, and a pollutant row
-   in `[DWF]` is added to the node's dry-weather flow instead of loading the pollutant.
-   Both are fixed on upstream `swmm6_rel` and arrive with the next rebase. The
-   uncertainty band itself uses the per-day value correctly; the deterministic
-   concentration it is centred on inherits the routing defects until then.
+   **History:** before the 2026-10 rebase onto `swmm6_rel`, quality routing on this
+   line applied the per-day `[POLLUTANTS]` decay coefficient per second, and a pollutant
+   row in `[DWF]` was added to the node's dry-weather flow instead of loading the
+   pollutant. Both were already fixed upstream and arrived with the rebase.
 
 10. **Surcharged bands: calibrated under `NODE_CONTINUITY SEMI_IMPLICIT`; a documented
     limitation under `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by

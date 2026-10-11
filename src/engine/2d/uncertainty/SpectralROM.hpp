@@ -37,9 +37,9 @@
 #include "MeshEigenBasis.hpp"
 #include "../coupling/NodeCoupling.hpp"
 #include "SpatialUncertaintyField.hpp"
-#include "uncertainty/UncertaintyTypes.hpp"
-#include "uncertainty/RomQuantileGemm.hpp"
-#include "uncertainty/RomDensePropagator.hpp"
+#include "../../uncertainty/UncertaintyTypes.hpp"
+#include "../../uncertainty/RomQuantileGemm.hpp"
+#include "../../uncertainty/RomDensePropagator.hpp"
 #include <vector>
 #include <cstddef>
 #include <cstdint>

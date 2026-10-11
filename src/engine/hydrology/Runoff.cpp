@@ -811,38 +811,18 @@ void RunoffSolver::infil_set_state(int i, int model, const double state[6]) noex
 
 RunoffSolver::State RunoffSolver::saveState() const {
     State st;
-    st.depth_imperv0      = soa_.depth_imperv0;
-    st.depth_imperv1      = soa_.depth_imperv1;
-    st.depth_perv         = soa_.depth_perv;
-    st.old_runoff_imperv0 = soa_.old_runoff_imperv0;
-    st.old_runoff_imperv1 = soa_.old_runoff_imperv1;
-    st.old_runoff_perv    = soa_.old_runoff_perv;
-    st.runoff             = soa_.runoff;
-    st.evap_loss          = soa_.evap_loss;
-    st.infil_loss         = soa_.infil_loss;
-    st.imperv_runoff_cfs  = soa_.imperv_runoff_cfs;
-    st.perv_runoff_cfs    = soa_.perv_runoff_cfs;
-    st.horton             = horton_states_;
-    st.grnampt            = grnampt_states_;
-    st.curvenum           = curvenum_states_;
+    st.soa                    = soa_;
+    st.infil_bank             = infil_bank_;
+    st.completed_step_seconds = completed_step_seconds_;
+    st.infil_factor_used      = infil_factor_used_;
     return st;
 }
 
 void RunoffSolver::restoreState(const State& st) {
-    soa_.depth_imperv0      = st.depth_imperv0;
-    soa_.depth_imperv1      = st.depth_imperv1;
-    soa_.depth_perv         = st.depth_perv;
-    soa_.old_runoff_imperv0 = st.old_runoff_imperv0;
-    soa_.old_runoff_imperv1 = st.old_runoff_imperv1;
-    soa_.old_runoff_perv    = st.old_runoff_perv;
-    soa_.runoff             = st.runoff;
-    soa_.evap_loss          = st.evap_loss;
-    soa_.infil_loss         = st.infil_loss;
-    soa_.imperv_runoff_cfs  = st.imperv_runoff_cfs;
-    soa_.perv_runoff_cfs    = st.perv_runoff_cfs;
-    horton_states_          = st.horton;
-    grnampt_states_         = st.grnampt;
-    curvenum_states_        = st.curvenum;
+    soa_                    = st.soa;
+    infil_bank_             = st.infil_bank;
+    completed_step_seconds_ = st.completed_step_seconds;
+    infil_factor_used_      = st.infil_factor_used;
 }
 
 } // namespace runoff

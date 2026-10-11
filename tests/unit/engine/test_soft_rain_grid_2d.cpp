@@ -55,8 +55,8 @@ static MeshData makeUnitSquareMesh() {
     mesh.vz = {0.0, 0.0, 0.0, 0.0};
 
     mesh.resize_triangles(2);
-    mesh.tri_v0[0] = 0; mesh.tri_v1[0] = 1; mesh.tri_v2[0] = 3; // centroid (2/3,1/3)
-    mesh.tri_v0[1] = 0; mesh.tri_v1[1] = 3; mesh.tri_v2[1] = 2; // centroid (1/3,2/3)
+    mesh.set_triangle(0, 0, 1, 3); // centroid (2/3,1/3)
+    mesh.set_triangle(1, 0, 3, 2); // centroid (1/3,2/3)
     mesh.mannings_n[0] = 0.035;
     mesh.mannings_n[1] = 0.035;
 

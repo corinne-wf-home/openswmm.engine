@@ -186,17 +186,22 @@ public:
      *
      * Lets the uncertainty sidecar advance PERTURBED copies of the runoff state
      * through the unmodified production kernel: save, swap a copy in, run
-     * execute(), swap back. Plain vector copies, so a save/restore round trip
+     * execute(), swap back. Plain value copies, so a save/restore round trip
      * is exact and the deterministic path is bit-identical. Does NOT cover the
      * ctx.subcatches arrays execute() writes; the caller restores those.
+     *
+     * Whole objects, not a field list (2026-10 rebase): the SoA, the
+     * infiltration bank, the interval-routing history and the applied
+     * factors are copied entire, so a field upstream adds is covered without
+     * this struct changing. The SoA's per-subcatchment parameters are set at
+     * init() and never written by execute(), so carrying them in a member's
+     * copy is inert.
      */
     struct State {
-        std::vector<double> depth_imperv0, depth_imperv1, depth_perv;
-        std::vector<double> old_runoff_imperv0, old_runoff_imperv1, old_runoff_perv;
-        std::vector<double> runoff, evap_loss, infil_loss, imperv_runoff_cfs, perv_runoff_cfs;
-        std::vector<HortonState>    horton;
-        std::vector<GreenAmptState> grnampt;
-        std::vector<CurveNumState>  curvenum;
+        RunoffSoA            soa;
+        surface::InfilBank   infil_bank;
+        std::vector<double>  completed_step_seconds;
+        std::vector<double>  infil_factor_used;
     };
     State saveState() const;
     void  restoreState(const State& st);

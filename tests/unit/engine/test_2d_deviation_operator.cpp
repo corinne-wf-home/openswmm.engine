@@ -67,8 +67,8 @@ MeshData makeStructuredMesh(int N, double domain_m = 10.0) {
         for (int j = 0; j < N; ++j) {
             const int v00 = i * (N + 1) + j,       v01 = i * (N + 1) + j + 1;
             const int v10 = (i + 1) * (N + 1) + j, v11 = (i + 1) * (N + 1) + j + 1;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v01; mesh.tri_v2[t] = v11; ++t;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v11; mesh.tri_v2[t] = v10; ++t;
+            mesh.set_triangle(t, v00, v01, v11); ++t;
+            mesh.set_triangle(t, v00, v11, v10); ++t;
         }
     buildMeshTopology(mesh);
     return mesh;
@@ -381,11 +381,9 @@ TEST(DeviationOperator2D, GroundedOperatorDampsDrainMode) {
     std::vector<double> gw(static_cast<std::size_t>(n), 0.0);
     for (int i = 0; i < n; ++i) {
         const auto ui = static_cast<std::size_t>(i);
-        const int nbrs[3] = {mesh.tri_nbr0[ui], mesh.tri_nbr1[ui],
-                             mesh.tri_nbr2[ui]};
-        for (int e = 0; e < 3; ++e) {
-            const auto idx = static_cast<std::size_t>(i * 3 + e);
-            if (nbrs[e] >= 0) continue;
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(ui)); ++e) {
+            const auto idx = static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e));
+            if (mesh.cell_neighbour(static_cast<int>(ui), e) >= 0) continue;
             if (mesh.edge_mx[idx] >= 1e-9) continue;
             const double dx = mesh.edge_mx[idx] - mesh.tri_cx[ui];
             const double dy = mesh.edge_my[idx] - mesh.tri_cy[ui];

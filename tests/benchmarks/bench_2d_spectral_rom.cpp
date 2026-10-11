@@ -85,15 +85,11 @@ static MeshData makeStructuredMesh(int N, double domain_m = 100.0,
             int v10 = (i + 1) * (N + 1) + j;
             int v11 = (i + 1) * (N + 1) + j + 1;
 
-            mesh.tri_v0[static_cast<std::size_t>(t)]     = v00;
-            mesh.tri_v1[static_cast<std::size_t>(t)]     = v01;
-            mesh.tri_v2[static_cast<std::size_t>(t)]     = v11;
+            mesh.set_triangle(t, v00, v01, v11);
             mesh.mannings_n[static_cast<std::size_t>(t)] = 0.035;
             ++t;
 
-            mesh.tri_v0[static_cast<std::size_t>(t)]     = v00;
-            mesh.tri_v1[static_cast<std::size_t>(t)]     = v11;
-            mesh.tri_v2[static_cast<std::size_t>(t)]     = v10;
+            mesh.set_triangle(t, v00, v11, v10);
             mesh.mannings_n[static_cast<std::size_t>(t)] = 0.035;
             ++t;
         }

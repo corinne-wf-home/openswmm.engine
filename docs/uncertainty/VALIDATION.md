@@ -913,7 +913,14 @@ warns and writes no rows. **Mutation-checked**: forcing every spec to UNIFORM
 fails only the family test; dividing the decay rate by 86,400 (the post-rebase
 hazard below) fails only the physical-width test.
 
-## 3. Two quality-routing defects found on this line (not fixed here)
+## 3. Two quality-routing defects found on this line (fixed by the 2026-10 rebase)
+
+**Update 2026-10-11:** the stack was rebased onto `swmm6_rel` (2026-10-09) and
+both defects below are gone: Kdecay is stored in 1/s and routed correctly, and
+pollutant `[DWF]` rows load mass instead of water. The band code now converts
+the stored 1/s rate to per-day (the hazard named at the end of this section),
+and `EngineWQUncertaintyContent.RealLoadGivesOrderedNonZeroBands` passes at
+the same physical width, confirming the conversion.
 
 Building a fixture with a non-zero concentration exposed both. Neither is in
 the WQ layer; both are **already fixed on upstream `swmm6_rel`** and arrive

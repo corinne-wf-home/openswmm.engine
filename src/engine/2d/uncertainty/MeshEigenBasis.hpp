@@ -29,7 +29,7 @@
 #define OPENSWMM_ENGINE_2D_MESH_EIGEN_BASIS_HPP
 
 #include "../data/MeshData.hpp"
-#include "uncertainty/GraphEigenBasis.hpp"
+#include "../../uncertainty/GraphEigenBasis.hpp"
 
 #include <vector>
 

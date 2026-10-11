@@ -87,7 +87,7 @@ std::string build_model() {
         "\n"
         "[RAINGAGES]\n"
         ";;Name  Format     Interval  SCF  Source\n"
-        "RG1     INTENSITY  0:05      1.0  TIMESERIES TS1\n"
+        "RG1     INTENSITY  0:01      1.0  TIMESERIES TS1\n"
         "\n"
         "[TIMESERIES]\n"
         ";;Name  Time   Value (mm/hr)\n"

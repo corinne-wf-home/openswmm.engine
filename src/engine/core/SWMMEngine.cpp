@@ -7400,17 +7400,17 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                     if (p < 0 || p >= n_polluts) continue;   // unresolved name, warned at init
                     wq_bounds_.decay_pert = wq_pollut_perturbations_[s];
                     wq_bounds_.dist       = wq_pollut_dists_[s];
-                    // UNIT HAZARD (read before rebasing onto swmm6_rel):
-                    // on THIS line QualityHandler stores Kdecay as parsed,
-                    // 1/day, so it pairs with dt in days. Upstream
-                    // swmm6_rel (KD1, 2026-09) divides by SEC_PER_DAY at
-                    // parse and stores 1/s -- after a rebase this must
-                    // become k_decay * SEC_PER_DAY (or dt in seconds), or
-                    // every band shrinks 86,400x.
+                    // Units: QualityHandler stores Kdecay in 1/s (upstream
+                    // KD1, as legacy landuse.c does: /SECperDAY at parse),
+                    // and the band pairs a per-day rate with dt in days.
+                    // Before the 2026-10 rebase this line stored 1/day and
+                    // read it unconverted; dropping the factor shrinks every
+                    // band 86,400x.
                     // EngineWQUncertaintyContent.RealLoadGivesOrderedNonZeroBands
                     // pins the physical width and fails if this drifts.
                     const double k_per_day =
-                        ctx_.pollutants.k_decay[static_cast<std::size_t>(p)];
+                        ctx_.pollutants.k_decay[static_cast<std::size_t>(p)]
+                        * constants::SEC_PER_DAY;
                     const auto b = wq_bounds_.compute(conc_prev[p], k_per_day,
                                                       report_dt_days, kWqMembers);
                     wq_csv_ << ctx_.current_time                 << ','

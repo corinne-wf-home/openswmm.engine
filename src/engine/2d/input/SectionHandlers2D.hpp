@@ -217,6 +217,8 @@ std::string parse2DInfiltrationDefaultsLine(
  */
 std::string parse2DInfiltrationLine(
     const std::vector<std::string>& tokens, Infil2D& infil);
+
+/**
  * @brief Parse a single line from the `[2D_ROM]` section: scalar surface
  *        uncertainty ROM configuration.
  *

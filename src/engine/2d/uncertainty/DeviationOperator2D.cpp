@@ -77,19 +77,14 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
     const double iso_mean = 0.5 * (alpha_par + alpha_perp);
 
     for (int i = 0; i < n; ++i) {
-        const int tri_nbrs[3] = {
-            mesh.tri_nbr0[static_cast<std::size_t>(i)],
-            mesh.tri_nbr1[static_cast<std::size_t>(i)],
-            mesh.tri_nbr2[static_cast<std::size_t>(i)]
-        };
-        for (int e = 0; e < 3; ++e) {
-            const int j = tri_nbrs[e];
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(i)); ++e) {
+            const int j = mesh.cell_neighbour(static_cast<int>(i), e);
             if (j < 0 || j <= i) continue;  // each interior face once (i < j)
 
             const auto ui = static_cast<std::size_t>(i);
             const auto uj = static_cast<std::size_t>(j);
 
-            const double len = mesh.edge_length[static_cast<std::size_t>(i * 3 + e)];
+            const double len = mesh.edge_length[static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e))];
             const double dx  = mesh.tri_cx[uj] - mesh.tri_cx[ui];
             const double dy  = mesh.tri_cy[uj] - mesh.tri_cy[ui];
             const double d   = std::sqrt(dx * dx + dy * dy);

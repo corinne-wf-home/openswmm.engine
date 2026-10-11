@@ -54,8 +54,8 @@ static MeshData makeStructuredMesh(int N, double domain_m = 10.0) {
         for (int j = 0; j < N; ++j) {
             int v00 = i * (N + 1) + j,    v01 = i * (N + 1) + j + 1;
             int v10 = (i+1) * (N + 1) + j, v11 = (i+1) * (N + 1) + j + 1;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v01; mesh.tri_v2[t] = v11; ++t;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v11; mesh.tri_v2[t] = v10; ++t;
+            mesh.set_triangle(t, v00, v01, v11); ++t;
+            mesh.set_triangle(t, v00, v11, v10); ++t;
         }
 
     buildMeshTopology(mesh);

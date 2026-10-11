@@ -12,16 +12,11 @@ END_DATE             01/01/2025
 END_TIME             00:01:00
 REPORT_STEP          00:00:30
 ROUTING_STEP         0:00:15
-QUAL_STEP            300
-QUAL_STEADY_STATE    YES
 MIN_SURFAREA         1.0
 MAX_TRIALS           8
 HEAD_TOLERANCE       0.005
 MINIMUM_STEP         0.5
 THREADS              1
-
-[QUALITY]
-TSS
 
 [POLLUTANTS]
 ;;               MassUnits    RainConc     GWConc       I&IConc      DecayCoef  SnowOnly  CoPollut
@@ -52,10 +47,10 @@ J1      FLOW         0.1
 ;;Node  Constituent  TimeSeries   Type      Mfactor  Sfactor  Baseline
 J1      FLOW         inflow1      FLOW      1.0      1.0      0.0
 
-[CURVES]
-;;Name           Type         X-Value      Y-Value
-inflow1          FLOW         0            0.1
-inflow1          FLOW         60           0.1
+[TIMESERIES]
+;;Name           Time         Value
+inflow1          0:00         0.1
+inflow1          0:01         0.1
 
 [REPORT]
 INPUT      NO

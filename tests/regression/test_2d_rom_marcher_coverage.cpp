@@ -142,8 +142,8 @@ MeshData makeMesh(double n_mult) {
         for (int i = 0; i < kNx; ++i) {
             const int v00 = j * nvx + i,       v10 = j * nvx + i + 1;
             const int v01 = (j + 1) * nvx + i, v11 = (j + 1) * nvx + i + 1;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v10; mesh.tri_v2[t] = v11; ++t;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v11; mesh.tri_v2[t] = v01; ++t;
+            mesh.set_triangle(t, v00, v10, v11); ++t;
+            mesh.set_triangle(t, v00, v11, v01); ++t;
         }
     for (int i = 0; i < mesh.n_triangles(); ++i)
         mesh.mannings_n[static_cast<std::size_t>(i)] = kBaseN * n_mult;
@@ -168,14 +168,12 @@ void seedSteady(const MeshData& mesh, SurfaceStateData& s) {
 }
 
 void addOutlet(const MeshData& mesh, BoundaryData& b) {
-    b.resize(mesh.n_triangles() * 3);
+    b.resize(mesh.n_edge_slots());
     for (int i = 0; i < mesh.n_triangles(); ++i) {
         const auto ui = static_cast<std::size_t>(i);
-        const int nbrs[3] = {mesh.tri_nbr0[ui], mesh.tri_nbr1[ui],
-                             mesh.tri_nbr2[ui]};
-        for (int e = 0; e < 3; ++e) {
-            const int idx = i * 3 + e;
-            if (nbrs[e] >= 0) continue;
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(ui)); ++e) {
+            const int idx = openswmm::twoD::MeshData::slot(static_cast<int>(i), e);
+            if (mesh.cell_neighbour(static_cast<int>(ui), e) >= 0) continue;
             if (mesh.edge_mx[static_cast<std::size_t>(idx)] < 1e-9) {
                 b.edge_bc_type[static_cast<std::size_t>(idx)] =
                     static_cast<int8_t>(BoundaryType::NORMAL_FLOW);
@@ -191,11 +189,9 @@ std::vector<double> groundWeights(const MeshData& mesh) {
     std::vector<double> g(static_cast<std::size_t>(mesh.n_triangles()), 0.0);
     for (int i = 0; i < mesh.n_triangles(); ++i) {
         const auto ui = static_cast<std::size_t>(i);
-        const int nbrs[3] = {mesh.tri_nbr0[ui], mesh.tri_nbr1[ui],
-                             mesh.tri_nbr2[ui]};
-        for (int e = 0; e < 3; ++e) {
-            const auto idx = static_cast<std::size_t>(i * 3 + e);
-            if (nbrs[e] >= 0) continue;
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(ui)); ++e) {
+            const auto idx = static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e));
+            if (mesh.cell_neighbour(static_cast<int>(ui), e) >= 0) continue;
             if (mesh.edge_mx[idx] >= 1e-9) continue;   // outlet = x = 0 faces
             const double dx = mesh.edge_mx[idx] - mesh.tri_cx[ui];
             const double dy = mesh.edge_my[idx] - mesh.tri_cy[ui];
@@ -255,11 +251,9 @@ void manningVelocity(const MeshData& mesh, const std::vector<double>& h,
     for (int i = 0; i < n; ++i) {
         const auto ui = static_cast<std::size_t>(i);
         const double eta_i = mesh.tri_cz[ui] + h[ui];
-        const int nbrs[3] = {mesh.tri_nbr0[ui], mesh.tri_nbr1[ui],
-                             mesh.tri_nbr2[ui]};
-        double gx = 0.0, gy = 0.0, w = 0.0;
-        for (int e = 0; e < 3; ++e) {
-            const int j = nbrs[e];
+                double gx = 0.0, gy = 0.0, w = 0.0;
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(ui)); ++e) {
+            const int j = mesh.cell_neighbour(static_cast<int>(ui), e);
             if (j < 0) continue;
             const auto uj = static_cast<std::size_t>(j);
             const double dx = mesh.tri_cx[uj] - mesh.tri_cx[ui];
@@ -269,7 +263,7 @@ void manningVelocity(const MeshData& mesh, const std::vector<double>& h,
             const double de =
                 (mesh.tri_cz[uj] + h[uj]) - eta_i;
             const double len =
-                mesh.edge_length[static_cast<std::size_t>(i * 3 + e)];
+                mesh.edge_length[static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e))];
             gx += len * de * dx / d2;
             gy += len * de * dy / d2;
             w += len;

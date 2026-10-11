@@ -20,18 +20,14 @@ Examples 6-8 were fetched from the `paleolimbot/swmm` R package
 originals ship with the SWMM 5 installer
 (https://www.epa.gov/water-research/storm-water-management-model-swmm).
 
-Cross-engine result at adoption (abs 0.06 / rel 25 %, 5 % fraction gate), all
-runs bit-identical across two runs:
+Cross-engine result (2026-10-11, after the rebase onto swmm6_rel): every
+model in the suite, Examples 6-8 included, matches the legacy engine at the
+suite's strict tolerance (0.001 abs / 0.1 % rel) at EVERY routing step, and
+every model is bit-identical across two runs of the new engine.
 
-| Example | periods | checks | exceeding | fraction | worst single point |
-|---|---|---|---|---|---|
-| 1 | 360 | 8,280 | 0 | 0.000 % | none |
-| 2 | 216 | 4,968 | 48 | 0.966 % | link 9 at t=0.49 d: legacy 1.11, new 64.6 |
-| 3 | 216 | 4,968 | 0 | 0.000 % | none |
-| 6 | 2,880 | 118,080 | 1,315 | 1.114 % | link 7 at t=0.04 d: legacy 3e-6, new 0.229 |
-| 7 | 720 | 28,080 | 0 | 0.000 % | none |
-| 8 | 720 | 47,520 | 0 | 0.000 % | none |
-
-The two outliers (Example2 link 9, Example6 link 7) are short transients and
-sit well inside the gate; they are recorded here so a change in them is
-noticed, not accepted as understood.
+History: H8 first registered Examples 6-8 on a line 725 commits behind
+swmm6_rel, where the cross-engine engine differences forced the older Phase 7
+"5 % of comparisons may exceed 0.06 / 25 %" gate (Example 2 and Example 6 then
+showed 0.97 % and 1.11 % exceedances). Upstream's parity work closed those
+differences; the rebase kept upstream's strict suite and added the three
+networks to it unchanged.

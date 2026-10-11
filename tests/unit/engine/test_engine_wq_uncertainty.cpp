@@ -178,12 +178,10 @@ struct WqRow { double t, q05, q50, q95; };
 // first-order decay of k_day; 10-minute run, 1-minute report step.
 //
 // The TSS load rides the pollutant-wide DWF concentration (the Cdwf column of
-// [POLLUTANTS]), NOT a per-node "[DWF] J1 TSS 100" row: on this line's
-// engine (merge-base with swmm6_rel 2026-07-06) a pollutant [DWF] row is
-// summed into the node's dry-weather FLOW (100 mg/L booked as 100 cfs) and
-// its load is never applied. Upstream swmm6_rel fixed that (FLOW rows only
-// in the water pass); the defect is out of this test's scope and flagged in
-// VALIDATION.md's H6 section.
+// [POLLUTANTS]). History: before the 2026-10 rebase onto swmm6_rel, a
+// per-node "[DWF] J1 TSS 100" row was summed into the node's dry-weather FLOW
+// on this line and its load never applied; upstream fixed that. The Cdwf
+// column works on both, so the fixture kept it.
 std::string wqContentInp(const std::string& qual_line, double k_day) {
     std::ostringstream o;
     o << "[TITLE]\nH6 WQ content fixture\n\n"
@@ -251,11 +249,10 @@ std::vector<WqRow> runWqContent(const std::string& qual_line, double k_day,
 }
 
 // k = 0.02/day over a 60 s report step: k*dt = 1.39e-5, so the UNIFORM band's
-// relative width is k*dt*(0.9*2p) = 7.5e-6 at p = 0.30. Deliberately small:
-// this line's routing applies Kdecay per SECOND (stored per day, never
-// converted -- upstream KD1 fixed it), so any k near 1/day zeroes J1's
-// concentration in routing before the band layer ever sees it. The band
-// layer reads the stored 1/day value, so its width is the physical one.
+// relative width is k*dt*(0.9*2p) = 7.5e-6 at p = 0.30. Kept small from the
+// pre-rebase line, where routing applied the per-day Kdecay per second and
+// zeroed J1 for any k near 1/day (upstream KD1 fixed that). The band layer
+// converts the stored 1/s rate back to per-day, so its width is physical.
 constexpr double kDay = 0.02;
 constexpr double kUniformRelWidth = 0.02 * (60.0 / 86400.0) * 0.9 * 2.0 * 0.30;
 

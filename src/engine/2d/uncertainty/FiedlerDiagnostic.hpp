@@ -12,7 +12,7 @@
  *            grad[t] = max_nb  |φ₂[t] − φ₂[nb]| / dist(centroid_t, centroid_nb)
  *
  *          over the (up to 3) face-sharing neighbour triangles.  Boundary faces
- *          (tri_nbr < 0) are skipped; they contribute 0.
+ *          (neighbour < 0) are skipped; they contribute 0.
  *
  *          The result is sorted into a descending rank order so the top-k
  *          bottleneck cells can be extracted directly as rank[0..k-1].
@@ -55,7 +55,7 @@ namespace openswmm::twoD {
  * Lifecycle:
  *   1. Set `basis` to a fully-built MeshEigenBasis (num_kept >= 2).
  *   2. Call compute(mesh) — mesh must have buildMeshTopology() called so
- *      tri_nbr0/1/2 and tri_cx/cy are populated.
+ *      cell_nbr and tri_cx/cy are populated.
  *   3. Read phi2[t], grad[t], rank[i].
  */
 struct FiedlerDiagnostic {
@@ -93,7 +93,7 @@ struct FiedlerDiagnostic {
      * @brief Compute Fiedler vector, per-cell gradient, and descending rank.
      *
      * @param mesh  2D mesh with buildMeshTopology() already called (requires
-     *              tri_nbr0/1/2 and tri_cx/cy).
+     *              cell_nbr and tri_cx/cy).
      * @throws std::runtime_error if basis is not ready or has fewer than 2 modes.
      */
     void compute(const MeshData& mesh) {
@@ -113,7 +113,7 @@ struct FiedlerDiagnostic {
 
         // Per-cell gradient: max over face-sharing neighbours of
         //   |phi2[t] - phi2[nb]| / dist(centroid_t, centroid_nb)
-        // Boundary faces (tri_nbr < 0) skipped.
+        // Boundary faces (neighbour < 0) skipped.
         grad.assign(unt, 0.0);
         for (int t = 0; t < nt; ++t) {
             const auto ut = static_cast<std::size_t>(t);
@@ -121,10 +121,8 @@ struct FiedlerDiagnostic {
             const double py = mesh.tri_cy[ut];
             const double pv = phi2[ut];
 
-            const int nbs[3] = {mesh.tri_nbr0[ut],
-                                 mesh.tri_nbr1[ut],
-                                 mesh.tri_nbr2[ut]};
-            for (int nb : nbs) {
+            for (int e = 0; e < mesh.cell_vertex_count(t); ++e) {
+                const int nb = mesh.cell_neighbour(t, e);
                 if (nb < 0) continue;
                 const auto unb = static_cast<std::size_t>(nb);
                 const double dx   = px - mesh.tri_cx[unb];

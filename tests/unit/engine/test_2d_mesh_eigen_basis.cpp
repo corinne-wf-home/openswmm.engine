@@ -63,10 +63,10 @@ static MeshData makeSmallSlopedMesh() {
     mesh.vy = {0.0, 0.0, 3.0, 3.0, 1.5};
     mesh.vz = {0.20, 0.15, 0.10, 0.15, 0.05};
     mesh.resize_triangles(4);
-    mesh.tri_v0[0] = 0; mesh.tri_v1[0] = 1; mesh.tri_v2[0] = 4;
-    mesh.tri_v0[1] = 1; mesh.tri_v1[1] = 2; mesh.tri_v2[1] = 4;
-    mesh.tri_v0[2] = 2; mesh.tri_v1[2] = 3; mesh.tri_v2[2] = 4;
-    mesh.tri_v0[3] = 3; mesh.tri_v1[3] = 0; mesh.tri_v2[3] = 4;
+    mesh.set_triangle(0, 0, 1, 4);
+    mesh.set_triangle(1, 1, 2, 4);
+    mesh.set_triangle(2, 2, 3, 4);
+    mesh.set_triangle(3, 3, 0, 4);
     buildMeshTopology(mesh);
     return mesh;
 }
@@ -79,8 +79,8 @@ static MeshData makeUnitSquareMesh() {
     mesh.vy = {0.0, 0.0, 1.0, 1.0};
     mesh.vz = {0.0, 0.0, 0.0, 0.0};
     mesh.resize_triangles(2);
-    mesh.tri_v0[0] = 0; mesh.tri_v1[0] = 1; mesh.tri_v2[0] = 3;
-    mesh.tri_v0[1] = 0; mesh.tri_v1[1] = 3; mesh.tri_v2[1] = 2;
+    mesh.set_triangle(0, 0, 1, 3);
+    mesh.set_triangle(1, 0, 3, 2);
     buildMeshTopology(mesh);
     return mesh;
 }
@@ -109,8 +109,8 @@ static MeshData makeStructuredMesh(int N, double domain_m = 10.0) {
         for (int j = 0; j < N; ++j) {
             int v00 = i * (N + 1) + j,     v01 = i * (N + 1) + j + 1;
             int v10 = (i+1) * (N + 1) + j, v11 = (i+1) * (N + 1) + j + 1;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v01; mesh.tri_v2[t] = v11; ++t;
-            mesh.tri_v0[t] = v00; mesh.tri_v1[t] = v11; mesh.tri_v2[t] = v10; ++t;
+            mesh.set_triangle(t, v00, v01, v11); ++t;
+            mesh.set_triangle(t, v00, v11, v10); ++t;
         }
 
     buildMeshTopology(mesh);
@@ -378,15 +378,10 @@ static std::vector<double> laplacianMatvec(const MeshData& mesh,
     std::vector<double> y(static_cast<std::size_t>(n), 0.0);
 
     for (int i = 0; i < n; ++i) {
-        const int nbrs[3] = {
-            mesh.tri_nbr0[static_cast<std::size_t>(i)],
-            mesh.tri_nbr1[static_cast<std::size_t>(i)],
-            mesh.tri_nbr2[static_cast<std::size_t>(i)]
-        };
-        for (int e = 0; e < 3; ++e) {
-            int j = nbrs[e];
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(i)); ++e) {
+            int j = mesh.cell_neighbour(static_cast<int>(i), e);
             if (j < 0) continue;
-            double len = mesh.edge_length[static_cast<std::size_t>(i * 3 + e)];
+            double len = mesh.edge_length[static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e))];
             double dx  = mesh.tri_cx[static_cast<std::size_t>(j)]
                        - mesh.tri_cx[static_cast<std::size_t>(i)];
             double dy  = mesh.tri_cy[static_cast<std::size_t>(j)]
@@ -513,11 +508,9 @@ TEST(MeshEigenBasis, GroundedBasisCapturesUniformShift) {
     std::vector<double> gw(static_cast<std::size_t>(n), 0.0);
     for (int i = 0; i < n; ++i) {
         const auto ui = static_cast<std::size_t>(i);
-        const int nbrs[3] = {mesh.tri_nbr0[ui], mesh.tri_nbr1[ui],
-                             mesh.tri_nbr2[ui]};
-        for (int e = 0; e < 3; ++e) {
-            const auto idx = static_cast<std::size_t>(i * 3 + e);
-            if (nbrs[e] >= 0) continue;
+        for (int e = 0; e < mesh.cell_vertex_count(static_cast<int>(ui)); ++e) {
+            const auto idx = static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e));
+            if (mesh.cell_neighbour(static_cast<int>(ui), e) >= 0) continue;
             if (mesh.edge_mx[idx] >= 1e-9) continue;
             const double dx = mesh.edge_mx[idx] - mesh.tri_cx[ui];
             const double dy = mesh.edge_my[idx] - mesh.tri_cy[ui];

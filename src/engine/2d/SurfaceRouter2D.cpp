@@ -2114,11 +2114,8 @@ double SurfaceRouter2D::computeKEff() const {
     double s_sum = 0.0;
     int    n_faces = 0;
     for (int i = 0; i < nt; ++i) {
-        const int nbrs[3] = {mesh_.tri_nbr0[static_cast<std::size_t>(i)],
-                             mesh_.tri_nbr1[static_cast<std::size_t>(i)],
-                             mesh_.tri_nbr2[static_cast<std::size_t>(i)]};
-        for (int e = 0; e < 3; ++e) {
-            const int j = nbrs[e];
+        for (int e = 0; e < mesh_.cell_vertex_count(static_cast<int>(i)); ++e) {
+            const int j = mesh_.cell_neighbour(static_cast<int>(i), e);
             if (j <= i) continue;   // boundary, or this face already counted
             const double dx = mesh_.tri_cx[static_cast<std::size_t>(j)]
                             - mesh_.tri_cx[static_cast<std::size_t>(i)];
@@ -2148,14 +2145,12 @@ void SurfaceRouter2D::computeGroundWeights() {
     if (options_.rom_ground_scale <= 0.0) return;
 
     // boundary_ is sized and drained (drainPendingRows) before initROM runs.
-    if (boundary_.edge_bc_type.size() < nt * 3) return;
+    if (boundary_.edge_bc_type.size() < static_cast<std::size_t>(mesh_.n_edge_slots())) return;
 
     for (std::size_t i = 0; i < nt; ++i) {
-        const int nbrs[3] = {mesh_.tri_nbr0[i], mesh_.tri_nbr1[i],
-                             mesh_.tri_nbr2[i]};
-        for (int e = 0; e < 3; ++e) {
-            if (nbrs[e] >= 0) continue;  // interior face
-            const auto idx = i * 3 + static_cast<std::size_t>(e);
+        for (int e = 0; e < mesh_.cell_vertex_count(static_cast<int>(i)); ++e) {
+            if (mesh_.cell_neighbour(static_cast<int>(i), e) >= 0) continue;  // interior face
+            const auto idx = static_cast<std::size_t>(openswmm::twoD::MeshData::slot(static_cast<int>(i), e));
             // WALL faces are zero-flux: deviations don't flush there, so they
             // are not grounded. Everything else (NORMAL_FLOW, SPECIFIED_*,
             // RATING_CURVE) is an open face water can actually leave through.

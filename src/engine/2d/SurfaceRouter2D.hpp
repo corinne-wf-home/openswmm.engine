@@ -677,7 +677,7 @@ private:
     /// Per-cell free-surface scratch for the render-depth reconstruction,
     /// held across refreshes so the pass allocates nothing.
     std::vector<double> render_eta_;
-    /// Flat mesh edge slots (3*i+e) carrying a non-WALL boundary condition.
+    /// Flat mesh edge slots (MeshData::slot(i, e)) carrying a non-WALL boundary condition.
     /// The BC TYPE of a slot is fixed once the model is resolved, so the list
     /// is built once in initialize(); the per-step boundary ledger and the
     /// per-step TS/rating resolve walk it instead of all 3*n_triangles slots.

@@ -1068,6 +1068,15 @@ if(OPENSWMM_WITH_HDF5)
     # meaningless to the other — which presents exactly as a corrupt file.
     # Every H5* call therefore lives behind the h5io helpers in the engine.
     if(hdf5_FOUND)
+        # _OPENSWMM_HDF5_TARGET is set in src/engine's scope, not this one;
+        # hdf5_FOUND is TRUE here because the uncertainty grid tests above
+        # re-run find_package(hdf5) in this directory. Resolve the imported
+        # target locally (headers only, as below).
+        if(TARGET hdf5::hdf5-shared)
+            set(_OPENSWMM_HDF5_TARGET hdf5::hdf5-shared)
+        elseif(TARGET hdf5::hdf5-static)
+            set(_OPENSWMM_HDF5_TARGET hdf5::hdf5-static)
+        endif()
         get_target_property(_h5_inc ${_OPENSWMM_HDF5_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
         if(_h5_inc)
             target_include_directories(test_engine_hdf5_model PRIVATE ${_h5_inc})
