@@ -187,9 +187,16 @@ index at engine initialization (after `[POLLUTANTS]` has been parsed), so the
 `[UNCERTAINTY]` section may appear before or after `[POLLUTANTS]` in the file.
 
 **QUALITY layer rules (v1):**
-- `DIST` defaults to `UNIFORM`; `UNIFORM` is the only supported distribution in v1.
-- The perturbation `p` is a relative half-range on the decay rate: each member's
-  `k_i ∈ [k(1−p), k(1+p)]`.
+- `DIST` defaults to `UNIFORM`; `NORMAL` and `LOGNORMAL` are accepted too (H6),
+  and mean exactly what they mean on every other layer (the same inverse-CDF
+  mapping as the parameter registry):
+  - `UNIFORM` — `p` is a half-range: `k_i ∈ [k(1−p), k(1+p)]`.
+  - `NORMAL` — a ±3σ-truncated normal with σ = p/3. Same `p`, a band about
+    0.61× as wide as `UNIFORM`'s.
+  - `LOGNORMAL` — median multiplier 1, 95th percentile `1+p`, 5th percentile
+    `1/(1+p)`. The band is skewed toward *more* decay (lower concentration),
+    by about `(1+p)` : 1.
+- Example: `QUALITY  TSS  0.30  LOGNORMAL`.
 - The `ENTRY` is fixed to `RATE_MULT` (the decay rate is a rate multiplier);
   an explicit `ENTRY` token is not accepted for `QUALITY` in v1.
 - `QUALITY` entries do **not** activate the hydraulic ROM — they produce analytic
@@ -907,7 +914,7 @@ The file is created by replacing the `.rpt` suffix of the report path with
 `.wq_uncertainty.csv` (or appending if no `.rpt` suffix). Schema:
 
 ```
-time_s,node_name,pollutant_index,q05,q50,q95
+time_s,node_name,pollutant,q05,q50,q95
 ```
 
 **What the columns mean:**
@@ -916,7 +923,7 @@ time_s,node_name,pollutant_index,q05,q50,q95
 |---|---|
 | `time_s` | Simulation time in seconds at the report boundary |
 | `node_name` | SWMM node name |
-| `pollutant_index` | 0-based index into the `[POLLUTANTS]` list |
+| `pollutant` | Pollutant name, as written in `[POLLUTANTS]` |
 | `q05` | 5th-percentile concentration (mass/volume) |
 | `q50` | Median concentration — ≈ the deterministic value |
 | `q95` | 95th-percentile concentration |
@@ -924,8 +931,11 @@ time_s,node_name,pollutant_index,q05,q50,q95
 **What the bounds represent:** the spread in concentration attributable to ±`pert`
 uncertainty in the first-order decay rate `k` **over the most recent report interval only**.
 The bounds are analytic: `c₀ · exp(−k · kmᵢ · dt)` where `c₀` is the deterministic
-concentration at the start of the report interval, `kmᵢ` are M ascending uniform
-multipliers spanning `[1−p, 1+p]`, and `dt` is the report step in days.
+concentration at the start of the report interval, `kmᵢ` are M = 50 stratified
+multipliers drawn from the entry's distribution family (`[1−p, 1+p]` for
+`UNIFORM`), and `dt` is the report step in days. Values are written with 12
+significant digits: a one-interval band is narrow (relative width
+`k·dt·1.8p` for `UNIFORM`), and fewer digits would print `q05 = q50 = q95`.
 
 **Key properties:**
 - `q50 ≈ c_det` (the deterministic concentration at the report time) — the band is
@@ -1504,11 +1514,19 @@ xarray as a supplementary group.
    the concentration field is to decay-rate assumptions at each reporting period. A future
    version may track parcel age to produce cumulative bands.
 
-9. **WQ uncertainty supports only UNIFORM distribution (v1).** The `WQUncertaintyBounds`
-   computer generates its own ascending uniform strata internally. `NORMAL` and `LOGNORMAL`
-   distributions on the `QUALITY` layer are rejected with an error message. A future version
-   (Option B in the design doc) will accept a precomputed multiplier column from
-   `UncertaintyEnsemble` to support arbitrary distributions and cross-parameter decorrelation.
+9. **WQ decay-rate draws are not decorrelated from other parameters.** Since H6 the
+   `QUALITY` layer accepts `UNIFORM`, `NORMAL` and `LOGNORMAL`, but each pollutant's
+   multipliers are the band calculator's own stratified sequence, not a column of the
+   shared `UncertaintyEnsemble`. That is harmless for a band computed independently per
+   pollutant; it matters only if a future version combines WQ members with hydraulic
+   members (Option B in `WQ_LAYER_DESIGN.md`).
+
+   **Also note, for this build line:** quality *routing* applies the `[POLLUTANTS]`
+   decay coefficient per second although it is entered per day, and a pollutant row
+   in `[DWF]` is added to the node's dry-weather flow instead of loading the pollutant.
+   Both are fixed on upstream `swmm6_rel` and arrive with the next rebase. The
+   uncertainty band itself uses the per-day value correctly; the deterministic
+   concentration it is centred on inherits the routing defects until then.
 
 10. **Surcharged bands: calibrated under `NODE_CONTINUITY SEMI_IMPLICIT`; a documented
     limitation under `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by

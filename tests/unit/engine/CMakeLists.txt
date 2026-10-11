@@ -906,15 +906,16 @@ endif()
 if(OPENSWMM_BUILD_2D)
     add_gtest_unit(test_engine_soft_rain_parser      test_soft_rain_parser.cpp)
     add_gtest_unit(test_engine_soft_rain_gage_engine test_soft_rain_gage_engine.cpp)
+    # PR 13b / H6 (2026-10-10): the WQ QUALITY uncertainty layer is now wired
+    # (SWMMEngine::wq_unc_active / wq_conc_prev_ / <rpt>.wq_uncertainty.csv).
+    # 2D-gated only because the [UNCERTAINTY] parser lives in the 2D-compiled
+    # SectionHandlers2D -- the layer itself has no 2D dependency.
+    add_gtest_unit(test_engine_wq_uncertainty        test_engine_wq_uncertainty.cpp)
 endif()
 
 # ---- Deliberately NOT registered: these do not build on this base ----------
 # Each was compile-checked during the 2026-08-18 sweep; the blocker is a
 # genuinely un-ported feature, not a broken test.
-#
-#   test_engine_wq_uncertainty.cpp  -- needs SWMMEngine::wq_unc_active /
-#       wq_conc_prev_ (post-reform PR 13b, the WQ QUALITY uncertainty layer).
-#       Never ported to this line.
 #
 #   test_spectral_correction.cpp    -- needs hydraulics/SpectralCoarse.cpp,
 #       which src/engine/CMakeLists.txt EXCLUDES on purpose (the DW

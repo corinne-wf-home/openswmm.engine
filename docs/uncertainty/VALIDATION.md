@@ -866,6 +866,87 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# H6 — WQ decay-rate bands: PR 13b ported, NORMAL/LOGNORMAL families added (2026-10-10)
+
+**Branch** `hsym2/prh6-wq-families` (stacked on H8). H6 was blocked because the
+layer it extends had never reached this line: `WQUncertaintyBounds` was a
+test-only header, and the engine wiring (PR 13b on the pre-port sidecar) was
+missing. This PR ports 13b and then adds the families.
+
+## 1. What changed
+
+- **PR 13b port** (`SWMMEngine`): QUALITY specs resolve pollutant names at init
+  (late, so `[UNCERTAINTY]` may precede `[POLLUTANTS]`); an unknown name is a
+  *recorded* warning (report + `swmm_get_warning_count`), not just a callback;
+  the anchor buffer is seeded from the start state; at every report boundary
+  each node × configured pollutant gets `q05/q50/q95` of
+  `c_prev·exp(−k·kmᵢ·dt_report)` written to `<rpt>.wq_uncertainty.csv`
+  (12 significant digits); the anchor then rolls forward. Independent of every
+  ROM, exactly as `WQ_LAYER_DESIGN.md` specified.
+- **H6**: `WQUncertaintyBounds` gains a `dist` field and maps its strata through
+  the registry's own `invCdfMultiplier()` (PR 9b) — no second inverse-normal.
+  The stashed August draft inlined one and clipped LOGNORMAL to `[1−p, 1+p]`,
+  which silently changed what LOGNORMAL means on this layer; neither was kept.
+  Both parsers accept the three families.
+- The dormant `test_engine_wq_uncertainty` (two lifecycle tests, unregistered
+  since the 2026-08-18 sweep) is registered and passes.
+
+## 2. Validation
+
+The two woken tests check only file shape, and their fixture carries no
+pollutant load: every concentration in it is zero. Content is tested separately.
+
+**Unit (closed forms, `WQDecayBoundsFamilies`)**: UNIFORM is `EXPECT_EQ`
+bit-identical to the v1 hand-written strata at M = 2/7/50/51; the median member
+reproduces `c₀·exp(−k·Δt_s/86400)` for every family (the design's days
+convention); zero perturbation collapses every family exactly; NORMAL's width
+is `(2·1.645/3)/1.8 = 0.609` of UNIFORM's (±5 %); LOGNORMAL's
+lower : upper half-width is `1+p` (±5 %), the opposite skew to UNIFORM's
+curvature-only asymmetry.
+
+**Engine (`EngineWQUncertaintyContent`)**, a 1-junction fixture with a real TSS
+load: UNIFORM relative width equals the physical `k·Δt·0.9·2p` at every
+report boundary (±5 %); the three families through the parser and the CSV
+reproduce 0.61× and the `1+p` skew row by row, with identical deterministic
+medians; zero decay gives an exactly zero-width band; an unknown pollutant
+warns and writes no rows. **Mutation-checked**: forcing every spec to UNIFORM
+fails only the family test; dividing the decay rate by 86,400 (the post-rebase
+hazard below) fails only the physical-width test.
+
+## 3. Two quality-routing defects found on this line (not fixed here)
+
+Building a fixture with a non-zero concentration exposed both. Neither is in
+the WQ layer; both are **already fixed on upstream `swmm6_rel`** and arrive
+with a rebase, so neither was patched in this PR.
+
+1. **Decay applied per second.** `QualityHandler` stores `Kdecay` as entered
+   (1/day); `QualityRouting` applies `1 − k·dt` with `dt` in seconds and clamps
+   at zero. Any k near 1/day zeroes a node's concentration in one routing step;
+   k = 0.01/day decays 86,400× too fast. Upstream "KD1" divides by
+   `SEC_PER_DAY` at parse, as legacy `landuse.c` does.
+2. **Pollutant `[DWF]` rows booked as water.** `InflowSolver::computeAll` sums
+   every `[DWF]` row into `dwf_inflow` regardless of constituent: `J1 TSS 100`
+   adds 100 cfs (fixture: 1.759 ML dry-weather inflow vs legacy's 0.060 ML) and
+   the TSS load is never applied. Upstream sums FLOW rows only. None of EPA
+   Examples 1–8 has a pollutant `[DWF]` row, which is why H8's flow comparison
+   could not see it.
+
+The stack's merge-base with `swmm6_rel` is 2026-07-06; upstream has 725 commits
+since, including a quality-routing parity campaign. **Rebase hazard for this
+layer**: after the rebase `k_decay` holds 1/s, and the WQ band code (which reads
+it as 1/day) must convert, or every band shrinks 86,400×. The site is marked in
+`SWMMEngine.cpp`, and the physical-width test fails if it is missed.
+
+## 4. Scope unchanged from the design
+
+One report interval only (routing carries no parcel age); no feedback into
+hydraulics or any ROM; multipliers are the calculator's own strata, not an
+`UncertaintyEnsemble` column (Option B).
+
+## 5. Reproduction
+
+    ctest --test-dir build/<dir> -R 'test_engine_wq_uncertainty|test_engine_runoff_ensemble'
+
 # H16 — relative-deviation reconstruction removes the cross-depth leakage W4b found (2026-10-10)
 
 **Branch** `hsym2/h16-depth-relative-deviation` (stacked on W4b). The fix

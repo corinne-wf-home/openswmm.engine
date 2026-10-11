@@ -767,11 +767,8 @@ std::string parseUncertaintyLine(
     else
         return "Unknown DISTRIBUTION '" + dist_str + "' (UNIFORM / NORMAL / LOGNORMAL)";
 
-    // --- QUALITY layer validation ---
-    if (layer == openswmm::uncertainty::LayerTarget::QUALITY) {
-        if (dist != openswmm::uncertainty::DistType::UNIFORM)
-            return "QUALITY layer only supports UNIFORM distribution";
-    }
+    // --- QUALITY layer: all three families accepted since H6 (the bounds
+    //     calculator maps strata through the registry's invCdfMultiplier).
 
     // --- Resolve NAME and ENTRY ---
     std::string param_upper = param_str;

@@ -74,6 +74,7 @@
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
 #include "../uncertainty/RunoffElasticity.hpp"
+#include "../uncertainty/WQUncertaintyBounds.hpp"
 #ifdef OPENSWMM_HAS_2D
 #include "../uncertainty/GridFileReader.hpp"
 #endif
@@ -370,6 +371,9 @@ public:
     /** @brief 1D spectral ROM (null if not built, or the network is too small). */
     const uncertainty::SpectralROM1D* rom1d() const noexcept { return rom1d_.get(); }
 
+    /** @brief True when an [UNCERTAINTY] QUALITY source is active (PR 13b WQ layer). */
+    bool wq_unc_active() const noexcept { return wq_unc_active_; }
+
     /**
      * @brief PR H5: per-active-node surcharge-attenuation factor from the
      * most recent stepRouting() call (active-node space, same indexing as
@@ -468,9 +472,8 @@ private:
     /// Populated from the [UNCERTAINTY] section by register2DSections's
     /// parseUncertaintyLine. 2D-layer specs also set fields directly on
     /// surface_router_.options() (see that function). 1D specs drive
-    /// buildROM1D() below; QUALITY specs are recorded here only — nothing on
-    /// this base consumes them yet (the WQ uncertainty layer, PR 13 on the
-    /// old sidecar, was not ported).
+    /// buildROM1D() below; QUALITY specs drive the analytic WQ decay-rate
+    /// band (PR 13b, ported 2026-10-10 as part of H6 — see wq_* members).
     uncertainty::UncertaintyConfig uncertainty_config_;
 
 #ifdef OPENSWMM_HAS_2D
@@ -586,6 +589,20 @@ private:
     /// why this must never be called from buildROM1D()).
     void refreshRom1dTravelTime() noexcept;
     std::ofstream rom1d_csv_;              ///< 1D ROM quantile CSV, written at report intervals
+
+    // ---- PR 13b / H6: water-quality decay-rate uncertainty layer ----------
+    // Analytic post-processing (WQ_LAYER_DESIGN.md): at every report
+    // boundary, for each configured pollutant and every node, bound
+    // c_prev*exp(-k*km_i*dt_report) over M multipliers km_i drawn from the
+    // spec's distribution family. Independent of every ROM; v1 semantics =
+    // the most recent report interval only (no parcel age in routing).
+    std::vector<double> wq_conc_prev_;            ///< node concentrations at the previous report boundary (node*nPollut + p)
+    std::ofstream       wq_csv_;                  ///< <rpt>.wq_uncertainty.csv (time_s,node_name,pollutant,q05,q50,q95)
+    uncertainty::WQUncertaintyBounds wq_bounds_;  ///< the analytic bounds calculator
+    std::vector<int>    wq_pollut_indices_;       ///< per QUALITY spec: pollutant index (-1 = unresolved, skipped)
+    std::vector<double> wq_pollut_perturbations_; ///< per QUALITY spec: fractional decay-rate perturbation
+    std::vector<uncertainty::DistType> wq_pollut_dists_; ///< per QUALITY spec: multiplier family (H6)
+    bool                wq_unc_active_ = false;   ///< true when uncertainty_config_.has_quality()
     std::ofstream rom_diag_csv_;           ///< PR H3: <rpt>.rom_diag.csv (fr_trust/surcharge_frac/...)
 
     // ---- PR H10: threshold-crossing probability + modality flag ----------

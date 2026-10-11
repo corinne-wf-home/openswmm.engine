@@ -343,15 +343,36 @@ TEST(SurfaceROMInputParser, UncertaintySectionRecords1DAndQualitySpecsOnly) {
     swmm_engine_destroy(eng);
 }
 
-TEST(SurfaceROMInputParser, UncertaintySectionQualityRejectsNonUniformDist) {
+// H6 (2026-10-10): the QUALITY layer accepts NORMAL and LOGNORMAL. This
+// replaces UncertaintySectionQualityRejectsNonUniformDist, which pinned the
+// v1 UNIFORM-only rule that H6 removes by design.
+TEST(SurfaceROMInputParser, UncertaintySectionQualityAcceptsLognormal) {
     const fs::path dir = fs::current_path() / "rom_input_parser_out";
     fs::create_directories(dir);
 
     const std::string extra = "\n[UNCERTAINTY]\nQUALITY TSS 0.10 LOGNORMAL\n";
     std::string err;
+    auto eng = parseOnly(dir, "unc_quality_lognormal", extra, &err);
+    ASSERT_NE(eng, nullptr) << "error was: " << err;
+    const auto& cfg = static_cast<openswmm::SWMMEngine*>(eng)->uncertaintyConfig();
+    ASSERT_EQ(cfg.sources.size(), 1u);
+    EXPECT_EQ(cfg.sources[0].layer, openswmm::uncertainty::LayerTarget::QUALITY);
+    EXPECT_EQ(cfg.sources[0].dist,  openswmm::uncertainty::DistType::LOGNORMAL);
+    EXPECT_DOUBLE_EQ(cfg.sources[0].perturbation, 0.10);
+    swmm_engine_close(eng);
+    swmm_engine_destroy(eng);
+}
+
+// ...but a family the engine does not implement is still an input error.
+TEST(SurfaceROMInputParser, UncertaintySectionQualityRejectsUnknownDist) {
+    const fs::path dir = fs::current_path() / "rom_input_parser_out";
+    fs::create_directories(dir);
+
+    const std::string extra = "\n[UNCERTAINTY]\nQUALITY TSS 0.10 GAMMA\n";
+    std::string err;
     auto eng = parseOnly(dir, "unc_quality_bad_dist", extra, &err);
     EXPECT_EQ(eng, nullptr);
-    EXPECT_NE(err.find("[2D]"), std::string::npos) << "error was: " << err;
+    EXPECT_FALSE(err.empty());
 }
 
 TEST(SurfaceROMInputParser, UncertaintySectionRejectsUnknownLayer) {

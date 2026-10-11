@@ -127,6 +127,12 @@ int SWMMEngine::open(const char* inp_path,
     ctx_.reset();
 #ifdef OPENSWMM_HAS_2D
     uncertainty_config_ = uncertainty::UncertaintyConfig{};
+    wq_unc_active_ = false;
+    wq_pollut_indices_.clear();
+    wq_pollut_perturbations_.clear();
+    wq_pollut_dists_.clear();
+    wq_conc_prev_.clear();
+    if (wq_csv_.is_open()) wq_csv_.close();
 #endif
 
     rpt_path_ = rpt_path ? rpt_path : "";
@@ -4100,6 +4106,47 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                            << rom1d_->q95[uai]                               << '\n';
             }
         }
+
+        // PR 13b / H6: WQ decay-rate band for every node x configured
+        // pollutant, anchored on the concentration at the START of this
+        // report interval; then roll the anchor forward. NOT nested under
+        // the ROM condition -- the WQ layer runs without any ROM.
+        if (wq_unc_active_ && wq_csv_.is_open()) {
+            const int    n_nodes        = ctx_.nodes.count();
+            const int    n_polluts      = ctx_.n_pollutants();
+            const double report_dt_days = ctx_.options.report_step / 86400.0;
+            constexpr int kWqMembers = 50;
+            if (wq_conc_prev_.size() != ctx_.nodes.conc.size())
+                wq_conc_prev_ = ctx_.nodes.conc;   // defensive: layout changed under us
+            for (int i = 0; i < n_nodes; ++i) {
+                const auto ui = static_cast<std::size_t>(i);
+                const double* conc_prev = wq_conc_prev_.data() + ui * static_cast<std::size_t>(n_polluts);
+                for (std::size_t s = 0; s < wq_pollut_indices_.size(); ++s) {
+                    const int p = wq_pollut_indices_[s];
+                    if (p < 0 || p >= n_polluts) continue;   // unresolved name, warned at init
+                    wq_bounds_.decay_pert = wq_pollut_perturbations_[s];
+                    wq_bounds_.dist       = wq_pollut_dists_[s];
+                    // UNIT HAZARD (read before rebasing onto swmm6_rel):
+                    // on THIS line QualityHandler stores Kdecay as parsed,
+                    // 1/day, so it pairs with dt in days. Upstream
+                    // swmm6_rel (KD1, 2026-09) divides by SEC_PER_DAY at
+                    // parse and stores 1/s -- after a rebase this must
+                    // become k_decay * SEC_PER_DAY (or dt in seconds), or
+                    // every band shrinks 86,400x.
+                    // EngineWQUncertaintyContent.RealLoadGivesOrderedNonZeroBands
+                    // pins the physical width and fails if this drifts.
+                    const double k_per_day =
+                        ctx_.pollutants.k_decay[static_cast<std::size_t>(p)];
+                    const auto b = wq_bounds_.compute(conc_prev[p], k_per_day,
+                                                      report_dt_days, kWqMembers);
+                    wq_csv_ << ctx_.current_time                 << ','
+                            << ctx_.node_names.name_of(i)        << ','
+                            << ctx_.pollutant_names.name_of(p)   << ','
+                            << b.q05 << ',' << b.q50 << ',' << b.q95 << '\n';
+                }
+            }
+            wq_conc_prev_ = ctx_.nodes.conc;
+        }
 #endif
         hydraulics::TimestepController::reset_output_timer(ctx_);
     }
@@ -4271,6 +4318,9 @@ int SWMMEngine::end() noexcept {
 
     if (rom1d_csv_.is_open()) {
         rom1d_csv_.close();
+    }
+    if (wq_csv_.is_open()) {
+        wq_csv_.close();
     }
     if (rom_diag_csv_.is_open()) {
         rom_diag_csv_.close();
@@ -4912,6 +4962,59 @@ void SWMMEngine::initHydraulics() noexcept {
             need_rom1d = true;
     if (need_rom1d) {
         buildROM1D();
+    }
+
+    // 1a-iii. Water-quality decay-rate uncertainty layer (PR 13b, ported for
+    //         H6). Independent of the ROMs: active whenever an [UNCERTAINTY]
+    //         QUALITY source is configured. Pollutant NAME -> index resolution
+    //         is deliberately late (here, not at parse time) because
+    //         [UNCERTAINTY] may precede [POLLUTANTS] in the file.
+    wq_unc_active_ = uncertainty_config_.has_quality();
+    if (wq_unc_active_) {
+        // Anchor the first report interval on the deterministic start state.
+        wq_conc_prev_ = ctx_.nodes.conc;
+
+        const auto& quality_specs =
+            uncertainty_config_.specs_for(uncertainty::LayerTarget::QUALITY);
+        wq_pollut_indices_.clear();
+        wq_pollut_perturbations_.clear();
+        wq_pollut_dists_.clear();
+        for (const auto& spec : quality_specs) {
+            const int pollut_index = ctx_.pollutant_names.find(spec.name);
+            if (pollut_index < 0) {
+                // Recorded (report + swmm_get_warning_count), not just
+                // emitted to a callback: a typo here silently produces an
+                // empty band file otherwise.
+                push_report_warning(
+                    "[UNCERTAINTY] QUALITY: pollutant '" + spec.name +
+                    "' not found in [POLLUTANTS]; its uncertainty bounds "
+                    "will not be reported.",
+                    SWMM_ERR_PARSE);
+            }
+            wq_pollut_indices_.push_back(pollut_index);
+            wq_pollut_perturbations_.push_back(spec.perturbation);
+            wq_pollut_dists_.push_back(spec.dist);
+        }
+
+        if (!rpt_path_.empty()) {
+            std::string wq_csv_path = rpt_path_;
+            const std::string rpt_ext = ".rpt";
+            if (wq_csv_path.size() >= rpt_ext.size() &&
+                wq_csv_path.compare(wq_csv_path.size() - rpt_ext.size(), rpt_ext.size(), rpt_ext) == 0) {
+                wq_csv_path.replace(wq_csv_path.size() - rpt_ext.size(), rpt_ext.size(), ".wq_uncertainty.csv");
+            } else {
+                wq_csv_path += ".wq_uncertainty.csv";
+            }
+            wq_csv_.open(wq_csv_path);
+            if (wq_csv_.is_open()) {
+                // A decay-rate band over one report interval is a small
+                // relative width (k·dt·1.8p, e.g. 1e-5 for slow decay):
+                // the stream default of 6 significant digits would print
+                // q05 == q50 == q95. 12 keeps the band resolvable.
+                wq_csv_.precision(12);
+                wq_csv_ << "time_s,node_name,pollutant,q05,q50,q95\n";
+            }
+        }
     }
 #endif
 

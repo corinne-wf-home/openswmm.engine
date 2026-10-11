@@ -32,6 +32,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "UncertaintyTypes.hpp"
+#include "LhsShuffle.hpp"
+
 namespace openswmm::uncertainty {
 
 /**
@@ -44,6 +47,16 @@ struct WQUncertaintyBounds {
     /// Fractional perturbation on the decay rate k (half-range).
     /// k_i = k * km_i,  km_i ∈ [1 - decay_pert, 1 + decay_pert].
     double decay_pert = 0.20;
+
+    /// Multiplier family (H6). The strata u_i = (i+0.5)/M are mapped through
+    /// the SAME invCdfMultiplier() the parameter registry uses (PR 9b /
+    /// PARAMETER_REGISTRY.md), so a QUALITY spec's distribution means
+    /// exactly what it means on every other layer:
+    ///   UNIFORM   km ∈ [1-p, 1+p]            (bit-identical to the v1 code)
+    ///   NORMAL    1 + (p/3)·z, z from the ±3σ-truncated normal
+    ///   LOGNORMAL exp(σ_log·z), σ_log = ln(1+p)/1.6449  → median 1, q95 = 1+p,
+    ///             q05 = 1/(1+p): asymmetric, and NOT clipped to [1-p, 1+p].
+    DistType dist = DistType::UNIFORM;
 
     struct Bounds {
         double q05;  ///< 5th-percentile concentration
@@ -68,14 +81,15 @@ struct WQUncertaintyBounds {
     Bounds compute(double c0, double k, double dt, int M) const {
         if (M < 2) M = 2;
         const double p  = decay_pert;
-        const double lo = 1.0 - p;
-        const double hi = 1.0 + p;
         const double Md = static_cast<double>(M);
 
         std::vector<double> conc(static_cast<std::size_t>(M));
         for (int i = 0; i < M; ++i) {
-            // LHS stratum i: km_i ascending from lo to hi
-            double km = lo + (static_cast<double>(i) + 0.5) / Md * (hi - lo);
+            // LHS stratum midpoint u_i, mapped through the family's inverse
+            // CDF. For UNIFORM this is exactly the v1 expression
+            // lo + u*(hi-lo) (invCdfMultiplier keeps that form on purpose).
+            const double u  = (static_cast<double>(i) + 0.5) / Md;
+            const double km = invCdfMultiplier(dist, p, u);
             conc[static_cast<std::size_t>(i)] = c0 * std::exp(-k * km * dt);
         }
         // conc is in descending order (larger km → more decay → lower c),
