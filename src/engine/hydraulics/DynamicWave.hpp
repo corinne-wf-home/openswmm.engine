@@ -125,6 +125,17 @@ struct HSnapshot {
     int n_nodes = 0;
     int n_links = 0;
 
+    /// PR H17: the same conductance view for every NON-conduit link (pumps,
+    /// orifices, weirs, outlets) -- 0.5*dt*|dqdh| per structure, with its end
+    /// nodes and its link index. Without these the ROM graph was conduit-only
+    /// and a structure split the network into pieces that could not exchange
+    /// deviations. Sized n_structs; 0 when a structure is closed (dqdh 0).
+    const double* struct_off  = nullptr;
+    const int*    struct_n1   = nullptr;
+    const int*    struct_n2   = nullptr;
+    const int*    struct_link = nullptr;
+    int n_structs = 0;
+
     bool   valid      = false;  ///< false until first execute() completes
 };
 
@@ -624,6 +635,8 @@ private:
 
     // H snapshot — populated once per execute() call after Picard convergence
     std::vector<double> snap_conduit_off_;  ///< 0.5*dt*dqdh[ci], ci-indexed
+    std::vector<double> snap_struct_off_;   ///< PR H17: 0.5*dt*|dqdh| per non-conduit link
+    std::vector<int>    snap_struct_n1_, snap_struct_n2_, snap_struct_link_;
     double snap_dt_    = 0.0;
     bool   snap_valid_ = false;
 
@@ -772,6 +785,13 @@ public:
         s.link_froude     = froude_.empty() ? nullptr : froude_.data();
         s.n_nodes         = n_nodes_;
         s.n_links         = n_links_;
+        s.n_structs   = static_cast<int>(snap_struct_link_.size());
+        if (s.n_structs > 0) {
+            s.struct_off  = snap_struct_off_.data();
+            s.struct_n1   = snap_struct_n1_.data();
+            s.struct_n2   = snap_struct_n2_.data();
+            s.struct_link = snap_struct_link_.data();
+        }
         s.valid       = snap_valid_;
         return s;
     }

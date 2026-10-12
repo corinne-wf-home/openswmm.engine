@@ -1515,6 +1515,25 @@ int DWSolver::execute(SimulationContext& ctx, double dt,
             snap_conduit_off_[uci] = half_dt * dqdh_[uj];
         }
     }
+    // PR H17: structures (pumps, orifices, weirs, outlets). Their dqdh is
+    // written to ctx.links.dqdh by the structure kernels on every Picard
+    // sweep, so after the loop it is the converged value. Magnitude only:
+    // a pump curve's dQ/dH is negative in the lift and the graph weight is
+    // a conductance.
+    {
+        snap_struct_off_.clear(); snap_struct_n1_.clear();
+        snap_struct_n2_.clear();  snap_struct_link_.clear();
+        const double half_dt = 0.5 * dt;
+        const int nl = std::min(n_links_, static_cast<int>(ctx.links.type.size()));
+        for (int j = 0; j < nl; ++j) {
+            const auto uj = static_cast<std::size_t>(j);
+            if (ctx.links.type[uj] == LinkType::CONDUIT) continue;
+            snap_struct_off_.push_back(half_dt * std::fabs(ctx.links.dqdh[uj]));
+            snap_struct_n1_.push_back(ctx.links.node1[uj]);
+            snap_struct_n2_.push_back(ctx.links.node2[uj]);
+            snap_struct_link_.push_back(j);
+        }
+    }
     snap_dt_    = dt;
     snap_valid_ = true;
 

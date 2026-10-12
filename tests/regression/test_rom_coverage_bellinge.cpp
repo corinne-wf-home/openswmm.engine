@@ -165,6 +165,7 @@ std::string bellingeWithRomSpec(double rough_mult) {
 struct RunResult {
     std::map<std::string, std::vector<double>> heads;  // deterministic
     std::map<std::string, std::vector<double>> q05, q50, q95;  // ROM quantiles
+    std::map<std::string, std::vector<int>> flag;                // H17 band validity flag
     std::vector<double> times;
     std::map<std::string, double> invert;  // internal feet, junctions only
     bool ok = false;
@@ -215,6 +216,9 @@ RunResult runCase(const std::string& tag, bool with_rom) {
     // step, so flipping it here (before the first step) is sufficient.
     if (const char* v = std::getenv("H14_DIRECTIONAL"))
         eng->rom1dDirectionalConfig().enabled = std::atoi(v) != 0;
+    // H17 A-B knob: 0 restores the pre-H17 depth x surcharge-elasticity source.
+    if (const char* v = std::getenv("H17_FLOW_SOURCE"))
+        eng->rom1dFlowSource() = std::atoi(v) != 0;
     const auto& ctx = eng->context();
     // Read the solver mode back from the parsed context so a silently
     // no-op'd option (P4's failure mode) is visible, not assumed.
@@ -265,10 +269,21 @@ RunResult runCase(const std::string& tag, bool with_rom) {
             for (const auto& [nm, idx] : node_idx) {
                 auto ui = static_cast<std::size_t>(idx);
                 out.heads[nm].push_back(ctx.nodes.head[ui]);
-                if (rom && rom->is_ready()) {
-                    out.q05[nm].push_back(rom->q05[ui]);
-                    out.q50[nm].push_back(rom->q50[ui]);
-                    out.q95[nm].push_back(rom->q95[ui]);
+                // H17 (2026-10-12): the ROM's quantiles are indexed by ACTIVE
+                // node (outfalls removed). This read used the full node index,
+                // so every node listed after the outfalls -- Bellinge's storage
+                // units -- took another node's band, and the last ones read
+                // past the end of the vector. Map through full_to_active.
+                if (rom && rom->is_ready() && ui < rom->full_to_active.size()) {
+                    const int ai = rom->full_to_active[ui];
+                    if (ai >= 0) {
+                        const auto uai = static_cast<std::size_t>(ai);
+                        out.q05[nm].push_back(rom->q05[uai]);
+                        out.q50[nm].push_back(rom->q50[uai]);
+                        out.q95[nm].push_back(rom->q95[uai]);
+                        const auto& fl = eng->rom1dBandFlags();
+                        out.flag[nm].push_back(uai < fl.size() ? fl[uai] : -1);
+                    }
                 }
             }
         }
@@ -399,6 +414,7 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
     // excluded (depth ~ 0 makes the ratio meaningless).
     constexpr double kMinDepthFt = 0.05;
     std::vector<double> depth_ratios, abs_bands_ft;
+    std::map<int, std::vector<double>> depth_ratios_by_flag;   // H17 step 4
     for (const auto& [nm, q05_vec] : rom.q05) {
         const auto it_q95 = rom.q95.find(nm);
         const auto it_q50 = rom.q50.find(nm);
@@ -411,7 +427,12 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
             const double band  = it_q95->second[i] - q05_vec[i];
             const double depth = it_q50->second[i] - it_inv->second;
             abs_bands_ft.push_back(band);
-            if (depth >= kMinDepthFt) depth_ratios.push_back(band / depth);
+            if (depth >= kMinDepthFt) {
+                depth_ratios.push_back(band / depth);
+                const auto it_f = rom.flag.find(nm);
+                const int fg = (it_f != rom.flag.end() && i < it_f->second.size()) ? it_f->second[i] : -1;
+                depth_ratios_by_flag[fg].push_back(band / depth);
+            }
         }
     }
     auto pct = [](std::vector<double> v, double q) {
@@ -425,6 +446,10 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
     std::printf("Band / local depth (>=%.2f ft): p50=%.4f p90=%.4f p99=%.4f max=%.4f (n=%zu)\n",
                 kMinDepthFt, pct(depth_ratios, 0.5), pct(depth_ratios, 0.9),
                 pct(depth_ratios, 0.99), pct(depth_ratios, 1.0), depth_ratios.size());
+    for (const auto& [fg, v] : depth_ratios_by_flag)
+        std::printf("Band / local depth, flag %-9s: p50=%.4f p90=%.4f p99=%.4f max=%.4f (n=%zu)\n",
+                    fg < 0 ? "?" : openswmm::SWMMEngine::rom1dBandFlagName(static_cast<std::uint8_t>(fg)),
+                    pct(v, 0.5), pct(v, 0.9), pct(v, 0.99), pct(v, 1.0), v.size());
     std::printf("Absolute band (ft)        : p50=%.4f p90=%.4f p99=%.4f max=%.4f\n",
                 pct(abs_bands_ft, 0.5), pct(abs_bands_ft, 0.9), pct(abs_bands_ft, 0.99),
                 pct(abs_bands_ft, 1.0));
@@ -453,6 +478,12 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
     //   nonzero-spread fraction 0.988
     //   band / absolute head : p50 0.0002  p90 0.0013  p99 0.0118  max 0.277
     //   band / local depth   : p50 0.153   p90 0.73    p99 2.00    max 10.7
+    // H17 (2026-10-12), harness index bug fixed (full vs active node index) and
+    // the flow-response Manning source on; same build, source off -> on:
+    //   band / local depth   : p50 0.262 -> 0.318   p90 1.99 -> 4.20
+    //                          p99 4.87 -> 15.07    max 24.7 -> 45.7
+    //   steady-flagged only  : p90 1.98 -> 4.06    transient p90 2.09 -> 4.88
+    // No Bellinge Monte Carlo exists; the wider tail is unvalidated here.
     // The previous baseline (max 0.007, coverage 0.990) came from a run that
     // stopped at 20,000 steps and never reached the storm; it was ~40x too low.
     EXPECT_GT(nonzero_spreads, 0)

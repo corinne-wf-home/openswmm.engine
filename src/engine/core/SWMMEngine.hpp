@@ -88,6 +88,7 @@
 #include "../uncertainty/RomSurchargeAttenuation.hpp"
 #include "../uncertainty/RomPhaseCoordinate.hpp"
 #include "../uncertainty/RomDirectionalOperator.hpp"
+#include "../uncertainty/RomFlowResponse.hpp"
 #include "../uncertainty/UncertaintyEnsemble.hpp"
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
@@ -572,7 +573,25 @@ private:
     std::vector<double> rom1d_alpha_buf_;  ///< per-active-node PR H5 surcharge-attenuation factor (reused each step)
     // PR H14 — Froude-gated directional operator
     uncertainty::DirectionalOperatorConfig rom1d_directional_cfg_;
-    std::vector<int>    rom1d_conduit_link_;   ///< ci -> link index (same order buildROM1D collected conduits)
+    std::vector<int>    rom1d_conduit_link_;   ///< edge -> link index: conduits, then (PR H17) structures, each group in link order
+    // PR H17 — the ROM graph's edge view: every conduit, then every pump,
+    // orifice, weir and outlet, filled from the H snapshot each step.
+    std::vector<double> rom1d_edge_off_;
+    std::vector<int>    rom1d_edge_n1_, rom1d_edge_n2_;
+    /// Fill rom1d_edge_* from a snapshot. Returns the edge count, or 0 when
+    /// the snapshot does not match the edges buildROM1D() collected.
+    int rom1dEdgesFromSnapshot(const dynwave::HSnapshot& snap) noexcept;
+    bool rom1d_flow_source_ = true;
+    /// PR H17 step 4: per-active-node band validity flag, refreshed at each
+    /// report boundary (see refreshRom1dBandFlags()).
+    std::vector<std::uint8_t> rom1d_flag_;
+    void refreshRom1dBandFlags() noexcept;
+    std::vector<uncertainty::FlowEdge> rom1d_fs_edges_;   ///< flowing links, oriented (scratch)
+    std::vector<double> rom1d_fs_phi_;                    ///< phi per active node (scratch)
+    /// Fill rom1d_sens_buf_ with phi = dh/d(ln n): the head shift that lets
+    /// every conduit carry its deterministic flow again after its roughness
+    /// rises. Returns false (buffer untouched) when the solve is singular.
+    bool computeRom1dFlowSource() noexcept;
     std::vector<int>    rom1d_dir_a1_, rom1d_dir_a2_, rom1d_dir_sign_;   ///< per-conduit scratch
     std::vector<double> rom1d_dir_w_, rom1d_dir_fr_, rom1d_dir_drop_, rom1d_dir_M_;
     double rom1d_dir_gated_frac_ = 0.0;
@@ -689,6 +708,15 @@ public:
     /// dissipation lambda*K1d. Not parser-exposed; set through the C++ handle
     /// between open() and the first step.
     double& rom1dK1dScale() noexcept { return rom1d_k1d_scale_; }
+    /// PR H17: Manning sensitivity from the steady linearized flow response
+    /// instead of depth x a fixed elasticity (internal hook while measured).
+    bool& rom1dFlowSource() noexcept { return rom1d_flow_source_; }
+    /// Band validity flag per active node at the last report boundary:
+    /// 0 steady, 1 no_flow, 2 transient (rom1dBandFlagName()).
+    const std::vector<std::uint8_t>& rom1dBandFlags() const noexcept { return rom1d_flag_; }
+    static const char* rom1dBandFlagName(std::uint8_t f) noexcept {
+        switch (f) { case 1: return "no_flow"; case 2: return "transient"; default: return "steady"; }
+    }
     /// SR-6: enable/disable the runoff-elasticity correction of the soft-rain
     /// spread (default on). Off reproduces the pre-SR-6 mapping bit-for-bit.
     bool& rom1dRunoffElasticityEnabled() noexcept { return rom1d_runoff_elasticity_enabled_; }

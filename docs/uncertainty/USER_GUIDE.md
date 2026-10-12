@@ -836,6 +836,19 @@ The per-coupling-point bounds `[q_min, q_max]` across all M members are accumula
 - **q95 − q05** (the spread) quantifies where uncertainty matters most. Large spread = high
   sensitivity to the uncertain parameters at that cell and time.
 
+**The `flag` column (1D, PR H17).** Each row of `<rpt>.uncertainty.csv`
+(`time_s,node_name,q05,q50,q95,flag`) says whether that band is in the regime the Monte Carlo
+gates calibrated:
+
+| `flag` | Meaning | Measured against brute-force Monte Carlo |
+|---|---|---|
+| `steady` | Flow leaves the node and inflow matches outflow within 10 %. | Calibrated on every 1D gate: member coverage 0.89–0.94, width ratio 0.98–1.33. |
+| `transient` | The node is filling or draining (inflow and outflow differ by more than 10 %). | The band can be off either way: a filling pool ran 2.7× wide, a draining force main far too narrow. |
+| `no_flow` | Nothing leaves the node: still water, a pump wet well between cycles, a channel below a weir that has stopped spilling. | The Manning band is near zero, but members can still differ by stored volume. Too narrow (coverage 0.69 on Example 8). |
+
+Read `steady` bands as probabilities and the other two as rankings. Before H17 the file had
+five columns; a reader that splits on commas and takes the first five keeps working.
+
 ### 5.2 Typical spatial patterns
 
 | Observation | Likely cause |
@@ -1443,10 +1456,11 @@ xarray as a supplementary group.
    diffusion-wave (Laplacian) approximation, which drops the momentum term. For subcritical,
    gradually-varying flow in partially-full pipes — the standard urban drainage design case —
    this is a good approximation. It breaks down for: surcharging or fully-pressurized mains
-   (**partially addressed — see limitation 10**); rapidly rising events where `∂Q/∂t` dominates
+   (**addressed — see limitation 10**); rapidly rising events where `∂Q/∂t` dominates
    and, specifically, a filling front's *arrival timing* (**substantially addressed in 1D — see
-   §5.10 and limitation 11**); tidal or strongly backwater-controlled reaches; pump stations and
-   sluice gates. In those
+   §5.10 and limitation 11**); tidal reaches; pump stations and weirs, whose on/off and spill
+   timing leaves volume differences the band does not carry (**partly addressed — see
+   limitation 10**). In those
    regimes the ROM identifies the right *spatial pattern* of sensitivity but may mis-estimate
    band width. This limitation applies to the 1D ROM specifically; the 2D ROM's own fidelity
    tradeoffs (it operates on the explicit local-inertial marcher's linearized advection-diffusion
@@ -1522,17 +1536,21 @@ xarray as a supplementary group.
    row in `[DWF]` was added to the node's dry-weather flow instead of loading the
    pollutant. Both were already fixed upstream and arrived with the rebase.
 
-10. **Surcharged bands: calibrated under `NODE_CONTINUITY SEMI_IMPLICIT`; a documented
-    limitation under `EXPLICIT`.** The 1D ROM scales each node's Manning-sensitivity source by
-    the head's elasticity to n (0.6 free-surface, 2.0 pressurised, blended across the crown —
-    PR H5b), and its operator is one-way across supercritical reaches (Froude-gated, PR H14) so
-    a pool's deviation no longer leaks upstream into nodes it cannot physically reach. Against
-    brute-force Monte Carlo on the surcharged test chain (`SEMI_IMPLICIT`): member coverage 0.83,
-    median width ratio 1.21, the deepest pool node at 1.0× and the free-surface nodes above it at
-    ~1× (they were 7–15× before H14). Under `EXPLICIT` the discrete surcharge branch drowns the
-    node upstream of a chokepoint in a way a depth-keyed rule cannot see (member coverage 0.73,
-    below the 0.80 floor). **If you expect sustained surcharge, run with `NODE_CONTINUITY
-    SEMI_IMPLICIT`.** See `docs/uncertainty/VALIDATION.md`, "H14" and "H5b".
+10. **Surcharged bands are validated under both `NODE_CONTINUITY` modes; networks with
+    pumps and weirs are a ranking.** Since PR H17 the 1D ROM derives each node's response to
+    roughness from the solver's own flows. Every conduit's flow scales as 1/n, and the
+    sidecar computes the head shift that lets each conduit carry its flow again. A
+    free-surface reach comes out at 0.6 of its depth and a full pipe at twice its friction
+    loss, with no constant chosen. Pumps, orifices, weirs and outlets are part of the ROM's
+    network graph. A free structure passes a flow set by its upstream head, so it absorbs
+    extra head rather than relaying it. Against brute-force Monte Carlo on the surcharged test
+    chain, member coverage is 0.94 under `EXPLICIT` (calibrated) and 0.92 under
+    `SEMI_IMPLICIT` (conservative: the pool is still filling at the end of the window). On EPA
+    Example 8 (a pump, an orifice, four weirs) widths are right node by node, with a median
+    ratio of 1.05. Coverage is 0.76, below the 0.80 floor, because two places spread by
+    stored volume rather than by flow: the force main after the pump stops, and the channel
+    below a weir after it spills. There the band can be centimetres too narrow; treat it as a
+    ranking. See `docs/uncertainty/VALIDATION.md`, "H17".
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from

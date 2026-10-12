@@ -283,3 +283,15 @@ if(OPENSWMM_BUILD_2D)
     set_tests_properties(regression_soft_rain_corr_coverage PROPERTIES LABELS "regression")
     openswmm_stage_test_runtime_deps(test_soft_rain_corr_coverage)
 endif()
+
+# ---- H17: 1D ROM vs MC on a network with structures (EPA Example 8) ----
+add_executable(test_rom_coverage_structures test_rom_coverage_structures.cpp)
+target_link_libraries(test_rom_coverage_structures PRIVATE GTest::gtest GTest::gtest_main openswmm_engine)
+target_include_directories(test_rom_coverage_structures PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src/engine)
+target_compile_definitions(test_rom_coverage_structures PRIVATE
+    REGRESSION_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+set_target_properties(test_rom_coverage_structures PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+add_test(NAME regression_rom_coverage_structures COMMAND $<TARGET_FILE:test_rom_coverage_structures>)
+set_tests_properties(regression_rom_coverage_structures PROPERTIES LABELS "regression")
+openswmm_stage_test_runtime_deps(test_rom_coverage_structures)

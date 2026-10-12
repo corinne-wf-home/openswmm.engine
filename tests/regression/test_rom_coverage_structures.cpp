@@ -1,0 +1,307 @@
+/**
+ * @file test_rom_coverage_structures.cpp
+ * @brief H17 — 1D ROM bands vs brute-force Monte Carlo on a network with
+ *        hydraulic structures (EPA Example 8: one pump, one orifice, four
+ *        weirs, a storage well and a fixed-stage outfall).
+ *
+ * Reference: 21 deterministic runs of the unmodified Example 8 deck with
+ * every CONDUIT's Manning n scaled by the LHS strata midpoints of +/-20%
+ * (structures are not conduits and are left alone -- the same parameter
+ * the ROM's `1D MANNINGS_N` perturbs). ROM run: same deck plus
+ * `[UNCERTAINTY] 1D MANNINGS_N 0.20`.
+ *
+ * Every junction and the storage node are scored per (node, report time)
+ * with the MC-side quantiles at midpoint plotting positions (mc_quantiles.hpp).
+ * The per-node table is printed so the effect of the structure edges can
+ * be read node by node (the interceptor JI1..JI5 behind the orifice, the
+ * force-main JI10..JI13 behind the pump, and the weir-fed surface nodes).
+ *
+ * MEASURED 2026-10-12 (member coverage / width median, all samples):
+ *   conduit-only ROM graph, depth x elasticity source   0.761 / 1.636
+ *   + structure edges                                    0.773 / 1.966
+ *   + flow-response source (shipped)                     0.757 / 1.046
+ * The widths are right node by node (JI4 15.9 -> 1.03, JI5 13.6 -> 0.63,
+ * Well 4.6 -> 0.99, force main while pumping 7 ft -> 0.26 ft vs MC 0.21 ft).
+ * Coverage stays under the 0.80 floor, so this cell is RANKING ONLY. The
+ * misses are centimetre-scale spreads at nodes with no steady flow: the
+ * force main after the pump stops (JI10..JI13) and the weir-fed surface
+ * channel (J5, J8, J9, J11). There the members differ by stored VOLUME --
+ * when the pump stopped, how much spilled -- which a steady head response
+ * cannot carry. Recorded in VALIDATION.md "H17".
+ *
+ * Asserted: the run completes, the width median stays inside the standing
+ * [0.3, 3.0] sanity band (measured 1.046), and the samples the output CSV
+ * flags `steady` are calibrated (step 4; measured 0.905 / 1.332). The
+ * pooled C1 floor is printed, not asserted (ranking-only cell); the misses
+ * sit under the `no_flow` (0.689 / 0.212) and `transient` (0.315 / 0.000)
+ * flags, which is what those flags tell the user.
+ *
+ * Env knobs: H17_WINDOW_H (sampling window, default the full 12 h),
+ * H17_NODE=a,b prints a time trace for those nodes, H17_FLOW_SOURCE=0
+ * restores the pre-H17 source for A/B.
+ */
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "openswmm/engine/openswmm_engine.h"
+#include "core/SWMMEngine.hpp"
+#include "uncertainty/SpectralROM1D.hpp"
+#include "mc_quantiles.hpp"
+
+#if defined(_WIN32)
+#  include <process.h>
+#  define getpid _getpid
+#else
+#  include <unistd.h>
+#endif
+
+#ifndef REGRESSION_DATA_DIR
+#  define REGRESSION_DATA_DIR "."
+#endif
+
+namespace {
+
+constexpr double kPert       = 0.20;
+constexpr int    kMcRuns     = 21;
+constexpr double kReportStep = 60.0;
+
+std::string readFile(const std::string& path) {
+    std::ifstream f(path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+// Scale column 5 (Manning N) of every [CONDUITS] data line by `mult`, and
+// optionally append an [UNCERTAINTY] block.
+std::string deck(const std::string& base, double mult, bool with_rom) {
+    std::istringstream in(base);
+    std::ostringstream out;
+    std::string line, section;
+    while (std::getline(in, line)) {
+        std::string trimmed = line;
+        trimmed.erase(0, trimmed.find_first_not_of(" \t"));
+        if (!trimmed.empty() && trimmed[0] == '[') {
+            section = trimmed.substr(0, trimmed.find(']') + 1);
+            out << line << '\n';
+            continue;
+        }
+        if (section == "[CONDUITS]" && !trimmed.empty() && trimmed[0] != ';') {
+            std::istringstream ls(trimmed);
+            std::vector<std::string> tok;
+            std::string t;
+            while (ls >> t) tok.push_back(t);
+            if (tok.size() >= 5) {
+                char buf[64];
+                std::snprintf(buf, sizeof buf, "%.8g", std::atof(tok[4].c_str()) * mult);
+                tok[4] = buf;
+                std::string joined;
+                for (const auto& s : tok) joined += s + "  ";
+                out << joined << '\n';
+                continue;
+            }
+        }
+        out << line << '\n';
+    }
+    if (with_rom) out << "\n[UNCERTAINTY]\n1D MANNINGS_N 0.20\n";
+    return out.str();
+}
+
+std::set<std::string> scoredNodes(const std::string& base) {
+    std::set<std::string> names;
+    std::istringstream in(base);
+    std::string line, section;
+    while (std::getline(in, line)) {
+        std::string tr = line;
+        tr.erase(0, tr.find_first_not_of(" \t"));
+        if (!tr.empty() && tr[0] == '[') { section = tr.substr(0, tr.find(']') + 1); continue; }
+        if ((section == "[JUNCTIONS]" || section == "[STORAGE]") && !tr.empty() && tr[0] != ';') {
+            std::istringstream ls(tr);
+            std::string nm;
+            ls >> nm;
+            names.insert(nm);
+        }
+    }
+    return names;
+}
+
+struct RunResult {
+    std::map<std::string, std::vector<double>> heads, q05, q95;
+    std::map<std::string, std::vector<int>> flag;   // H17 step 4 (ROM run)
+    std::vector<double> times;
+    bool ok = false;
+};
+
+RunResult runCase(const std::string& inp_text, const std::string& tag, bool with_rom,
+                  const std::set<std::string>& names, double end_time_s) {
+    RunResult out;
+    const std::string pfx = "/tmp/rom_struct_" + std::to_string(getpid()) + "_" + tag;
+    const std::string inp_path = pfx + ".inp", rpt_path = pfx + ".rpt";
+    { std::ofstream f(inp_path); f << inp_text; }
+
+    SWMM_Engine h = swmm_engine_create();
+    auto cleanup = [&]() {
+        swmm_engine_end(h);
+        swmm_engine_close(h);
+        swmm_engine_destroy(h);
+        std::remove(inp_path.c_str());
+        std::remove(rpt_path.c_str());
+        std::remove((pfx + ".uncertainty.csv").c_str());
+        std::remove((pfx + ".rom_diag.csv").c_str());
+        std::remove((pfx + ".rom_threshold.csv").c_str());
+    };
+    if (swmm_engine_open(h, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0 ||
+        swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {
+        std::printf("[H17] %s failed to start: %s\n", tag.c_str(), swmm_get_last_error_msg(h));
+        cleanup();
+        return out;
+    }
+    auto* eng = static_cast<openswmm::SWMMEngine*>(h);
+    const auto& ctx = eng->context();
+    std::map<std::string, int> idx;
+    for (int i = 0; i < static_cast<int>(ctx.nodes.head.size()); ++i) {
+        const std::string nm = ctx.node_names.name_of(i);
+        if (names.count(nm)) idx[nm] = i;
+    }
+    const auto* rom = with_rom ? eng->rom1d() : nullptr;
+    if (with_rom && !rom) { cleanup(); return out; }
+    if (const char* v = std::getenv("H17_FLOW_SOURCE")) eng->rom1dFlowSource() = std::atoi(v) != 0;
+
+    double elapsed = 1.0, t_prev = 0.0;
+    int stalled = 0;
+    for (int guard = 0; elapsed != 0.0 && guard < 500000; ++guard) {
+        if (swmm_engine_step(h, &elapsed) != 0) break;
+        const double t_now = (elapsed > 0.0) ? elapsed * 86400.0 : end_time_s;
+        stalled = (t_now - t_prev < 1e-9) ? stalled + 1 : 0;
+        if (stalled > 200) break;
+        for (double b = std::floor(t_prev / kReportStep + 1.0) * kReportStep;
+             b <= t_now + 1e-6 && b <= end_time_s + 1e-6; b += kReportStep) {
+            out.times.push_back(b);
+            for (const auto& [nm, ui] : idx) {
+                out.heads[nm].push_back(ctx.nodes.head[static_cast<std::size_t>(ui)]);
+                if (rom && rom->is_ready()) {
+                    const int ai = rom->full_to_active[static_cast<std::size_t>(ui)];
+                    out.q05[nm].push_back(ai >= 0 ? rom->q05[static_cast<std::size_t>(ai)] : NAN);
+                    out.q95[nm].push_back(ai >= 0 ? rom->q95[static_cast<std::size_t>(ai)] : NAN);
+                    const auto& fl = eng->rom1dBandFlags();
+                    out.flag[nm].push_back(ai >= 0 && static_cast<std::size_t>(ai) < fl.size()
+                                           ? fl[static_cast<std::size_t>(ai)] : -1);
+                }
+            }
+        }
+        t_prev = t_now;
+        if (t_now >= end_time_s) break;
+    }
+    out.ok = !out.times.empty();
+    cleanup();
+    return out;
+}
+
+}  // namespace
+
+TEST(RomCoverageStructures, Example8ConduitManningBandsVsMonteCarlo) {
+    const std::string base = readFile(std::string(REGRESSION_DATA_DIR) + "/Example8.inp");
+    ASSERT_FALSE(base.empty()) << "Example8.inp not found under " << REGRESSION_DATA_DIR;
+    const auto names = scoredNodes(base);
+    ASSERT_GE(names.size(), 20u);
+
+    double window_h = 12.0;
+    if (const char* v = std::getenv("H17_WINDOW_H")) window_h = std::atof(v);
+    const double end_s = window_h * 3600.0;
+
+    std::vector<RunResult> mc(kMcRuns);
+    for (int i = 0; i < kMcRuns; ++i) {
+        const double mult = (1.0 - kPert) + (i + 0.5) / kMcRuns * 2.0 * kPert;
+        mc[i] = runCase(deck(base, mult, false), "mc" + std::to_string(i), false, names, end_s);
+        ASSERT_TRUE(mc[i].ok) << "MC run " << i;
+    }
+    RunResult rom = runCase(deck(base, 1.0, true), "rom", true, names, end_s);
+    ASSERT_TRUE(rom.ok) << "ROM run";
+    ASSERT_FALSE(rom.q05.empty()) << "ROM produced no quantiles";
+
+    std::size_t n_s = rom.times.size();
+    for (const auto& r : mc) n_s = std::min(n_s, r.times.size());
+
+    struct NodeStat { int n = 0; double cov = 0; std::vector<double> ratios; };
+    std::map<std::string, NodeStat> per;
+    double cov_sum = 0; int n_tot = 0;
+    double mat_cov = 0; int n_mat = 0; std::vector<double> mat_ratios;   // MC width >= 0.05 ft
+    std::map<int, NodeStat> by_flag;   // H17 step 4: score per band validity flag
+    std::vector<double> all_ratios;
+    for (const auto& [nm, q05] : rom.q05) {
+        const auto& q95 = rom.q95.at(nm);
+        auto& st = per[nm];
+        for (std::size_t k = 0; k < n_s; ++k) {
+            if (rom.times[k] <= 60.0 || std::isnan(q05[k])) continue;
+            std::vector<double> hv(kMcRuns);
+            for (int i = 0; i < kMcRuns; ++i) hv[i] = mc[i].heads.at(nm)[k];
+            std::sort(hv.begin(), hv.end());
+            const double mcw = mcq::quantileMidpoint(hv, 0.95) - mcq::quantileMidpoint(hv, 0.05);
+            if (mcw < 1e-3) continue;   // 1e-3 ft: MC has no resolvable spread here
+            const double c = mcq::intervalCoverage(hv, q05[k], q95[k]);
+            st.cov += c; ++st.n;
+            cov_sum += c; ++n_tot;
+            const double r = (q95[k] - q05[k]) / mcw;
+            st.ratios.push_back(r);
+            all_ratios.push_back(r);
+            if (mcw >= 0.05) { mat_cov += c; ++n_mat; mat_ratios.push_back(r); }
+            const int fg = (rom.flag.count(nm) && k < rom.flag.at(nm).size()) ? rom.flag.at(nm)[k] : -1;
+            auto& fs = by_flag[fg];
+            fs.cov += c; ++fs.n; fs.ratios.push_back(r);
+        }
+    }
+    ASSERT_GT(n_tot, 0) << "MC produced no resolvable spread";
+    if (const char* tn = std::getenv("H17_NODE")) {
+      std::stringstream nl(tn);
+      std::string nm;
+      while (std::getline(nl, nm, ',')) {
+        if (rom.q05.count(nm)) {
+            for (std::size_t k = 0; k < n_s; k += 15) {
+                std::vector<double> hv(kMcRuns);
+                for (int i = 0; i < kMcRuns; ++i) hv[i] = mc[i].heads.at(nm)[k];
+                std::sort(hv.begin(), hv.end());
+                std::printf("[H17-trace] %s t=%6.0f det=%.3f mc[q05,q95]=[%.3f,%.3f] rom[q05,q95]=[%.3f,%.3f]\n",
+                            nm.c_str(), rom.times[k], rom.heads.at(nm)[k],
+                            mcq::quantileMidpoint(hv, 0.05), mcq::quantileMidpoint(hv, 0.95),
+                            rom.q05.at(nm)[k], rom.q95.at(nm)[k]);
+            }
+        }
+      }
+    }
+    auto med = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+
+    std::printf("[H17-node] %-6s %5s %7s %8s\n", "node", "n", "cov", "w-med");
+    for (const auto& [nm, st] : per) {
+        if (st.n == 0) { std::printf("[H17-node] %-6s %5d   (no resolvable MC spread)\n", nm.c_str(), 0); continue; }
+        std::printf("[H17-node] %-6s %5d %7.3f %8.3f\n", nm.c_str(), st.n, st.cov / st.n, med(st.ratios));
+    }
+    for (const auto& [fg, st] : by_flag)
+        std::printf("[H17-flag] %-13s samples=%5d member-coverage=%.3f width-med=%.3f\n",
+                    fg < 0 ? "?" : openswmm::SWMMEngine::rom1dBandFlagName(static_cast<std::uint8_t>(fg)),
+                    st.n, st.cov / st.n, med(st.ratios));
+    // H17 step 4: the CSV's `steady` flag promises a calibrated band. Gate it.
+    ASSERT_TRUE(by_flag.count(0) && by_flag.at(0).n > 0) << "no steady-flagged samples";
+    EXPECT_TRUE(mcq::reportCalibration("Example 8, steady-flagged bands", by_flag.at(0).cov / by_flag.at(0).n,
+                                       med(by_flag.at(0).ratios), "-"))
+        << "bands flagged `steady` must stay calibrated (measured 0.905 / 1.332)";
+    const double cov = cov_sum / n_tot, wmed = med(all_ratios);
+    std::printf("[H17] Example 8 samples=%d member-coverage=%.3f width-med=%.3f\n", n_tot, cov, wmed);
+    mcq::reportCalibration("Example 8 conduit Manning (structures)", cov, wmed,
+                           "volume memory after pump stop / weir spill (H17 note)");
+    EXPECT_GE(wmed, 0.3) << "Example 8 band collapsed (measured 1.046)";
+    EXPECT_LE(wmed, 3.0) << "Example 8 band blew up (measured 1.046)";
+    if (n_mat > 0)
+        std::printf("[H17] material spreads only (MC width >= 0.05 ft): samples=%d member-coverage=%.3f width-med=%.3f\n",
+                    n_mat, mat_cov / n_mat, med(mat_ratios));
+}

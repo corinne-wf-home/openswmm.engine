@@ -559,19 +559,26 @@ signal: once a reach surcharges, velocities collapse toward zero (Fr → 0)
 and the symmetric surrogate becomes *more* accurate again, not less — so a
 high surcharge fraction is not itself a trust concern.
 
-**The Manning channel is scaled by the local head's elasticity to n, and
-surcharged nodes get the pressurised value (PR H5b).** The ROM's
-Manning-sensitivity source assumes head moves one-for-one with roughness.
-It does not: a free-surface normal depth goes as `n^0.6`, and a pressurised
-pipe's friction head as `n^2`. The sidecar now multiplies each node's source
-by that exponent — 0.6 in free surface, blending to 2.0 as the node crosses
-its crown — instead of the earlier "damp it toward a floor" rule (PR H5),
-which had the sign of the correction backwards at the pool (surcharged heads
-are *more* sensitive to n, not less). Measured against brute-force Monte
-Carlo: the surcharged nodes themselves are now right (width ratio 1.02 at
-the deepest pool node, member coverage 0.84 over the surcharged chain under
-`NODE_CONTINUITY SEMI_IMPLICIT`), and the free-surface fixture went from
-~2× over-wide to calibrated.
+**The Manning channel comes from the solver's own flows (PR H17).** Manning
+flow scales as 1/n. Raise every roughness by a small fraction and each
+conduit loses that fraction of its capacity; the heads then shift until every
+node passes its flow again. The sidecar computes that shift directly from the
+deterministic run, node by node from the outfalls upstream: each conduit
+contributes its flow, its head drop and how fast its conveyance grows with
+depth at the upstream end. A free-surface reach comes out at 0.6 of its depth
+(normal depth goes as `n^0.6`), a full pipe at twice its friction loss
+(friction head goes as `n^2`), and a mild reach carries part of the response
+from downstream, as backwater does. No exponent is chosen; they fall out of
+the cross-section. A node with no flow leaving it -- still water, or the tip
+of a filling front -- has no steady state for roughness to shift and gets no
+Manning band (front timing is the phase channel's job). Pumps, orifices,
+weirs and outlets are edges of the ROM's graph, and a free structure passes a
+flow set by its upstream head, so it absorbs extra head instead of relaying
+it. This replaced a per-node elasticity of 0.6 blending to 2.0 across the
+crown (PR H5b), which could not see a node drowned by a chokepoint further
+down (`NODE_CONTINUITY EXPLICIT` member coverage 0.74 then, 0.94 now) and
+scaled a force main's 16 ft of backwater as if it were friction (7 ft wide
+band against 0.2 ft in the Monte Carlo; 0.26 ft now).
 
 **The operator is now one-way across supercritical reaches (PR H14).** The
 symmetric operator described above relayed a surcharged pool's deviation
@@ -586,12 +593,10 @@ changes is that an upstream node now follows its own local physics while
 the pool fills, instead of the pool's transient. Measured against the
 Monte Carlo on the surcharged chain under `NODE_CONTINUITY SEMI_IMPLICIT`:
 member coverage 0.83, width ratio 1.21 — calibrated — with the nodes above
-the pool at ~1× instead of 7–15×. **Under `EXPLICIT`** the discrete
-surcharge branch also drowns the node just upstream of a chokepoint, which
-a rule keyed on that node's own depth cannot see; EXPLICIT's surcharged
-bands improved (member coverage 0.69 → 0.73) but remain a documented
-limitation. **If you expect appreciable, sustained surcharge, run with
-`SEMI_IMPLICIT`.** `surcharge_frac` (above) tells you when you are in that
+the pool at ~1× instead of 7–15×. Under `EXPLICIT` the
+node just upstream of a chokepoint is drowned too; since H17 the Manning
+source reaches it through the full pipes below, and both continuity modes
+are validated. `surcharge_frac` (above) tells you when you are in that
 regime at all; `fr_trust` tells you how much of the network the gate is
 acting on.
 

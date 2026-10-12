@@ -106,6 +106,7 @@ add_gtest_unit(test_engine_rom_diag_trust    test_rom_diag_trust.cpp)
 add_gtest_unit(test_engine_spectral_rom1d    test_spectral_rom1d.cpp)
 # PR H10 — threshold-crossing probability + gap-statistic bimodality flag.
 add_gtest_unit(test_engine_rom_threshold     test_rom_threshold.cpp)
+add_gtest_unit(test_engine_rom_flow_response test_rom_flow_response.cpp)
 # PR H5 — surcharged-regime sensitivity attenuation (alpha ramp).
 add_gtest_unit(test_engine_rom_surcharge_attenuation test_rom_surcharge_attenuation.cpp)
 # PR H11 — per-member phase coordinate (travel-time accumulation + history ring).

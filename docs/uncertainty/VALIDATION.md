@@ -2828,3 +2828,154 @@ and nothing about the current shape blocks it.
     # Marginal-shape and coherence contracts only:
     build/<dir>/bin/Debug/test_engine_soft_forcing_rom \
         --gtest_filter='SoftForcingFamilyPlanes*'
+
+---
+
+# H17 — Structure edges and the flow-response Manning source (2026-10-12)
+
+## 1. What was measured first
+
+EPA Example 8 (one pump, one orifice, four weirs, a storage well, a fixed-stage
+outfall; `tests/regression/data/Example8.inp`) had no 1D Manning gate. The new
+`regression_rom_coverage_structures` runs 21 copies of the deck with every
+conduit's n scaled by the LHS strata midpoints of ±20 % against one ROM run with
+`1D MANNINGS_N 0.20`, scored at every junction and the storage node over 12 h.
+
+| ROM | member coverage | width median |
+|---|---|---|
+| conduit-only graph, depth × elasticity source (pre-H17) | 0.761 | 1.636 |
+| + structure edges | 0.773 | 1.966 |
+| + flow-response source (shipped) | 0.757 | 1.046 |
+
+Structure edges alone barely moved it, so the missing edges were not the main
+defect. A time trace of the force main settled it. While the pump runs, the
+pre-H17 band at JI11 was 7 ft wide against 0.2 ft in the Monte Carlo. The ROM
+scaled the node's 16 ft of depth by the pressurised elasticity 2.0, but that
+depth is backwater from the fixed-stage outfall, not friction.
+
+## 2. The fix: the source is the steady flow response
+
+Manning flow scales as 1/n. Linearizing each conduit about the deterministic
+state, with conveyance at its upstream end, and requiring each node's outflow
+to be unchanged gives a head shift per unit d(ln n) that depends only on what
+lies downstream. It is solved in one sweep from the outfalls
+(`src/engine/uncertainty/RomFlowResponse.hpp`). A full pipe adds twice its
+friction loss to the downstream response. A steep free-surface reach gives
+0.6 × depth. A mild reach carries part of the downstream response. A free
+weir, orifice, outlet or pump depends only on its upstream head, so it adds
+conductance and no source. A node with no outflow gets 0. This field replaces
+depth × α (H5/H5b) as the Manning-sensitivity reference. The relaxation
+operator is unchanged.
+
+Pumps, orifices, weirs and outlets are also edges of the ROM graph (their
+|dQ/dH| is exported in the H snapshot). The directional operator always gates
+a pump one-way.
+
+Two solver attempts were measured and rejected:
+
+- **Global node-continuity solve.** It is singular whenever a wetted cluster
+  has not reached an outfall (a filling front), and ill-conditioned at
+  millimetre flows. A dense version silently fell back to the old source on
+  those steps.
+- **BiCGSTAB on the same system.** It returned 1e5–1e10 garbage on the same
+  steps.
+
+The upstream sweep is exact on dendritic networks, O(links), and cannot go
+singular.
+
+## 3. Every 1D gate, same build, source off → on
+
+| Cell | before | after |
+|---|---|---|
+| P8 free-surface chain | 0.993 / 1.210 | 0.885 / 0.982 |
+| Surcharged chain, `EXPLICIT` | 0.736 / 0.782 ranking only | **0.936 / 1.173 calibrated** |
+| Surcharged chain, `SEMI_IMPLICIT` | 0.845 / 1.317 | 0.916 / 1.956 conservative |
+| H11 front, phase | 0.831 / 1.308 | 0.831 / 1.306 |
+| SR-5, CL-1e (rain) | unchanged | unchanged |
+
+The `EXPLICIT` limitation documented since H5 is closed. The source reaches
+the node drowned by the chokepoint through the full pipes below it, which a
+depth-keyed rule could not. `SEMI_IMPLICIT` turns conservative because the
+pool is still filling at the window: at t = 1 h, 14.1 cfs enters the reach and
+11.4 cfs leaves. The ROM relaxes to the steady response faster than the
+network fills, so J4 and J5 are 2.7× and 3.9× wide while J1 and J2 sit at
+0.99 and 0.90. Both surcharged cells now assert the 0.80 floor.
+
+## 4. Example 8 per node, and what remains
+
+The widths are right node by node:
+
+| Node | width before | width after |
+|---|---|---|
+| JI4 | 15.9 | 1.03 |
+| JI5 | 13.6 | 0.63 |
+| Well | 4.6 | 0.99 |
+| JI8 | 7.6 | 1.29 |
+| J7 | 4.7 | 1.73 |
+| JI11 (force main) while pumping | 7 ft band | 0.26 ft vs MC 0.21 ft |
+
+Coverage stays under the floor (0.757), so the cell is **ranking only**. The
+misses are centimetre-scale spreads at nodes with no steady flow:
+
+- **The force main after the pump stops** (JI10–JI13, coverage 0.13–0.20).
+  Members hold 1–4 cm of different stored volume, set by when their pump
+  stopped.
+- **The channel below the weirs** (J5, J8, J9, J11, coverage 0.66–0.68).
+  Members differ by how much spilled.
+
+A steady head response cannot carry a volume memory. That gap is the
+storage-and-timing family H11 addressed for fronts, not a Manning-source
+defect. The gate asserts the run and a width median inside [0.3, 3.0], and
+prints the C1 verdict.
+
+## 5. Reproduction
+
+```
+build/darwin-v3/tests/regression/test_rom_coverage_structures      # ~3 min Debug
+H17_FLOW_SOURCE=0 ...                                              # pre-H17 source
+H17_NODE=JI11,JI5 H17_WINDOW_H=6 ...                               # time traces
+```
+
+## 6. Per-band validity flags (step 4)
+
+`<rpt>.uncertainty.csv` gains a `flag` column (`steady`, `transient`,
+`no_flow`; `SWMMEngine::refreshRom1dBandFlags()`). The flags were scored
+against the same Monte Carlo runs, per sample:
+
+| Cell | steady | transient | no_flow |
+|---|---|---|---|
+| P8 free-surface chain | 0.885 / 0.982 (all samples) | — | — |
+| Surcharged, `EXPLICIT` | 0.937 / 1.173 | 0.912 / n.a. (19 samples) | — |
+| Surcharged, `SEMI_IMPLICIT` | 0.894 / 1.018 | 1.000 / 2.696 | — |
+| Example 8 | 0.905 / 1.332 | 0.315 / 0.000 | 0.689 / 0.212 |
+
+(member coverage / width median.) `steady` is calibrated on every cell,
+including the two that are not as a whole. The semi-implicit over-width sits
+entirely in `transient` (the filling pool). Example 8's misses sit in
+`transient` (the draining force main) and `no_flow` (the weir-fed channel).
+
+A `supercritical` flag was tried and dropped. With the H14 directional
+operator, supercritical samples are calibrated on every fixture (0.88–0.91),
+so it would have warned about bands that are right.
+
+The 10 % imbalance threshold is a display rule and was set before scoring;
+it was not adjusted to these numbers. Example 8 now asserts that its
+`steady`-flagged samples meet the C1/C2 calibrated rule.
+
+## 7. Bellinge re-baseline
+
+Two changes land together: the harness indexing fix (it read quantiles by full
+node index, but they are stored by active node; Bellinge lists storage after
+its outfalls, so those nodes took another node's band) and the new source.
+Same build, full 24 h, source off → on, band / local depth:
+
+| | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| all samples | 0.262 → 0.318 | 1.99 → 4.20 | 4.87 → 15.07 | 24.7 → 45.7 |
+| `steady` | 0.235 → 0.266 | 1.98 → 4.06 | 4.87 → 14.77 | 24.7 → 41.6 |
+| `transient` | 0.418 → 0.603 | 2.09 → 4.88 | 4.95 → 15.86 | 22.8 → 43.8 |
+| `no_flow` | 0.110 → 0.096 | 0.78 → 1.15 | 2.91 → 45.0 | 11.6 → 45.7 |
+
+The median barely moves; the upper tail roughly doubles, including in
+`steady` samples. Bellinge has no Monte Carlo, so this is a direction, not a
+verdict. The regression lock passes either way.

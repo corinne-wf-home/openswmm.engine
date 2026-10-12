@@ -5199,9 +5199,11 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
         // Warm-start eigenbasis re-solve from the live DYNWAVE Jacobian.
         if (router_.dwSolver().isHSnapshotValid()) {
             const auto snap = router_.dwSolver().lastConvergedH();
-            rom1d_->updateBasis(snap.conduit_off, snap.conduit_n1, snap.conduit_n2,
-                                snap.n_conduits, ctx_.current_time,
-                                snap.node_surcharged);
+            const int n_edges = rom1dEdgesFromSnapshot(snap);   // PR H17: conduits + structures
+            if (n_edges > 0)
+                rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
+                                    rom1d_edge_n2_.data(), n_edges, ctx_.current_time,
+                                    snap.node_surcharged);
         }
         // PR H14: Froude-gated directional operator from the same snapshot
         // (after updateBasis, which clears any operator projected on the old P).
@@ -5362,9 +5364,12 @@ void SWMMEngine::stepRouting(double dt_routing) noexcept {
             }
         }
 
+        // PR H17: the steady linearized flow response replaces depth x alpha.
+        const bool flow_src = rom1d_flow_source_ && computeRom1dFlowSource();
         rom1d_->advance(dt_routing, K1d, rom1d_h_buf_.data(),
                         rom1d_dh_buf_.empty() ? nullptr : rom1d_dh_buf_.data(),
-                        rom1d_sens_buf_.data(), rom1d_alpha_buf_.data());
+                        rom1d_sens_buf_.data(),
+                        flow_src ? nullptr : rom1d_alpha_buf_.data());
         // computeQuantiles() is called only at report boundaries (postOutputSnapshot)
     }
 #endif
@@ -7368,6 +7373,7 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
         // head (reconstruction = h_det + P*delta_a, clamped at the node
         // invert), so q05/q50/q95 are written directly — no manual
         // re-anchoring. Quantiles were already computed above; reuse them.
+        if (rom1d_ && rom1d_->is_ready()) refreshRom1dBandFlags();
         if (rom1d_ && rom1d_->is_ready() && rom1d_csv_.is_open()) {
             const int n_active = static_cast<int>(rom1d_active_map_.size());
             for (int ai = 0; ai < n_active; ++ai) {
@@ -7377,7 +7383,8 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                            << ctx_.node_names.name_of(static_cast<int>(ui))  << ','
                            << rom1d_->q05[uai]                               << ','
                            << rom1d_->q50[uai]                               << ','
-                           << rom1d_->q95[uai]                               << '\n';
+                           << rom1d_->q95[uai]                               << ','
+                           << rom1dBandFlagName(uai < rom1d_flag_.size() ? rom1d_flag_[uai] : 0) << '\n';
             }
         }
 
@@ -11311,6 +11318,19 @@ void SWMMEngine::buildROM1D() noexcept {
         rom1d_conduit_link_.push_back(j);   // PR H14: ci -> link index
     }
     if (n1_vec.empty()) return;
+    // PR H17: structures are edges too. A pump, orifice, weir or outlet
+    // carries flow between two nodes exactly as a conduit does, and the
+    // solver's H has its dQ/dH on the same two rows. Leaving them out cut
+    // the graph at every structure, so a deviation upstream of a pump never
+    // reached the force main it feeds. Same order as the snapshot's
+    // structure list (link order).
+    for (int j = 0; j < ctx_.n_links(); ++j) {
+        auto uj = static_cast<std::size_t>(j);
+        if (ctx_.links.type[uj] == LinkType::CONDUIT) continue;
+        n1_vec.push_back(ctx_.links.node1[uj]);
+        n2_vec.push_back(ctx_.links.node2[uj]);
+        rom1d_conduit_link_.push_back(j);
+    }
 
     // Build outfall flag array
     std::vector<int> is_outfall(static_cast<std::size_t>(n_full), 0);
@@ -11332,12 +11352,13 @@ void SWMMEngine::buildROM1D() noexcept {
     std::vector<double> weights(static_cast<std::size_t>(n_conduits), 1.0);
     {
         const auto snap = router_.dwSolver().lastConvergedH();
-        if (snap.valid && snap.n_conduits == n_conduits) {
+        if (snap.valid && rom1dEdgesFromSnapshot(snap) == n_conduits) {
             bool any_nonzero = false;
             for (int ci = 0; ci < n_conduits; ++ci) {
-                double w = std::max(snap.conduit_off[ci], 1e-6);
+                const double off = rom1d_edge_off_[static_cast<std::size_t>(ci)];
+                double w = std::max(off, 1e-6);
                 weights[static_cast<std::size_t>(ci)] = w;
-                if (snap.conduit_off[ci] > 1e-6) any_nonzero = true;
+                if (off > 1e-6) any_nonzero = true;
             }
             if (!any_nonzero) {
                 // Dry-start: all dqdh == 0 — fall back to uniform weights
@@ -11513,7 +11534,7 @@ void SWMMEngine::buildROM1D() noexcept {
         }
         rom1d_csv_.open(csv_path);
         if (rom1d_csv_.is_open()) {
-            rom1d_csv_ << "time_s,node_name,q05,q50,q95\n";
+            rom1d_csv_ << "time_s,node_name,q05,q50,q95,flag\n";
         }
 
         // PR H3: <rpt>.rom_diag.csv — Fr-based band-trust diagnostic. Deliberately
@@ -11689,6 +11710,158 @@ double SWMMEngine::computeK1d() noexcept {
 }
 
 // ============================================================================
+// computeRom1dFlowSource() — PR H17 steady linearized Manning response
+// ============================================================================
+//
+// Manning flow scales as 1/n. Raise every roughness by d(ln n) = eps and each
+// conduit loses eps*|Q| of capacity; in the new steady state the heads have
+// shifted by eps*phi so that every node balances again. Linearizing
+//   |Q| = K(y_up) * sqrt(|dh| / L) / n          (conveyance at the upstream
+//                                                 end, as the kinematic wave)
+// gives dQ = Ju*dh_up + Jd*dh_dn - eps*|Q| with
+//   Ju = |Q| * (1/(2|dh|) + K'(y_up)/K(y_up)),   Jd = -|Q| / (2|dh|).
+// Node continuity on the perturbation (outflow minus inflow = 0) is a sparse
+// linear system A*phi = s with s = conduit outflow minus conduit inflow.
+// Structures add their |dQ/dH| as a plain conductance and no source (they do
+// not depend on n). Outfalls are not unknowns (deviation 0).
+//
+// The two textbook limits come out with no constant put in: a free-surface
+// reach (|dh| large, K ~ y^(5/3)) gives phi = 0.6*y; a full pipe (K' = 0)
+// gives phi_up - phi_dn = 2*|dh|, twice its friction loss. A node with no
+// flow through it has phi = 0, so still water carries no Manning band.
+bool SWMMEngine::computeRom1dFlowSource() noexcept {
+    if (!rom1d_ || !rom1d_->is_ready()) return false;
+    const int na = static_cast<int>(rom1d_active_map_.size());
+    if (na <= 0 || static_cast<int>(rom1d_sens_buf_.size()) != na) return false;
+    const auto& f2a = rom1d_->full_to_active;
+    ensureXspCache();
+    auto& edges = rom1d_fs_edges_;
+    edges.clear();
+    auto act = [&](int full) -> int {
+        return (full >= 0 && full < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(full)] : -1;
+    };
+    auto conveyance = [&](const XSectParams& xs, double y) -> double {
+        const double a = xsect::getAofY(xs, y);
+        const double r = xsect::getRofY(xs, y);
+        return (a > 0.0 && r > 0.0) ? a * std::pow(r, 2.0 / 3.0) : 0.0;
+    };
+    const auto& nodes = ctx_.nodes;
+    const auto& links = ctx_.links;
+    for (int j = 0; j < ctx_.n_links(); ++j) {
+        const auto uj = static_cast<std::size_t>(j);
+        const double qs = links.flow[uj];
+        const double q = std::fabs(qs);
+        if (q < 1.0e-6) continue;
+        const bool fwd = qs >= 0.0;
+        const int up = fwd ? links.node1[uj] : links.node2[uj];
+        const int dn = fwd ? links.node2[uj] : links.node1[uj];
+        uncertainty::FlowEdge e;
+        e.up = act(up);
+        e.dn = act(dn);
+        if (e.up < 0) continue;   // flow leaves an outfall: nothing to solve
+        if (links.type[uj] != LinkType::CONDUIT) {
+            e.conduit = false;
+            e.d = std::fabs(links.dqdh[uj]);
+            edges.push_back(e);
+            continue;
+        }
+        if (uj >= xsp_cache_.size()) continue;
+        const auto uup = static_cast<std::size_t>(up), udn = static_cast<std::size_t>(dn);
+        const double dh = std::max(std::fabs(nodes.head[uup] - nodes.head[udn]), 1.0e-4);
+        const XSectParams& xs = xsp_cache_[uj];
+        const double off = fwd ? links.offset1[uj] : links.offset2[uj];
+        const double yfull = xs.y_full;
+        double y = nodes.head[uup] - (nodes.invert_elev[uup] + off);
+        y = std::clamp(y, 1.0e-3, yfull > 0.0 ? yfull : 1.0e-3);
+        double kfac = 0.0;
+        if (yfull > 0.0 && y < 0.999 * yfull) {
+            const double dy = 1.0e-3 * yfull;
+            const double ylo = std::max(y - dy, 1.0e-4), yhi = std::min(y + dy, yfull);
+            const double K = conveyance(xs, y);
+            if (K > 0.0) kfac = std::max((conveyance(xs, yhi) - conveyance(xs, ylo)) / ((yhi - ylo) * K), 0.0);
+        }
+        e.q  = q;
+        e.ju = q * (0.5 / dh + kfac);
+        e.jd = -q * 0.5 / dh;
+        edges.push_back(e);
+    }
+    uncertainty::solveFlowResponse(na, edges, rom1d_fs_phi_);
+    std::copy(rom1d_fs_phi_.begin(), rom1d_fs_phi_.end(), rom1d_sens_buf_.begin());
+    return true;
+}
+
+// ============================================================================
+// refreshRom1dBandFlags() — PR H17 step 4 per-band validity flags
+// ============================================================================
+//
+// One flag per active node, each naming a regime the Monte Carlo gates
+// measured (VALIDATION.md "H17 §6"):
+//   no_flow    nothing leaves the node, so the Manning response is zero.
+//              Members can still differ by stored volume (a force main after
+//              its pump stops, a channel after a weir spills); the band can be
+//              too narrow there. Example 8: coverage 0.69, width 0.21.
+//   transient  inflow and outflow differ by more than 10 % of the larger: the
+//              node is filling or draining, not at the steady response the
+//              band relaxes to. Measured both ways (a draining force main runs
+//              narrow, a filling pool wide). Example 8: coverage 0.32.
+//   steady     neither: the regime the calibrated gates cover. Example 8:
+//              coverage 0.90, width 1.33.
+// A supercritical flag was measured and dropped: with the directional operator
+// (H14) supercritical samples are calibrated on every fixture (0.88-0.91).
+void SWMMEngine::refreshRom1dBandFlags() noexcept {
+    const int na = static_cast<int>(rom1d_active_map_.size());
+    rom1d_flag_.assign(static_cast<std::size_t>(na), 0);
+    if (na <= 0 || !rom1d_) return;
+    const auto& f2a = rom1d_->full_to_active;
+    std::vector<char> has_out(static_cast<std::size_t>(na), 0);
+    const auto& links = ctx_.links;
+    for (int j = 0; j < ctx_.n_links(); ++j) {
+        const auto uj = static_cast<std::size_t>(j);
+        const double q = links.flow[uj];
+        if (std::fabs(q) < 1.0e-6) continue;
+        const int up = (q >= 0.0) ? links.node1[uj] : links.node2[uj];
+        const int a_up = (up >= 0 && up < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(up)] : -1;
+        if (a_up >= 0) has_out[static_cast<std::size_t>(a_up)] = 1;
+    }
+    for (int ai = 0; ai < na; ++ai) {
+        const auto uai = static_cast<std::size_t>(ai);
+        const auto ui  = static_cast<std::size_t>(rom1d_active_map_[uai]);
+        if (!has_out[uai]) { rom1d_flag_[uai] = 1; continue; }
+        const double qin = ctx_.nodes.inflow[ui], qout = ctx_.nodes.outflow[ui];
+        const double qmax = std::max(std::fabs(qin), std::fabs(qout));
+        if (qmax > 0.0 && std::fabs(qin - qout) > 0.10 * qmax) rom1d_flag_[uai] = 2;
+    }
+}
+
+// ============================================================================
+// rom1dEdgesFromSnapshot() — PR H17 conduit + structure edge view
+// ============================================================================
+
+int SWMMEngine::rom1dEdgesFromSnapshot(const dynwave::HSnapshot& snap) noexcept {
+    if (!snap.valid || snap.conduit_off == nullptr) return 0;
+    const int nc = snap.n_conduits;
+    const int ns = (snap.struct_off != nullptr) ? snap.n_structs : 0;
+    const int ne = nc + ns;
+    if (ne <= 0 || ne != static_cast<int>(rom1d_conduit_link_.size())) return 0;
+    rom1d_edge_off_.resize(static_cast<std::size_t>(ne));
+    rom1d_edge_n1_.resize(static_cast<std::size_t>(ne));
+    rom1d_edge_n2_.resize(static_cast<std::size_t>(ne));
+    for (int e = 0; e < nc; ++e) {
+        const auto ue = static_cast<std::size_t>(e);
+        rom1d_edge_off_[ue] = snap.conduit_off[e];
+        rom1d_edge_n1_[ue]  = snap.conduit_n1[e];
+        rom1d_edge_n2_[ue]  = snap.conduit_n2[e];
+    }
+    for (int s = 0; s < ns; ++s) {
+        const auto ue = static_cast<std::size_t>(nc + s);
+        rom1d_edge_off_[ue] = snap.struct_off[s];
+        rom1d_edge_n1_[ue]  = snap.struct_n1[s];
+        rom1d_edge_n2_[ue]  = snap.struct_n2[s];
+    }
+    return ne;
+}
+
+// ============================================================================
 // refreshRom1dDirectionalOperator() — PR H14 Froude-gated directional operator
 // ============================================================================
 
@@ -11698,9 +11871,9 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
     if (!rom1d_directional_cfg_.enabled) { rom1d_->clearReducedOperator(); return; }
     if (!router_.dwSolver().isHSnapshotValid()) return;
     const auto snap = router_.dwSolver().lastConvergedH();
-    const int nc = snap.n_conduits;
-    if (nc <= 0 || snap.conduit_off == nullptr || snap.link_froude == nullptr ||
-        static_cast<int>(rom1d_conduit_link_.size()) != nc) return;
+    if (snap.link_froude == nullptr) return;
+    const int nc = rom1dEdgesFromSnapshot(snap);   // PR H17: conduits + structures
+    if (nc <= 0) return;
 
     const auto& f2a = rom1d_->full_to_active;
     rom1d_dir_a1_.resize(static_cast<std::size_t>(nc));
@@ -11718,10 +11891,11 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
     bool any_wet = false;
     for (int ci = 0; ci < nc; ++ci) {
         const auto uci = static_cast<std::size_t>(ci);
-        const double w = std::max(snap.conduit_off[ci], 1.0e-6);
+        const double off = rom1d_edge_off_[uci];
+        const double w = std::max(off, 1.0e-6);
         rom1d_dir_w_[uci] = w;
         sum_w += w;
-        if (snap.conduit_off[ci] > 1.0e-6) any_wet = true;
+        if (off > 1.0e-6) any_wet = true;
     }
     if (!any_wet || sum_w <= 0.0) return;
     const double scale = static_cast<double>(nc) / sum_w;
@@ -11730,7 +11904,7 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
     for (int ci = 0; ci < nc; ++ci) {
         const auto uci = static_cast<std::size_t>(ci);
         rom1d_dir_w_[uci] *= scale;
-        const int n1 = snap.conduit_n1[ci], n2 = snap.conduit_n2[ci];
+        const int n1 = rom1d_edge_n1_[uci], n2 = rom1d_edge_n2_[uci];
         rom1d_dir_a1_[uci] = (n1 >= 0 && n1 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n1)] : -1;
         rom1d_dir_a2_[uci] = (n2 >= 0 && n2 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n2)] : -1;
         const int j = rom1d_conduit_link_[uci];
@@ -11746,7 +11920,13 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
         }
         const double q = ctx_.links.flow[static_cast<std::size_t>(j)];
         rom1d_dir_sign_[uci] = (q > 0.0) ? 1 : (q < 0.0 ? -1 : 0);
-        rom1d_dir_fr_[uci]   = std::fabs(snap.link_froude[j]);
+        // PR H17: a pump is one-way by construction -- its flow is set by
+        // the wet well and the curve, and the discharge side cannot push a
+        // deviation back through it -- so it is always fully gated. Weirs,
+        // orifices and outlets carry no Froude number and stay two-way.
+        const LinkType lt = ctx_.links.type[static_cast<std::size_t>(j)];
+        rom1d_dir_fr_[uci]   = (lt == LinkType::CONDUIT) ? std::fabs(snap.link_froude[j])
+                             : (lt == LinkType::PUMP ? 1.0e3 : 0.0);
         // Drop gate input: water-surface drop across the conduit in units of
         // the UPSTREAM node's depth (oriented by flow sign). Outfall ends use
         // the outfall head like any other node.

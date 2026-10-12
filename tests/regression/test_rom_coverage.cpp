@@ -93,6 +93,26 @@ constexpr double kEndTime       = 3600.0; // s (sampling window)
 // for a geometry whose dominant modal time constant fits the window; see the
 // "[RomCoverage-fixture]" printout and VALIDATION.md "P8".
 inline double envD(const char* n, double d) { const char* v = std::getenv(n); return (v && *v) ? std::atof(v) : d; }
+
+// H17 step 4: coverage / width per band validity flag, printed per cell.
+struct FlagScore { int n = 0; double cov = 0.0; std::vector<double> ratios; };
+inline void printFlagScores(const char* cell, std::map<int, FlagScore>& fs) {
+    for (auto& [f, sc] : fs) {
+        if (sc.n == 0) continue;
+        double wmed = -1.0;
+        if (!sc.ratios.empty()) {
+            std::sort(sc.ratios.begin(), sc.ratios.end());
+            wmed = sc.ratios[sc.ratios.size() / 2];
+        }
+        std::printf("[H17-flag] %-28s %-13s samples=%4d member-coverage=%.3f width-med=%.3f\n", cell,
+                    f < 0 ? "?" : openswmm::SWMMEngine::rom1dBandFlagName(static_cast<std::uint8_t>(f)),
+                    sc.n, sc.cov / sc.n, wmed);
+    }
+}
+inline int flagAt(const std::map<std::string, std::vector<int>>& m, const std::string& nm, std::size_t k) {
+    auto it = m.find(nm);
+    return (it != m.end() && k < it->second.size()) ? it->second[k] : -1;
+}
 static double kP8Len   = envD("P8_LEN",   10.0);  // conduit length (m) -- P8: 10 m (was 100 m, tau0 10 h)
 static double kP8Drop  = envD("P8_DROP",   5.0);  // invert drop per conduit (m)
 static double kP8Diam  = envD("P8_DIAM",   1.0);  // conduit diameter (m)
@@ -176,6 +196,7 @@ struct RunResult {
     std::map<std::string, std::vector<double>> heads;
     // ROM quantiles (ROM run only), same indexing
     std::map<std::string, std::vector<double>> q05, q50, q95;
+    std::map<std::string, std::vector<int>> flag;   // H17 step 4 band validity flag (ROM run)
     std::vector<double> times;   // report times (s), aligned with the vectors
     bool ok = false;
     double lambda0 = 0.0, k1d = 0.0;   // P8: dominant eigenvalue and last K1d (ROM run only)
@@ -239,6 +260,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     if (with_rom) {
         // H14: Froude-gated directional operator; H14_DIRECTIONAL=0 restores the
         // symmetric (pre-H14) operator for A/B measurement.
+        if (const char* v = std::getenv("H17_FLOW_SOURCE")) eng->rom1dFlowSource() = std::atoi(v) != 0;
         if (const char* v = std::getenv("H14_DIRECTIONAL")) eng->rom1dDirectionalConfig().enabled = std::atoi(v) != 0;
         if (const char* v = std::getenv("H14_FR_LO")) eng->rom1dDirectionalConfig().fr_lo = std::atof(v);
         if (const char* v = std::getenv("H14_FR_HI")) eng->rom1dDirectionalConfig().fr_hi = std::atof(v);
@@ -282,6 +304,9 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
                         out.q05[nm].push_back(rom->q05[static_cast<std::size_t>(ai)]);
                         out.q50[nm].push_back(rom->q50[static_cast<std::size_t>(ai)]);
                         out.q95[nm].push_back(rom->q95[static_cast<std::size_t>(ai)]);
+                        const auto& fl = eng->rom1dBandFlags();
+                        out.flag[nm].push_back(static_cast<std::size_t>(ai) < fl.size()
+                                               ? fl[static_cast<std::size_t>(ai)] : -1);
                     }
                 }
             }
@@ -368,6 +393,7 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     }
 
     // --- Compare at every (junction, report time) with t > 60 s --------------
+    std::map<int, FlagScore> flag_scores;
     int n_total = 0, n_covered = 0;
     int n_width = 0, n_width_ok = 0;
     double member_cov_sum = 0.0;   // empirical interval coverage accumulator
@@ -390,7 +416,13 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
             // (2026-10-04 review; corrected numbers in VALIDATION.md).
             const double mc_q50   = mcq::quantileMidpoint(h, 0.50);
             const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
-            member_cov_sum += mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
+            const double cov_fs = mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
+            member_cov_sum += cov_fs;
+            {
+                auto& fs = flag_scores[flagAt(rom.flag, nm, k)];
+                fs.cov += cov_fs; ++fs.n;
+                if (late && mc_width > 1e-6) fs.ratios.push_back((rom_q95[k] - rom_q05[k]) / mc_width);
+            }
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
@@ -413,6 +445,7 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
     }
     ASSERT_GT(n_total, 0);
     ASSERT_GT(n_width, 0) << "MC produced no resolvable spread — fixture too static";
+    printFlagScores("PR-10 free-surface chain", flag_scores);
 
     const double coverage = static_cast<double>(n_covered) / n_total;
     const double width_frac = static_cast<double>(n_width_ok) / n_width;
@@ -632,6 +665,7 @@ struct SurchargeCellResult {
 // mode-B brute force would not be a fair test of either.
 SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
     SurchargeCellResult res;
+    std::map<int, FlagScore> flag_scores;
 
     std::vector<RunResult> mc(kMcRuns);
     for (int i = 0; i < kMcRuns; ++i) {
@@ -695,6 +729,11 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
             const double mc_width = mcq::quantileMidpoint(h, 0.95) - mcq::quantileMidpoint(h, 0.05);
             const double cov_k = mcq::intervalCoverage(h, rom_q05[k], rom_q95[k]);
             member_cov_sum += cov_k;
+            {
+                auto& fs = flag_scores[flagAt(rom.flag, nm, k)];
+                fs.cov += cov_k; ++fs.n;
+                if (late && mc_width > 1e-6) fs.ratios.push_back((rom_q95[k] - rom_q05[k]) / mc_width);
+            }
 
             ++n_total;
             if (rom_q05[k] <= mc_q50 && mc_q50 <= rom_q95[k]) ++n_covered;
@@ -750,6 +789,7 @@ SurchargeCellResult runSurchargedCell(bool node_continuity_semi) {
     std::sort(ratios.begin(), ratios.end());
     res.ok              = true;
     res.coverage         = static_cast<double>(n_covered) / n_total;
+    printFlagScores(node_continuity_semi ? "surcharged SEMI_IMPLICIT" : "surcharged EXPLICIT", flag_scores);
     res.member_cov       = member_cov_sum / n_total;
     res.ratio_min        = ratio_min;
     res.ratio_med        = ratios[ratios.size() / 2];
@@ -769,9 +809,16 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
                 label, r.n_total, r.coverage, r.member_cov, r.ratio_min, r.ratio_med,
                 r.ratio_max, r.surcharged_frac, r.n_width);
 
-    // C1: EXPLICIT is a documented limitation; SEMI_IMPLICIT's fix is H5b.
-    mcq::reportCalibration(label, r.member_cov, r.ratio_med,
-                           std::string(label) == "EXPLICIT" ? "documented limitation (H5)" : "H5b");
+    // C1, H17 (2026-10-12): both continuity modes are validated cells under
+    // the flow-response Manning source and assert the floor. Measured
+    // EXPLICIT 0.936 / 1.173 (calibrated; was 0.736 / 0.782 ranking only),
+    // SEMI_IMPLICIT 0.916 / 1.956 (conservative: J4/J5 are 2.7x/3.9x wide
+    // because the pool is still filling at the window -- 14.1 cfs in, 11.4
+    // cfs out at t = 1 h -- and the ROM relaxes to the steady response
+    // faster than the network does).
+    EXPECT_TRUE(mcq::reportCalibration(label, r.member_cov, r.ratio_med,
+                                       "transient pool filling (H17 note)"))
+        << label << ": surcharged cell is validated since H17: member coverage must stay >= 0.80";
 
     // The regime precondition itself: this fixture must actually be
     // surcharged for most of the window, or the band-width comparison below
@@ -854,6 +901,13 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
 // PASS on this cell too, so the binary's only remaining red is gone; the C1
 // floor (0.80 member coverage) is still not met and is printed, not
 // asserted -- the EXPLICIT limitation stands as documented.
+//
+// H17 2026-10-12 (flow-response Manning source): 0.732 / 0.781 -> 0.936 /
+// 1.173 CALIBRATED, now asserted. The source is the head shift that lets
+// every conduit carry its deterministic flow again (RomFlowResponse.hpp):
+// for the drowned bottleneck it is twice the friction loss downstream of
+// each node, which reaches J3 through the full pipe chain -- the relay the
+// depth-keyed ramp could not see. The EXPLICIT limitation is closed.
 TEST(RomCoverageSurcharged, ExplicitContinuity) {
     assertSurchargedCell("EXPLICIT", runSurchargedCell(/*node_continuity_semi=*/false));
 }
