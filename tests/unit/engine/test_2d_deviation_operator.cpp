@@ -723,3 +723,116 @@ TEST(DeviationOperator2D, ManningElasticityScalesTheFixedPointExactlyAndOneIsBit
     for (std::size_t i = 0; i < e1.a_ensemble.size(); ++i)
         EXPECT_NEAR(e06.a_ensemble[i], 0.6 * e1.a_ensemble[i], 1e-9 * max_a) << "coef " << i;
 }
+
+// ============================================================================
+// Two-channel relative mode (2026-10-11): Manning in fractional coordinates
+// with the depth-weighted Galerkin operator, additive forcings in absolute
+// coordinates with the plain operator.
+// ============================================================================
+
+namespace {
+
+struct TwoChannelOps { std::vector<double> plain, rel, ginv; };
+
+TwoChannelOps twoChannelOps(const MeshData& mesh, const MeshEigenBasis& basis,
+                            const std::vector<double>& h, const std::vector<double>& u,
+                            const std::vector<double>& v, const std::vector<double>& gw) {
+    TwoChannelOps o;
+    DeviationOperator2D op;
+    op.alpha_par = 0.62; op.alpha_perp = 2.0; op.c_factor = 5.0 / 3.0;
+    EXPECT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    o.plain = op.M;
+    op.similarity_h = h.data();
+    EXPECT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    o.rel = op.M; o.ginv = op.Ginv;
+    return o;
+}
+
+} // namespace
+
+TEST(DeviationOperator2D, TwoChannelRainOnlyReproducesTheAbsoluteRom) {
+    // No Manning spread: everything lives in the additive channel, which IS
+    // the absolute ROM (plain operator, plain projection, h_det + P·δa).
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const auto ops = twoChannelOps(mesh, basis, h, u, v, gw);
+    const int nt = mesh.n_triangles(), M = 9;
+    std::vector<double> ones(static_cast<std::size_t>(M), 1.0), rain_mult(static_cast<std::size_t>(M));
+    for (int i = 0; i < M; ++i) rain_mult[static_cast<std::size_t>(i)] = 0.8 + 0.4 * (i + 0.5) / M;
+    std::vector<double> rain(static_cast<std::size_t>(nt));
+    for (int t = 0; t < nt; ++t) rain[static_cast<std::size_t>(t)] = 1e-5 * (1.0 + 0.5 * std::cos(0.4 * t));
+
+    auto make = [&](SpectralROM& r) {
+        r.basis = &basis; r.n_ensemble = M; r.mannings_pert = 0.0; r.rainfall_pert = 0.2;
+        r.setExternalSamples(ones, rain_mult); r.initialize(); r.seed(h.data());
+    };
+    SpectralROM abs_rom, two;
+    make(abs_rom); make(two);
+    abs_rom.setReducedOperator(ops.plain);
+    two.relative_deviation = true;
+    two.setReducedOperator(ops.rel); two.setRelativeGram(ops.ginv); two.setAdditiveOperator(ops.plain);
+    ASSERT_TRUE(two.twoChannel());
+    for (int step = 0; step < 8; ++step) {
+        abs_rom.advance(30.0, 1.0, rain.data(), nullptr, h.data());
+        two.advance(30.0, 1.0, rain.data(), nullptr, h.data());
+    }
+    double max_a = 0.0;
+    for (double a : abs_rom.a_ensemble) max_a = std::max(max_a, std::fabs(a));
+    ASSERT_GT(max_a, 1e-9) << "vacuous: no rain deviation developed";
+    EXPECT_LT(maxAbsDiff(abs_rom.a_ensemble, two.a_add), 1e-12 * max_a);
+    for (double a : two.a_ensemble) EXPECT_EQ(a, 0.0) << "Manning channel must stay empty";
+    abs_rom.computeQuantiles(h.data());
+    two.computeQuantiles(h.data());
+    EXPECT_LT(maxAbsDiff(abs_rom.q05, two.q05), 1e-12);
+    EXPECT_LT(maxAbsDiff(abs_rom.q95, two.q95), 1e-12);
+}
+
+TEST(DeviationOperator2D, TwoChannelManningOnlyLeavesTheAdditiveChannelEmpty) {
+    // No forcing spread: the additive channel stays exactly zero and the
+    // band comes entirely from the fractional Manning channel.
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    const auto ops = twoChannelOps(mesh, basis, h, u, v, gw);
+    const int M = 9;
+    std::vector<double> mann(static_cast<std::size_t>(M));
+    for (int i = 0; i < M; ++i) mann[static_cast<std::size_t>(i)] = 0.8 + 0.4 * (i + 0.5) / M;
+    SpectralROM two;
+    h15MakeRom(two, basis, M, mann, h, nullptr);
+    two.relative_deviation = true;
+    two.setReducedOperator(ops.rel); two.setRelativeGram(ops.ginv); two.setAdditiveOperator(ops.plain);
+    for (int step = 0; step < 8; ++step) two.advance(30.0, 1.0, nullptr, nullptr, h.data());
+    for (double a : two.a_add) EXPECT_EQ(a, 0.0);
+    double max_a = 0.0;
+    for (double a : two.a_ensemble) max_a = std::max(max_a, std::fabs(a));
+    EXPECT_GT(max_a, 1e-9) << "Manning channel did not develop";
+    two.computeQuantiles(h.data());
+    double spread = 0.0;
+    for (std::size_t t = 0; t < two.q05.size(); ++t) spread = std::max(spread, two.q95[t] - two.q05[t]);
+    EXPECT_GT(spread, 0.0);
+}
+
+TEST(DeviationOperator2D, GalerkinRelativeOperatorReducesToPlainForUniformDepth) {
+    // H = c·I ⇒ G = c²·I, A = c²·PᵀLP ⇒ M = PᵀLP: the weighted Galerkin
+    // projection is the plain one when depth is uniform.
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    std::vector<double> u, v, gw, h;
+    h15Fixture(mesh, u, v, gw, h);
+    ASSERT_TRUE(basis.build(mesh, 8, gw.data()));
+    std::vector<double> hu(h.size(), 0.12);
+    DeviationOperator2D op;
+    op.alpha_par = 0.62; op.alpha_perp = 2.0; op.c_factor = 5.0 / 3.0;
+    ASSERT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    const auto plain = op.M;
+    op.similarity_h = hu.data();
+    ASSERT_TRUE(op.assemble(mesh, basis, 1.7, h.data(), u.data(), v.data(), gw.data()));
+    double scale = 0.0;
+    for (double x : plain) scale = std::max(scale, std::fabs(x));
+    EXPECT_LT(maxAbsDiff(plain, op.M), 1e-10 * scale);
+}

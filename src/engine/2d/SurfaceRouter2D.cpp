@@ -2196,7 +2196,15 @@ void SurfaceRouter2D::initROM(SimulationContext& ctx) {
     rom->basis               = basis.get();
     rom->n_ensemble          = std::max(1, options_.rom_members);
     rom->manning_elasticity  = options_.rom_manning_elasticity;   // H13 (2D)
-    rom->relative_deviation  = options_.rom_relative_deviation;   // H16
+    // H16, default since 2026-10-11: relative reconstruction needs the
+    // constant mode, which only a GROUNDED basis carries. A closed domain
+    // (all WALL) or the legacy operator has no grounding: there the
+    // relative source would project to ~0 and silently show no Manning
+    // spread, so the absolute form is used instead.
+    bool grounded = false;
+    for (const double w : rom_ground_w_) if (w > 0.0) { grounded = true; break; }
+    rom->relative_deviation  = options_.rom_relative_deviation && use_reduced && grounded;
+    rom->relative_depth_floor = options_.dry_depth > 0.0 ? options_.dry_depth : 1.0e-3;
     rom->mannings_pert       = options_.rom_mannings_pert;
     rom->rainfall_pert       = options_.rom_rainfall_pert;
     rom->cd_pert             = options_.rom_cd_pert;
@@ -2365,12 +2373,30 @@ void SurfaceRouter2D::refreshROMOperator() {
     // reassembled "when the flow field has moved materially," not per step,
     // and this reuses the router's own existing refresh cadence instead of
     // running a second gradient estimator.
+    // Two-channel relative mode (see SpectralROM::relative_deviation): the
+    // additive channel (rain, soft rain, coupling) propagates with the PLAIN
+    // operator; the Manning channel with the depth-weighted Galerkin one.
+    rom_operator_.similarity_floor = rom_->relative_depth_floor;
+    if (rom_->relative_deviation) {
+        rom_operator_.similarity_h = nullptr;
+        if (!rom_operator_.assemble(mesh_, *rom_basis_, D_scale, state_.depth.data(),
+                                    state_.face_vx.data(), state_.face_vy.data(),
+                                    rom_ground_w_.data()))
+            return;
+        rom_->setAdditiveOperator(rom_operator_.M);
+    } else {
+        rom_->setAdditiveOperator({});
+    }
+    rom_operator_.similarity_h = rom_->relative_deviation ? state_.depth.data() : nullptr;
     const bool ok = rom_operator_.assemble(
         mesh_, *rom_basis_, D_scale, state_.depth.data(),
         state_.face_vx.data(), state_.face_vy.data(), rom_ground_w_.data());
     if (!ok) return;  // leave whatever operator was previously installed
 
     rom_->setReducedOperator(rom_operator_.M);
+    // Relative mode's forcing projections need the same Gram matrix.
+    rom_->setRelativeGram(rom_operator_.similarity_h ? rom_operator_.Ginv
+                                                     : std::vector<double>{});
 
     // PR H15: with a spatially correlated Manning field (MANNINGS_CORR_LEN),
     // one shared operator cannot carry the per-member roughness. Assemble one

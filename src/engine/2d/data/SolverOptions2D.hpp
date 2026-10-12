@@ -636,13 +636,13 @@ struct SolverOptions2D {
 
     /*! H16: reconstruct depth deviations as a local fraction of h_det
      *  (`h_i = h_det·(1 + Σ_j P[j,t]·δa_{i,j})`) instead of an added
-     *  constant. Default false reproduces every pre-H16 number bit-for-bit.
-     *  See SpectralROM::relative_deviation's doc comment and
-     *  VALIDATION.md "H16" for what this fixes (cross-depth-contrast
-     *  leakage onto thin cells) and what it does not (the elasticity dial
-     *  above is still a single global constant; VALIDATION.md "H16" has the
-     *  measured per-surface recalibration). */
-    bool rom_relative_deviation = false;
+     *  constant. THE DEFAULT since 2026-10-11 and not an .inp setting: the
+     *  absolute form mis-sizes bands wherever depth varies sharply (thin
+     *  films beside a channel). The router applies it only when the basis
+     *  is grounded (an open boundary exists); on a closed or legacy-operator
+     *  domain the constant mode relative mode needs is not in the basis, and
+     *  the absolute form is used. Internal test hook only. */
+    bool rom_relative_deviation = true;
 };
 
 } // namespace openswmm::twoD

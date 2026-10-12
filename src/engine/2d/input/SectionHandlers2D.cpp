@@ -1234,9 +1234,13 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         if (!ok || v < 0.0) return "RAINFALL_PERT must be >= 0";
         opts.rom_rainfall_pert = v;
     } else if (iequals(key, "K_EFF")) {
+        // Retired 2026-10-11 with the other operator dials: K_eff is always
+        // derived from the mesh and flow (AUTO). A value <= 0 restates AUTO.
         double v = tryParseDouble(val, ok);
         if (!ok) return "Invalid K_EFF value";
-        opts.rom_k_eff = v;   // <= 0 means AUTO
+        if (v > 0.0)
+            return "K_EFF is no longer a setting: it is always derived from the "
+                   "mesh and flow. Remove the line.";
     } else if (iequals(key, "WET_RESEED_FRACTION")) {
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0 || v > 1.0) return "WET_RESEED_FRACTION must be in [0, 1]";
@@ -1264,44 +1268,35 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0) return "RAINFALL_CORR_LEN must be >= 0";
         opts.rom_rainfall_corr_len = v;
-    } else if (iequals(key, "LEGACY_OPERATOR")) {
-        if (iequals(val, "YES") || val == "1")
-            opts.rom_legacy_operator = true;
-        else if (iequals(val, "NO") || val == "0")
-            opts.rom_legacy_operator = false;
-        else
-            return "Invalid LEGACY_OPERATOR value (YES/NO)";
-    } else if (iequals(key, "ALPHA_PAR")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "ALPHA_PAR must be >= 0";
-        opts.rom_alpha_par = v;
-    } else if (iequals(key, "ALPHA_PERP")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "ALPHA_PERP must be >= 0";
-        opts.rom_alpha_perp = v;
-    } else if (iequals(key, "C_FACTOR")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok) return "Invalid C_FACTOR value";
-        opts.rom_c_factor = v;
-    } else if (iequals(key, "MANNING_ELASTICITY")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "MANNING_ELASTICITY must be >= 0";
-        opts.rom_manning_elasticity = v;
-    } else if (iequals(key, "DIFFUSIVITY_SCALE")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v <= 0.0) return "DIFFUSIVITY_SCALE must be > 0";
-        opts.rom_diffusivity_scale = v;
-    } else if (iequals(key, "RELATIVE_DEVIATION")) {
-        if (iequals(val, "YES") || val == "1")
-            opts.rom_relative_deviation = true;
-        else if (iequals(val, "NO") || val == "0")
-            opts.rom_relative_deviation = false;
-        else
-            return "Invalid RELATIVE_DEVIATION value (YES/NO)";
-    } else if (iequals(key, "GROUND_SCALE")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "GROUND_SCALE must be >= 0";
-        opts.rom_ground_scale = v;
+    } else if (iequals(key, "LEGACY_OPERATOR") || iequals(key, "ALPHA_PAR") ||
+               iequals(key, "ALPHA_PERP") || iequals(key, "C_FACTOR") ||
+               iequals(key, "GROUND_SCALE") || iequals(key, "MANNING_ELASTICITY") ||
+               iequals(key, "DIFFUSIVITY_SCALE") || iequals(key, "RELATIVE_DEVIATION")) {
+        // Retired 2026-10-11: the 2D uncertainty model runs one validated
+        // configuration (VALIDATION.md, "Rebase" and "Two-channel" records);
+        // its operator dials are no longer .inp settings. A line restating
+        // the built-in value is accepted so existing decks keep loading; any
+        // other value is refused with the reason, never silently ignored.
+        const SolverOptions2D def;
+        auto restates = [&](double d) {
+            double v = tryParseDouble(val, ok);
+            return ok && std::abs(v - d) <= 1e-12 * std::max(1.0, std::abs(d));
+        };
+        bool same = false;
+        if (iequals(key, "LEGACY_OPERATOR"))
+            same = iequals(val, "NO") || val == "0";
+        else if (iequals(key, "RELATIVE_DEVIATION"))
+            same = iequals(val, "YES") || val == "1";
+        else if (iequals(key, "ALPHA_PAR"))          same = restates(def.rom_alpha_par);
+        else if (iequals(key, "ALPHA_PERP"))         same = restates(def.rom_alpha_perp);
+        else if (iequals(key, "C_FACTOR"))           same = restates(def.rom_c_factor);
+        else if (iequals(key, "GROUND_SCALE"))       same = restates(def.rom_ground_scale);
+        else if (iequals(key, "MANNING_ELASTICITY")) same = restates(def.rom_manning_elasticity);
+        else if (iequals(key, "DIFFUSIVITY_SCALE"))  same = restates(def.rom_diffusivity_scale);
+        if (!same)
+            return key + " is no longer a setting: the 2D uncertainty model uses "
+                   "one validated configuration, so results do not depend on "
+                   "tuning dials. Remove the line.";
     } else {
         return "Unknown 2D_ROM parameter: " + key;
     }

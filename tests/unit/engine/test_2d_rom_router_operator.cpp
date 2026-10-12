@@ -284,22 +284,44 @@ TEST(SurfaceROMRouterOperator, ManningElasticityOptionReachesTheRom) {
     swmm_engine_close(eng); swmm_engine_destroy(eng);
 }
 
-TEST(SurfaceROMRouterOperator, RelativeDeviationOptionReachesTheRom) {
+TEST(SurfaceROMRouterOperator, RelativeDeviationAppliesOnlyOnAGroundedBasis) {
+    // Relative reconstruction is the default (2026-10-11), but it needs the
+    // constant mode, which only a GROUNDED basis carries. Open boundary:
+    // relative. Closed box: the router must fall back to the absolute form,
+    // and the band must keep its Manning spread.
+    //
+    // Measured 2026-10-11 on this fixture: open (relative) 1.58e-3; closed
+    // with the fallback (absolute) 6.20e-3; closed with relative FORCED
+    // 2.42e-5 — a 256x collapse a "> 0" check cannot see. So the closed box
+    // is held to a tenth of the open box's spread.
     const fs::path dir = fs::current_path() / "rom_router_operator_out";
     fs::create_directories(dir);
-    { std::ofstream f(dir / "relative.inp"); f << buildModel(/*open=*/false); }
-    auto eng = driveRun(dir / "relative.inp", dir / "relative.rpt", dir / "relative.out",
-                        [](openswmm::twoD::SolverOptions2D& o) {
-                            o.enable_rom = true; o.rom_members = 12; o.rom_modes = 6;
-                            o.rom_mannings_pert = 0.20; o.rom_rainfall_pert = 0.0;
-                            o.rom_relative_deviation = true;
-                        });
-    ASSERT_NE(eng, nullptr);
-    auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
-    ASSERT_NE(impl->surfaceRouter2D().rom(), nullptr);
-    EXPECT_TRUE(impl->surfaceRouter2D().rom()->relative_deviation);
-    swmm_engine_end(eng); swmm_engine_report(eng);
-    swmm_engine_close(eng); swmm_engine_destroy(eng);
+    auto configure = [](openswmm::twoD::SolverOptions2D& o) {
+        o.enable_rom = true; o.rom_members = 12; o.rom_modes = 6;
+        o.rom_mannings_pert = 0.20; o.rom_rainfall_pert = 0.0;
+    };
+    double spread_open = 0.0, spread_closed = 0.0;
+    for (const bool open : {true, false}) {
+        const std::string tag = open ? "relative_open" : "relative_closed";
+        { std::ofstream f(dir / (tag + ".inp")); f << buildModel(open); }
+        auto eng = driveRun(dir / (tag + ".inp"), dir / (tag + ".rpt"),
+                            dir / (tag + ".out"), configure);
+        ASSERT_NE(eng, nullptr) << tag;
+        auto* impl = static_cast<openswmm::SWMMEngine*>(eng);
+        const auto* rom = impl->surfaceRouter2D().rom();
+        ASSERT_NE(rom, nullptr) << tag;
+        EXPECT_EQ(rom->relative_deviation, open) << tag;
+        double max_spread = 0.0;
+        for (std::size_t c = 0; c < rom->q05.size(); ++c)
+            max_spread = std::max(max_spread, rom->q95[c] - rom->q05[c]);
+        (open ? spread_open : spread_closed) = max_spread;
+        swmm_engine_end(eng); swmm_engine_report(eng);
+        swmm_engine_close(eng); swmm_engine_destroy(eng);
+    }
+    EXPECT_GT(spread_open, 0.0);
+    EXPECT_GE(spread_closed, 0.1 * spread_open)
+        << "closed-box band collapsed: open " << spread_open
+        << " vs closed " << spread_closed;
 }
 
 TEST(SurfaceROMRouterOperator, LegacyOptionRestoresDiagonalPathWithDepthWeightedBasis) {

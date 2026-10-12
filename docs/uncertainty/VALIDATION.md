@@ -866,6 +866,90 @@ Runtime ≈ 100 s (Debug): 26 marcher runs × 4 800 s simulated on 3 200 cells.
 All calibrated constants live at the top of the harness; the floors are the
 meter — recalibrate the dials, never the floors.
 
+# Two-channel 2D deviation: Manning fractional, forcings absolute; dials retired (2026-10-11)
+
+**Branch** `hsym2/t1-relative-default`. Goal set by the owner: one behaviour,
+no tuning switches, so the sidecar is handled consistently.
+
+## 1. What making H16's relative mode the default exposed
+
+Flipping the default and running every 2D gate showed H16 had only ever been
+measured on Manning cells. Its relative reconstruction multiplied every
+ADDITIVE forcing by h_det a second time:
+
+| Cell | Absolute | H16 relative (as shipped) |
+|---|---|---|
+| plane rain ℓ = 20 m | 0.894 / 1.316 | **0.120 / 0.082** |
+| plane rain ℓ = 100 m | 0.883 / 1.415 | **0.165 / 0.109** |
+| channel rain ℓ = 20 m | 0.938 / 1.867 | **0.116 / 0.048** |
+
+Three corrections were measured in turn, each for a stated reason:
+
+1. **Forcings divided by h_det, plain operator**: rain over-wide (1.81 / 2.35 /
+   2.88). The operator was assembled for absolute deviations; applied to
+   fractions it integrates rain/h along the flow path and over-counts shallow
+   upstream cells.
+2. **Similarity transform Pᵀ·H⁻¹·L·H·P**: plane right (rain 0.886 / 1.135,
+   0.890 / 1.400; Manning 0.835 / 1.320) but the channel diverged (widths
+   ~1e41). Exact before truncation; after it, non-normal enough at a 400:1
+   depth contrast to grow.
+3. **Galerkin projection onto span(H·P)**, M = G⁻¹(HP)ᵀL(HP), forcings
+   G⁻¹Pᵀ(h ⊙ s): stable and right for Manning everywhere (plane 0.864 / 1.360,
+   channel 0.818 / 1.308) — but channel rain collapsed (0.047 / 0.032): a
+   depth-weighted representation cannot hold rain landing on a 3 mm film.
+
+**Reading.** Manning uncertainty is multiplicative and wants fractional
+coordinates; additive forcings want absolute coordinates. One coordinate
+system for both fails one of them.
+
+## 2. The design
+
+Each member carries two coefficient sets (SpectralROM::twoChannel()):
+- Manning / RATE_MULT, fractional, propagated with the Galerkin operator of
+  §1.3 (DeviationOperator2D::similarity_h, setRelativeGram);
+- rain, soft rain, FORCING_VECTOR fields and 1D↔2D coupling, absolute,
+  propagated with the plain operator (setAdditiveOperator) — exactly the
+  earlier absolute ROM.
+
+h_i = h_det·(1 + P·δa_i) + P·δa_add_i. Linear, so the split is exact to
+first order. A closed domain (no open boundary) keeps the absolute form for
+Manning: forcing relative there collapsed its band 256× (router test).
+
+## 3. Results (member coverage / median width ratio)
+
+| Cell | Absolute (rebased) | Two-channel |
+|---|---|---|
+| **W3 asserted gate (plane Manning)** | 0.800 / 1.261 | **0.864 / 1.360** |
+| channel Manning | 0.912 / 2.460 | **0.818 / 1.308** |
+| plane Manning ℓ = 20 m (H15) | 0.784 / 0.892 | **0.907 / 1.463** |
+| plane Manning ℓ = 100 m (H15) | 0.831 / 1.283 | 0.906 / 1.516 (conservative) |
+| plane rain ℓ = 20 m / 100 m | 0.894 / 1.316, 0.883 / 1.415 | identical |
+| channel rain ℓ = 20 m | 0.938 / 1.867 | identical (conservative) |
+
+Every Manning cell is now calibrated or conservative; the asserted gate's
+margin over its 0.80 floor goes from 0.000 to 0.064. Rain cells are
+unchanged by construction (unit test: rain-only two-channel ≡ absolute ROM to
+1e-12). Channel rain stays 1.87× wide — the one uncalibrated 2D cell, same
+cause W4b named for Manning (absolute deviation through smooth modes), not
+addressed here.
+
+## 4. Step 2 of the plan dissolved
+
+The plan was to replace the global elasticity constant by one derived from
+each cell's geometry, because the plane and channel wanted different values.
+Under the two-channel form both calibrate with the same constant (1.0), so
+that work is not needed. The operator dials (LEGACY_OPERATOR, ALPHA_PAR,
+ALPHA_PERP, C_FACTOR, GROUND_SCALE, MANNING_ELASTICITY, DIFFUSIVITY_SCALE,
+RELATIVE_DEVIATION, K_EFF) are no longer .inp settings: a line restating the
+built-in value loads, any other value is refused with the reason. The C++
+fields remain as internal test hooks.
+
+## 5. Reproduction
+
+    W4_CELLS=<cell> OPENSWMM_2D_BACKEND=cpu build/<dir>/tests/regression/test_2d_rom_marcher_coverage_corr
+    W4_RELATIVE=0 ...   # the absolute form, for comparison
+    W3_RELATIVE=0 build/<dir>/tests/regression/test_2d_rom_marcher_coverage
+
 # Rebase onto swmm6_rel 2026-10-09: every MC gate re-measured (2026-10-11)
 
 **Branch** `hsym2/stack-on-swmm6rel`. The whole stack (48 first-parent commits,
@@ -1089,6 +1173,13 @@ dependent calibration gap. The 5–10 cm bin stays the outlier at every `e`
 not chased further here.
 
 ## 4. What ships, what does not
+
+**Superseded 2026-10-11:** relative reconstruction is now the default and
+not a setting (applied wherever the basis is grounded; a closed domain keeps
+the absolute form, which a router test pins: forcing relative mode on a
+closed box collapsed its band 256×). The asserted W3 gate under relative
+mode on the rebased engine: 0.830 / 1.295 (absolute: 0.800 / 1.261). Text
+below is the original H16 record.
 
 `relative_deviation` ships as an opt-in option (`[2D_ROM] RELATIVE_DEVIATION
 YES`, default NO) — new capability, zero change to any existing number

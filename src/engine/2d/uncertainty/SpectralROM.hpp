@@ -123,9 +123,26 @@ struct SpectralROM {
      * VALIDATION.md "H16" against the W4 channel/plane harness).
      *
      * `manning_elasticity` keeps its existing meaning (H13): it is the e in
-     * the fixed point above either way. The forcing-sensitivity channel
-     * (rainfall/soft-rain, `r_coarse`) is untouched — this only changes the
-     * Manning channel's reference field and the reconstruction step.
+     * the fixed point above either way.
+     *
+     * TWO CHANNELS (2026-10-11). Manning uncertainty is MULTIPLICATIVE (it
+     * scales depth everywhere) and belongs in fractional coordinates; rain,
+     * soft rain, registered FORCING_VECTOR fields and 1D<->2D coupling are
+     * ADDITIVE (they land mostly on thin films and drain to the channel) and
+     * belong in absolute coordinates. Measured: one coordinate system for
+     * both fails one or the other — fractional rain collapsed the channel
+     * rain band (coverage 0.05), absolute Manning leaves the channel 2.5x
+     * wide. So when a reduced operator AND an additive operator are both
+     * installed, relative mode carries two coefficient sets per member:
+     *   - a_ensemble: the Manning / RATE_MULT channel, δh = H·P·δa with
+     *     H = diag(max(h_det, floor)), propagated with the depth-weighted
+     *     Galerkin operator (setReducedOperator + setRelativeGram);
+     *   - a_add: every additive forcing, plain δh = P·δa, propagated with the
+     *     plain operator (setAdditiveOperator), exactly the absolute ROM.
+     * Reconstruction: h_i = h_det·(1 + P·δa_i) + P·δa_add_i. The system is
+     * linear, so the split is exact to first order (the Manning x rain cross
+     * term is second order). Without an additive operator (e.g. the diagonal
+     * path), relative mode is the original H16 Manning-only form.
      *
      * Not yet validated together with `spatial_mannings` (H15 per-member
      * operators) or a reduced operator other than the shared diagonal/
@@ -135,6 +152,29 @@ struct SpectralROM {
      * analogue, lower priority than the 2D case W4b measured.
      */
     bool relative_deviation = false;
+
+    /// Additive-channel coefficients (two-channel relative mode only),
+    /// a_add[i * n_kept + j]; zero and unused otherwise.
+    std::vector<double> a_add;
+
+    /// Two-channel relative mode: the PLAIN reduced operator (k×k, 1/s) the
+    /// additive channel propagates with. Empty = single-channel.
+    void setAdditiveOperator(const std::vector<double>& M_in);
+
+    /// True when relative mode runs the two-channel split.
+    bool twoChannel() const noexcept {
+        return relative_deviation && !reduced_M_add_.empty() && !reduced_M_.empty();
+    }
+
+    /// Relative mode: install G⁻¹ = ((HP)ᵀ(HP))⁻¹ (k×k row-major) from the
+    /// same DeviationOperator2D assembly that produced the reduced operator.
+    void setRelativeGram(const std::vector<double>& Ginv);
+
+    /// Relative mode only: the depth (m) below which h_det is floored when
+    /// converting an absolute forcing to a fractional rate. A dry cell's
+    /// reconstruction is h_det·(1+...) = 0 regardless; the floor keeps the
+    /// weight finite. The router sets it to the marcher's dry_depth.
+    double relative_depth_floor = 1.0e-3;
 
     // -------------------------------------------------------------------------
     // PR H4 — quantile-reconstruction GEMM. Debug/equivalence-testing knob:
@@ -592,7 +632,7 @@ struct SpectralROM {
     void setReducedOperatorPerMember(const std::vector<double>& M_all);
 
     /// Remove the reduced operator(s); advance() returns to the diagonal path.
-    void clearReducedOperator() noexcept { reduced_M_.clear(); reduced_M_members_.clear(); }
+    void clearReducedOperator() noexcept { reduced_M_.clear(); reduced_M_members_.clear(); reduced_M_add_.clear(); }
 
     /// True when a reduced operator is installed.
     bool hasReducedOperator() const noexcept { return !reduced_M_.empty(); }
@@ -611,6 +651,11 @@ private:
     /// PR H14b: shared-operator batch propagator (powers of −dt·M per advance()).
     std::vector<double> reduced_A_;
     openswmm::uncertainty::BatchPropagator reduced_batch_;
+    std::vector<double> reduced_M_add_;   ///< additive-channel operator (k×k); empty = off
+    std::vector<double> reduced_A_add_;
+    std::vector<double> reduced_g_add_;
+    openswmm::uncertainty::BatchPropagator reduced_batch_add_;
+    std::vector<double> recon_add_buf_;   ///< GEMM scratch for the additive channel
 
     std::vector<double> h_work_;      ///< n_tri: scratch for reconstruction.
     std::vector<double> h_det_last_;  ///< n_tri: deterministic depth from the last advance()/seed().
@@ -683,6 +728,13 @@ private:
         double              max_dev = 0.0;   ///< max_i |θ_i − 1| (refreshed per advance)
     };
     std::vector<ExtraParam> extra_params_;
+    /// Per-cell absolute->fractional forcing weight for this advance():
+    /// 1/max(h_det, relative_depth_floor) in relative mode, exactly 1.0 otherwise.
+    std::vector<double> rel_w_;
+    std::vector<double> rel_ginv_;     ///< G⁻¹ for relative mode (k×k); empty = identity.
+    std::vector<double> rel_tmp_;      ///< k scratch for applyGinv_().
+    /// In place v ← G⁻¹·v (no-op unless relative mode has a Gram installed).
+    void applyGinv_(double* v);
 
     /// When true, initialize() uses external_mann_ / external_rain_ instead of
     /// building the internal LHS.

@@ -77,6 +77,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -308,6 +309,14 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0,
     rom.n_ensemble    = kM;
     rom.mannings_pert = kPert;
     rom.rainfall_pert = 0.0;
+    // Production default (2026-10-11): relative-deviation reconstruction
+    // (H16) on every grounded rung. The legacy rung runs on the ungrounded
+    // Neumann basis, where the constant mode relative mode needs is filtered,
+    // so it keeps the absolute form. W3_RELATIVE=0 reproduces the pre-default
+    // (absolute) numbers for comparison.
+    static const bool kRelative = [](){
+        const char* v = std::getenv("W3_RELATIVE"); return !v || std::atoi(v) != 0; }();
+    rom.relative_deviation = kRelative && rung != Rung::LEGACY;
     std::vector<double> ones(kM, 1.0);
     rom.setExternalSamples(mult, ones);   // member i ↔ MC member i
     rom.initialize();
@@ -346,10 +355,22 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0,
             }
             manningVelocity(mesh0, h_prev, vel_u, vel_v);
             const double D = classicDiffusivity(mesh0, h_prev);
+            // Relative mode needs the similarity-transformed operator.
+            // Two-channel relative mode: plain operator for the additive
+            // channel first, then the depth-weighted one for Manning.
+            op.similarity_h = nullptr;
+            if (rom.relative_deviation) {
+                if (!op.assemble(mesh0, basis, D, h_prev.data(), vel_u.data(), vel_v.data(),
+                                 ground_w.data()))
+                    return out;
+                rom.setAdditiveOperator(op.M);
+            }
+            op.similarity_h = rom.relative_deviation ? h_prev.data() : nullptr;
             if (!op.assemble(mesh0, basis, D, h_prev.data(),
                              vel_u.data(), vel_v.data(), ground_w.data()))
                 return out;   // ok stays false
             rom.setReducedOperator(op.M);
+            rom.setRelativeGram(op.similarity_h ? op.Ginv : std::vector<double>{});
         }
 
         rom.advance(kRep, K_legacy, /*rainfall=*/nullptr,

@@ -324,8 +324,10 @@ struct RomInputs {
     double elasticity = [](){ const char* v = std::getenv("W4_ELASTICITY"); return v ? std::atof(v) : 1.0; }();
     double d_mult = 1.0;
     // H16: reconstruct depth deviations as a local fraction of h_det instead
-    // of an absolute delta (see SpectralROM::relative_deviation).
-    bool relative = [](){ const char* v = std::getenv("W4_RELATIVE"); return v && std::atoi(v) != 0; }();
+    // of an absolute delta (see SpectralROM::relative_deviation). The
+    // production default since 2026-10-11; W4_RELATIVE=0 reproduces the
+    // absolute form. Never applied on the ungrounded (legacy/Neumann) rung.
+    bool relative = [](){ const char* v = std::getenv("W4_RELATIVE"); return !v || std::atoi(v) != 0; }();
     // Comonotone Manning multipliers (length M) or empty for "ones".
     std::vector<double> mann_mult;
     // Correlated Manning multiplier field (M × n). Without `per_member` the
@@ -375,7 +377,7 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
     rom.initialize();
     rom.seed(h0.data());
     rom.manning_elasticity = in.elasticity;
-    rom.relative_deviation = in.relative;
+    rom.relative_deviation = in.relative && rung != Rung::LEGACY;
     if (in.mann_field) rom.spatial_mannings = *in.mann_field;
 
     RomBands out;
@@ -412,10 +414,23 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0, const MeshEigenBasis& basi
             }
             manningVelocity(mesh0, h_prev, vel_u, vel_v);
             const double D = classicDiffusivity(mesh0, h_prev) * in.d_mult;
+            // Relative mode needs the similarity-transformed operator (kept
+            // for the per-member assemblies below, which reuse `op`).
+            // Two-channel relative mode: plain operator for the additive
+            // channel first, then the depth-weighted one for Manning.
+            op.similarity_h = nullptr;
+            if (rom.relative_deviation) {
+                if (!op.assemble(mesh0, basis, D, h_prev.data(), vel_u.data(), vel_v.data(),
+                                 ground_w.data()))
+                    return out;
+                rom.setAdditiveOperator(op.M);
+            }
+            op.similarity_h = rom.relative_deviation ? h_prev.data() : nullptr;
             if (!op.assemble(mesh0, basis, D, h_prev.data(), vel_u.data(), vel_v.data(),
                              ground_w.data()))
                 return out;
             rom.setReducedOperator(op.M);
+            rom.setRelativeGram(op.similarity_h ? op.Ginv : std::vector<double>{});
             if (in.mann_field && in.per_member) {
                 const int nt = mesh0.n_triangles();
                 const auto kk = static_cast<std::size_t>(op.k) * static_cast<std::size_t>(op.k);

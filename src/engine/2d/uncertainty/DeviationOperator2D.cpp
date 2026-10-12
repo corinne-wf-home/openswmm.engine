@@ -189,17 +189,75 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
     M.assign(nk * nk, 0.0);
 
     std::vector<double> y(nn, 0.0);
+    if (similarity_h == nullptr) {
+        for (std::size_t q = 0; q < nk; ++q) {
+            const double* Pq = &basis.P[q * nn];
+            csr_matvec(L, Pq, y.data());
+            for (std::size_t p = 0; p < nk; ++p) {
+                const double* Pp = &basis.P[p * nn];
+                double dot = 0.0;
+                for (std::size_t t = 0; t < nn; ++t)
+                    dot += Pp[t] * y[t];
+                M[p * nk + q] = dot;
+            }
+        }
+        return true;
+    }
+
+    // Relative coordinates, Galerkin in the trial space span(H·P):
+    //   A = (HP)ᵀ·L·(HP),  G = (HP)ᵀ(HP),  M = G⁻¹·A.
+    const double fl = similarity_floor > 0.0 ? similarity_floor : 1.0e-3;
+    std::vector<double> hf(nn), hp(nn, 0.0);
+    for (std::size_t t = 0; t < nn; ++t) hf[t] = std::max(similarity_h[t], fl);
+    std::vector<double> A(nk * nk, 0.0), G(nk * nk, 0.0);
     for (std::size_t q = 0; q < nk; ++q) {
         const double* Pq = &basis.P[q * nn];
-        csr_matvec(L, Pq, y.data());
+        for (std::size_t t = 0; t < nn; ++t) hp[t] = hf[t] * Pq[t];
+        csr_matvec(L, hp.data(), y.data());
         for (std::size_t p = 0; p < nk; ++p) {
             const double* Pp = &basis.P[p * nn];
-            double dot = 0.0;
-            for (std::size_t t = 0; t < nn; ++t)
-                dot += Pp[t] * y[t];
-            M[p * nk + q] = dot;
+            double a = 0.0, g = 0.0;
+            for (std::size_t t = 0; t < nn; ++t) {
+                const double hpp = hf[t] * Pp[t];
+                a += hpp * y[t];
+                g += hpp * hp[t];
+            }
+            A[p * nk + q] = a;
+            G[p * nk + q] = g;
         }
     }
+    // Ginv by Gauss-Jordan with partial pivoting (G is SPD: H is floored
+    // positive and P has orthonormal columns). k is O(10-100).
+    Ginv.assign(nk * nk, 0.0);
+    for (std::size_t i = 0; i < nk; ++i) Ginv[i * nk + i] = 1.0;
+    for (std::size_t c = 0; c < nk; ++c) {
+        std::size_t piv = c;
+        for (std::size_t r = c + 1; r < nk; ++r)
+            if (std::abs(G[r * nk + c]) > std::abs(G[piv * nk + c])) piv = r;
+        if (std::abs(G[piv * nk + c]) < 1e-300) return false;
+        if (piv != c)
+            for (std::size_t j = 0; j < nk; ++j) {
+                std::swap(G[c * nk + j], G[piv * nk + j]);
+                std::swap(Ginv[c * nk + j], Ginv[piv * nk + j]);
+            }
+        const double inv = 1.0 / G[c * nk + c];
+        for (std::size_t j = 0; j < nk; ++j) { G[c * nk + j] *= inv; Ginv[c * nk + j] *= inv; }
+        for (std::size_t r = 0; r < nk; ++r) {
+            if (r == c) continue;
+            const double f = G[r * nk + c];
+            if (f == 0.0) continue;
+            for (std::size_t j = 0; j < nk; ++j) {
+                G[r * nk + j]    -= f * G[c * nk + j];
+                Ginv[r * nk + j] -= f * Ginv[c * nk + j];
+            }
+        }
+    }
+    for (std::size_t p = 0; p < nk; ++p)
+        for (std::size_t q = 0; q < nk; ++q) {
+            double s = 0.0;
+            for (std::size_t r = 0; r < nk; ++r) s += Ginv[p * nk + r] * A[r * nk + q];
+            M[p * nk + q] = s;
+        }
     return true;
 }
 

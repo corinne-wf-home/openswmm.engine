@@ -78,6 +78,22 @@ struct DeviationOperator2D {
     /// the conductance blends to the direction-free mean (α∥+α⊥)/2.
     double u_eps = 1.0e-6;
 
+    /// Relative-coordinate projection (2026-10-11). When non-null, the ROM
+    /// represents δh = H·P·δa with H = diag(max(h, similarity_floor)) and
+    /// assemble() returns the GALERKIN projection of L onto that trial space:
+    ///     M = G⁻¹·(HP)ᵀ·L·(HP),   G = (HP)ᵀ(HP)   (Ginv is stored).
+    /// This is the reduced operator for the fractional deviation f = δh/h.
+    /// Two simpler choices were measured and rejected: projecting L itself
+    /// integrates forcing/h along the flow path (rain bands 1.8-2.9x wide),
+    /// and projecting the similarity transform Pᵀ·H⁻¹·L·H·P is exact before
+    /// truncation but non-normal enough at a 400:1 depth contrast to grow
+    /// (channel bands ~1e41). The Galerkin form inherits L's dissipation.
+    /// Forcings must then be projected as G⁻¹·Pᵀ(h ⊙ s) — the ROM does this
+    /// with SpectralROM::setRelativeGram(Ginv). Null = plain L, bit-identical.
+    const double* similarity_h = nullptr;
+    double similarity_floor = 1.0e-3;
+    std::vector<double> Ginv; ///< k×k row-major, set by assemble() when similarity_h != null.
+
     // ---- set by assemble() ----
 
     int k = 0;                ///< Retained modes (== basis.num_kept).

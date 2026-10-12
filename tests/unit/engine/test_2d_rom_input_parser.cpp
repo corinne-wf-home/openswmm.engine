@@ -21,6 +21,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 
 #include <openswmm/engine/openswmm_engine.h>
@@ -123,7 +124,6 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsScalarOptions) {
         "MODES                    8\n"
         "MANNINGS_PERT            0.15\n"
         "RAINFALL_PERT            0.10\n"
-        "K_EFF                    0.9\n"
         "WET_RESEED_FRACTION      0.30\n"
         "WET_RESEED_MIN_INTERVAL  500\n"
         "PARAMETRIC_TAILS         YES\n"
@@ -141,7 +141,7 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsScalarOptions) {
     EXPECT_EQ(o.rom_modes, 8);
     EXPECT_DOUBLE_EQ(o.rom_mannings_pert, 0.15);
     EXPECT_DOUBLE_EQ(o.rom_rainfall_pert, 0.10);
-    EXPECT_DOUBLE_EQ(o.rom_k_eff, 0.9);
+    EXPECT_DOUBLE_EQ(o.rom_k_eff, 0.0);   // K_EFF retired: always AUTO
     EXPECT_DOUBLE_EQ(o.rom_wet_reseed_fraction, 0.30);
     EXPECT_DOUBLE_EQ(o.rom_wet_reseed_min_interval, 500.0);
     EXPECT_TRUE(o.rom_parametric_tails);
@@ -153,55 +153,50 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsScalarOptions) {
     swmm_engine_destroy(eng);
 }
 
-TEST(SurfaceROMInputParser, TwoDRomSectionSetsReducedOperatorDials) {
+TEST(SurfaceROMInputParser, TwoDRomRetiredDialsAcceptOnlyTheBuiltInValues) {
+    // 2026-10-11: the operator dials are no longer .inp settings. A deck that
+    // restates the built-in values still loads (and changes nothing); any
+    // other value is refused with the reason.
     const fs::path dir = fs::current_path() / "rom_input_parser_out";
     fs::create_directories(dir);
-
-    const std::string extra =
-        "\n[2D_ROM]\n"
-        "ENABLE          YES\n"
-        "LEGACY_OPERATOR NO\n"
-        "ALPHA_PAR       0.5\n"
-        "ALPHA_PERP      1.5\n"
-        "C_FACTOR        1.2\n"
-        "GROUND_SCALE    0.4\n"
-        "MANNING_ELASTICITY 0.6\n"
-        "DIFFUSIVITY_SCALE  2.5\n"
-        "RELATIVE_DEVIATION YES\n";
-
+    const openswmm::twoD::SolverOptions2D def;
+    auto num = [](double d) { std::ostringstream o; o.precision(17); o << d; return o.str(); };
+    const std::string restated =
+        "\n[2D_ROM]\nENABLE YES\nLEGACY_OPERATOR NO\nRELATIVE_DEVIATION YES\nK_EFF 0\n"
+        "ALPHA_PAR " + num(def.rom_alpha_par) + "\nALPHA_PERP " + num(def.rom_alpha_perp) +
+        "\nC_FACTOR " + num(def.rom_c_factor) + "\nGROUND_SCALE " + num(def.rom_ground_scale) +
+        "\nMANNING_ELASTICITY " + num(def.rom_manning_elasticity) +
+        "\nDIFFUSIVITY_SCALE " + num(def.rom_diffusivity_scale) + "\n";
     std::string err;
-    auto eng = parseOnly(dir, "rom_dials", extra, &err);
-    ASSERT_NE(eng, nullptr) << "parse failed: " << err;
-
+    auto eng = parseOnly(dir, "rom_dials_default", restated, &err);
+    ASSERT_NE(eng, nullptr) << "restating the defaults must load: " << err;
     const auto& o = static_cast<openswmm::SWMMEngine*>(eng)->surfaceRouter2D().options();
-    EXPECT_TRUE(o.enable_rom);
     EXPECT_FALSE(o.rom_legacy_operator);
-    EXPECT_DOUBLE_EQ(o.rom_alpha_par, 0.5);
-    EXPECT_DOUBLE_EQ(o.rom_alpha_perp, 1.5);
-    EXPECT_DOUBLE_EQ(o.rom_c_factor, 1.2);
-    EXPECT_DOUBLE_EQ(o.rom_ground_scale, 0.4);
-    EXPECT_DOUBLE_EQ(o.rom_manning_elasticity, 0.6);   // H13 (2D)
-    EXPECT_DOUBLE_EQ(o.rom_diffusivity_scale, 2.5);
-    EXPECT_TRUE(o.rom_relative_deviation);             // H16
-
+    EXPECT_TRUE(o.rom_relative_deviation);
+    EXPECT_EQ(o.rom_alpha_par, def.rom_alpha_par);
+    EXPECT_EQ(o.rom_manning_elasticity, def.rom_manning_elasticity);
+    EXPECT_EQ(o.rom_k_eff, def.rom_k_eff);
     swmm_engine_close(eng);
     swmm_engine_destroy(eng);
+
+    for (const char* line : {"LEGACY_OPERATOR YES", "ALPHA_PAR 0.5", "ALPHA_PERP 1.5",
+                             "C_FACTOR 1.2", "GROUND_SCALE 0.4", "MANNING_ELASTICITY 0.6",
+                             "DIFFUSIVITY_SCALE 2.5", "K_EFF 0.9", "RELATIVE_DEVIATION NO",
+                             "RELATIVE_DEVIATION MAYBE"}) {
+        std::string e;
+        auto bad = parseOnly(dir, "rom_dial_bad",
+                             std::string("\n[2D_ROM]\nENABLE YES\n") + line + "\n", &e);
+        EXPECT_EQ(bad, nullptr) << line;
+        EXPECT_NE(e.find("no longer a setting"), std::string::npos) << line << ": " << e;
+    }
 }
 
-TEST(SurfaceROMInputParser, TwoDRomRelativeDeviationDefaultsOff) {
-    // H16 ships OFF by default: every pre-H16 number (W3's own gate among
-    // them) must stay bit-identical unless a caller opts in.
+TEST(SurfaceROMInputParser, TwoDRomRelativeDeviationIsTheDefault) {
+    // 2026-10-11: relative (two-channel) reconstruction is the production
+    // default and no longer an .inp setting; the router still falls back to
+    // the absolute form on an ungrounded basis (SurfaceROMRouterOperator).
     const openswmm::twoD::SolverOptions2D defaults;
-    EXPECT_FALSE(defaults.rom_relative_deviation);
-}
-
-TEST(SurfaceROMInputParser, TwoDRomRelativeDeviationRejectsBadValue) {
-    const fs::path dir = fs::current_path() / "rom_input_parser_out";
-    fs::create_directories(dir);
-    std::string err;
-    auto eng = parseOnly(dir, "rom_relative_bad", "\n[2D_ROM]\nENABLE YES\nRELATIVE_DEVIATION MAYBE\n", &err);
-    EXPECT_EQ(eng, nullptr);
-    EXPECT_NE(err.find("RELATIVE_DEVIATION"), std::string::npos) << err;
+    EXPECT_TRUE(defaults.rom_relative_deviation);
 }
 
 TEST(SurfaceROMInputParser, TwoDRomElasticityDefaultsAreTheW3Calibration) {
@@ -212,22 +207,6 @@ TEST(SurfaceROMInputParser, TwoDRomElasticityDefaultsAreTheW3Calibration) {
     const openswmm::twoD::SolverOptions2D defaults;
     EXPECT_DOUBLE_EQ(defaults.rom_manning_elasticity, 1.0);
     EXPECT_DOUBLE_EQ(defaults.rom_diffusivity_scale, 1.0);
-}
-
-TEST(SurfaceROMInputParser, TwoDRomSectionLegacyOperatorYesRoundTrips) {
-    const fs::path dir = fs::current_path() / "rom_input_parser_out";
-    fs::create_directories(dir);
-
-    const std::string extra = "\n[2D_ROM]\nENABLE YES\nLEGACY_OPERATOR YES\n";
-    std::string err;
-    auto eng = parseOnly(dir, "rom_legacy", extra, &err);
-    ASSERT_NE(eng, nullptr) << "parse failed: " << err;
-
-    EXPECT_TRUE(static_cast<openswmm::SWMMEngine*>(eng)
-                    ->surfaceRouter2D().options().rom_legacy_operator);
-
-    swmm_engine_close(eng);
-    swmm_engine_destroy(eng);
 }
 
 TEST(SurfaceROMInputParser, TwoDRomSectionRejectsUnknownParameter) {

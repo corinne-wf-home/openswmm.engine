@@ -239,6 +239,8 @@ void SpectralROM::initialize() {
     n_tri  = basis->n_triangles;
     n_kept = basis->num_kept;
 
+    a_add.assign(static_cast<std::size_t>(n_ensemble) *
+                 static_cast<std::size_t>(n_kept), 0.0);
     a_ensemble.assign(static_cast<std::size_t>(n_ensemble) *
                       static_cast<std::size_t>(n_kept), 0.0);
     r_coarse.assign(static_cast<std::size_t>(n_kept), 0.0);
@@ -339,12 +341,39 @@ void SpectralROM::seed(const double* h_full) {
     // field (δa = 0). h_full primes h_det_last_ for applyCouplingFlux() and
     // computeQuantiles() until the next advance() supplies a fresh reference.
     std::fill(a_ensemble.begin(), a_ensemble.end(), 0.0);
+    std::fill(a_add.begin(), a_add.end(), 0.0);
     h_det_last_.assign(h_full, h_full + static_cast<std::size_t>(n_tri));
 }
 
 // ============================================================================
 // advance
 // ============================================================================
+
+void SpectralROM::setAdditiveOperator(const std::vector<double>& M_in) {
+    const auto kk = static_cast<std::size_t>(n_kept) * static_cast<std::size_t>(n_kept);
+    if (!M_in.empty() && M_in.size() != kk)
+        throw std::invalid_argument("SpectralROM::setAdditiveOperator: size mismatch");
+    reduced_M_add_ = M_in;
+}
+
+void SpectralROM::setRelativeGram(const std::vector<double>& Ginv) {
+    const auto kk = static_cast<std::size_t>(n_kept) * static_cast<std::size_t>(n_kept);
+    if (!Ginv.empty() && Ginv.size() != kk)
+        throw std::invalid_argument("SpectralROM::setRelativeGram: size mismatch");
+    rel_ginv_ = Ginv;
+}
+
+void SpectralROM::applyGinv_(double* v) {
+    if (rel_ginv_.empty()) return;
+    const auto nk = static_cast<std::size_t>(n_kept);
+    rel_tmp_.assign(nk, 0.0);
+    for (std::size_t p = 0; p < nk; ++p) {
+        double s = 0.0;
+        for (std::size_t q = 0; q < nk; ++q) s += rel_ginv_[p * nk + q] * v[q];
+        rel_tmp_[p] = s;
+    }
+    std::copy(rel_tmp_.begin(), rel_tmp_.end(), v);
+}
 
 void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                           const double* h_cell, const double* h_det) {
@@ -372,12 +401,28 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
     // identical; b_coarse is used the same way either way.
     const double* loc_field = soft_loc_field_ ? soft_loc_field_ : rainfall;
     std::fill(r_coarse.begin(), r_coarse.end(), 0.0);
+    // Additive forcings always project plainly (W = 1): in two-channel
+    // relative mode they feed the absolute additive channel. rel_w_ holds
+    // the floored depth for the Manning reference only.
+    rel_w_.assign(nt, 1.0);
+    if (relative_deviation) {
+        const double fl = relative_depth_floor > 0.0 ? relative_depth_floor : 1.0e-3;
+        for (std::size_t t = 0; t < nt; ++t)
+            rel_w_[t] = std::max(h_det[t], fl);
+    }
+    const double* Hw = rel_w_.data();
     for (std::size_t j = 0; j < nk; ++j) {
         const double* Pj = &basis->P[j * nt];
         double dot_b = 0.0;
-        if (relative_deviation) {
+        if (relative_deviation && !rel_ginv_.empty()) {
+            // Two-channel: reduced coordinates of the constant fraction
+            // field f = 1 in the weighted Galerkin space, G⁻¹·Pᵀ(h ⊙ h).
             for (std::size_t t = 0; t < nt; ++t)
-                dot_b += Pj[t];                 // Σ_t P[j,t]·1
+                dot_b += Pj[t] * Hw[t] * Hw[t];
+        } else if (relative_deviation) {
+            // Original H16 (no Gram): the constant field itself.
+            for (std::size_t t = 0; t < nt; ++t)
+                dot_b += Pj[t];
         } else {
             for (std::size_t t = 0; t < nt; ++t)
                 dot_b += Pj[t] * h_det[t];
@@ -390,6 +435,7 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
             r_coarse[j] = dot_r;
         }
     }
+    if (relative_deviation) applyGinv_(b_coarse.data());   // no-op without a Gram
     if (soft_spread_field_) {
         for (std::size_t j = 0; j < nk; ++j) {
             const double* Pj = &basis->P[j * nt];
@@ -450,7 +496,9 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 for (std::size_t t = 0; t < nt; ++t)
                     dot += Pj[t] * soft_spread_field_[t] * Wi[t];
                 Ri[j] = dot;
-                const double ad = std::abs(dot);
+            }
+            for (std::size_t j = 0; j < nk; ++j) {
+                const double ad = std::abs(Ri[j]);
                 if (ad > soft_spatial_absmax_[j]) soft_spatial_absmax_[j] = ad;
             }
         }
@@ -693,7 +741,28 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                 s_max = std::max(s_max, (mm > 1.0e-12) ? 1.0 / mm : 1.0);
             }
             reduced_batch_.prepare(reduced_A_, n_kept, s_max);
+            if (twoChannel()) {
+                reduced_A_add_.resize(nk * nk);
+                for (std::size_t idx = 0; idx < nk * nk; ++idx)
+                    reduced_A_add_[idx] = -dt * reduced_M_add_[idx];
+                reduced_batch_add_.prepare(reduced_A_add_, n_kept, s_max);
+            }
+        } else if (twoChannel()) {
+            // Per-member relative operators (H15): the additive channel keeps
+            // the shared plain operator (its spatial-Manning interaction is
+            // second order), scaled by the member's RATE_MULT product only.
+            reduced_A_add_.resize(nk * nk);
+            for (std::size_t idx = 0; idx < nk * nk; ++idx)
+                reduced_A_add_[idx] = -dt * reduced_M_add_[idx];
+            double s_max = 1.0;
+            for (int i = 0; i < n_ensemble; ++i) {
+                const double rp = rate_mult_prod(static_cast<std::size_t>(i));
+                s_max = std::max(s_max, (rp > 1.0e-12) ? 1.0 / rp : 1.0);
+            }
+            reduced_batch_add_.prepare(reduced_A_add_, n_kept, s_max);
         }
+        const bool two_ch = twoChannel();
+        reduced_g_add_.assign(nk, 0.0);
 
         for (int i = 0; i < n_ensemble; ++i) {
             auto ui = static_cast<std::size_t>(i);
@@ -739,9 +808,12 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
 
                 // Manning sensitivity: −(s·M_i − M₀)·b. Shared operator:
                 // M_i = M₀ ⇒ −(s − 1)·M₀b, the pre-H15 expression exactly.
-                double g = per_member_ops
-                    ? -manning_elasticity * (s * reduced_Mib_[j] - reduced_Mb_[j]) + (fj - r_coarse[j])
-                    : -manning_elasticity * (s - 1.0) * reduced_Mb_[j] + (fj - r_coarse[j]);
+                const double g_mann = per_member_ops
+                    ? -manning_elasticity * (s * reduced_Mib_[j] - reduced_Mb_[j])
+                    : -manning_elasticity * (s - 1.0) * reduced_Mb_[j];
+                // Two-channel: everything additive goes to g (then moved to
+                // the additive channel below); single-channel keeps the sum.
+                double g = two_ch ? (fj - r_coarse[j]) : g_mann + (fj - r_coarse[j]);
                 if (soft_spread_field_) {
                     if (use_soft_rij)
                         g += soft_r_spread_spatial_[ui * nk + j];
@@ -756,7 +828,16 @@ void SpectralROM::advance(double dt, double K_eff, const double* rainfall,
                         if (ep.entry == openswmm::uncertainty::ParamEntry::FORCING_VECTOR)
                             g += (ep.column[ui] - 1.0) * ep.rv[j];
                 }
-                reduced_g_[j] = g;
+                if (two_ch) { reduced_g_add_[j] = g; reduced_g_[j] = g_mann; }
+                else          reduced_g_[j] = g;
+            }
+
+            if (two_ch) {
+                // Additive channel: plain operator, absolute coordinates.
+                const double s_add = per_member_ops
+                    ? ((rate_prod > 1.0e-12) ? 1.0 / rate_prod : 1.0) : s;
+                for (std::size_t j = 0; j < nk; ++j) reduced_g_add_[j] *= dt;
+                reduced_batch_add_.apply(s_add, reduced_g_add_.data(), &a_add[ui * nk]);
             }
 
             if (per_member_ops) {
@@ -907,14 +988,16 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
             // h_det + P·δa. PR H16 relative mode: h_det·(1 + P·δa) — the
             // modal sum is a LOCAL FRACTION of h_det, not an added constant
             // (see relative_deviation's doc comment). Both floored at 0.
+            const bool two_ch = twoChannel();
             for (int i = 0; i < n_ensemble; ++i) {
                 const double* ai = &a_ensemble[static_cast<std::size_t>(i) * nk];
-                double delta = 0.0;
+                double delta = 0.0, delta_add = 0.0;
                 for (std::size_t j = 0; j < nk; ++j) {
                     if (!mode_active[j]) continue;
                     delta += basis->P[j * nt + t] * ai[j];
+                    if (two_ch) delta_add += basis->P[j * nt + t] * a_add[static_cast<std::size_t>(i) * nk + j];
                 }
-                const double h = relative_deviation ? h_det_t * (1.0 + delta)
+                const double h = relative_deviation ? h_det_t * (1.0 + delta) + delta_add
                                                      : h_det_t + delta;
                 sort_buf_[static_cast<std::size_t>(i)] = std::max(h, 0.0);
             }
@@ -945,6 +1028,14 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
         n_tri, n_kept, n_ensemble, recon_buf_.data(),
         gemm_P_active_, gemm_A_active_);
 
+    const bool two_ch_q = twoChannel();
+    if (two_ch_q) {
+        recon_add_buf_.assign(nt * M_sz, 0.0);
+        openswmm::uncertainty::reconstructEnsembleGemm(
+            basis->P.data(), a_add.data(), mode_active,
+            n_tri, n_kept, n_ensemble, recon_add_buf_.data(),
+            gemm_P_active_, gemm_A_active_);
+    }
     for (std::size_t t = 0; t < nt; ++t) {
         double* row = &recon_buf_[t * M_sz];
         const double h_det_t = h_det[t];
@@ -953,8 +1044,9 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
         // rather than an added constant (see relative_deviation's doc
         // comment and the naive loop above, which this must match exactly).
         if (relative_deviation) {
+            const double* radd = two_ch_q ? &recon_add_buf_[t * M_sz] : nullptr;
             for (std::size_t i = 0; i < M_sz; ++i)
-                row[i] = std::max(h_det_t * (1.0 + row[i]), 0.0);
+                row[i] = std::max(h_det_t * (1.0 + row[i]) + (radd ? radd[i] : 0.0), 0.0);
         } else {
             for (std::size_t i = 0; i < M_sz; ++i)
                 row[i] = std::max(h_det_t + row[i], 0.0);
@@ -1059,10 +1151,14 @@ void SpectralROM::applyCouplingFlux(
             // Reconstruct per-member depth at the coupling cell. PR H16:
             // relative_deviation makes this a local fraction of h_2d_det
             // rather than an added constant, matching computeQuantiles().
-            double delta_2d = 0.0;
-            for (std::size_t j = 0; j < nk; ++j)
+            const bool two_ch = twoChannel();
+            double* aadd = two_ch ? &a_add[ui * nk] : nullptr;
+            double delta_2d = 0.0, delta_add = 0.0;
+            for (std::size_t j = 0; j < nk; ++j) {
                 delta_2d += basis->P[j * nt + ci] * ai[j];
-            double h_2d = relative_deviation ? h_2d_det * (1.0 + delta_2d)
+                if (aadd) delta_add += basis->P[j * nt + ci] * aadd[j];
+            }
+            double h_2d = relative_deviation ? h_2d_det * (1.0 + delta_2d) + delta_add
                                               : h_2d_det + delta_2d;
             h_2d = std::max(h_2d, 0.0);
 
@@ -1073,9 +1169,12 @@ void SpectralROM::applyCouplingFlux(
             if (Q > q_max_cp) q_max_cp = Q;
 
             // Apply only the deviation from the deterministic flux to δa.
+            // Coupling exchange is additive: the additive channel in
+            // two-channel mode, the single coefficient set otherwise.
             const double delta_h = -(Q - Q_det) * dt / tri_area;
+            double* target = aadd ? aadd : ai;
             for (std::size_t j = 0; j < nk; ++j)
-                ai[j] += basis->P[j * nt + ci] * delta_h;
+                target[j] += basis->P[j * nt + ci] * delta_h;
         }
 
         // Commit bounds for this coupling point (guard against no-flux case).

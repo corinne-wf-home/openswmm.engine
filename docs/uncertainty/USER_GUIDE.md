@@ -144,11 +144,8 @@ Controls the ROM solver. All keywords are optional; defaults shown.
 | `MODES` | `10` | ≥ 1 | Laplacian eigenmodes retained for the ROM basis. More modes → finer spatial resolution of spread. Capped at min(MEMBERS, n_tri−1). |
 | `MANNINGS_PERT` | `0.20` | ≥ 0 | Half-range for Manning's n: each member's n ∈ [1−p, 1+p] × n_base. Overridden by `[UNCERTAINTY] 2D MANNINGS_N`. |
 | `RAINFALL_PERT` | `0.20` | ≥ 0 | Half-range for rainfall intensity. Overridden by `[UNCERTAINTY] 2D RAINFALL`. |
-| `K_EFF` | `≤ 0 → AUTO` | any | Effective diffusive conductance (m^(4/3)/s). Values ≤ 0 activate AUTO mode (see §4.8). |
 | `MANNINGS_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for Manning's n field. 0 = uniform scalar per member (fast). |
 | `RAINFALL_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for rainfall field. 0 = uniform scalar per member. |
-| `MANNING_ELASTICITY` | `1.0` | ≥ 0 | H13: elasticity of steady depth to Manning's n applied to the ROM's Manning-sensitivity source. 1.0 = depth moves one-for-one with n (ships; compensates ~0.8 basis capture at the default mode count). 0.6 = sheet-flow normal depth (physical); use with `MODES` ≥ ~5 % of cells. See VALIDATION.md "H13 (2D)". |
-| `DIFFUSIVITY_SCALE` | `1.0` | > 0 | Multiplier on the diffusivity scale handed to the reduced operator. Moves nothing at the fixed point; shortens the approach to it. |
 | `WET_RESEED_FRACTION` | `0.05` | [0, 1] | 2D-only. Rebuild the ROM basis (and reset every member's deviation to zero) when the wet-cell count changes by more than this fraction of n_tri, so the ROM extends coverage to newly-wet cells. Not a periodic drift correction — see §4.5, §6.3. No 1D equivalent; the 1D ROM never reseeds. |
 | `WET_RESEED_MIN_INTERVAL` | `60.0` | ≥ 0 | Minimum simulation time (s) between consecutive wet-domain rebuilds. Prevents excessive rebuilding on an oscillating wetting front. |
 | `PARAMETRIC_TAILS` | `NO` | YES/NO | Fit a log-normal to the wet-member sub-population and use the analytic 95th percentile as q95 (reduces noise from top 1–2 samples when M is small). q05/q50 remain sort-based. |
@@ -737,19 +734,25 @@ When `corr_len = 0`, the spatial generator is bypassed for speed.
 **In `advance()`**: `f_j^i = P[:,j]ᵀ · (rainfall ⊙ W_rain[i])` replaces the scalar
 `r_coarse[j] · rainfall_mult[i]` when spatial rainfall is active.
 
-**Why the 2D band runs ~1.3× wide, and the dial for it (H13, 2026-10-07).** The Manning
-source assumes depth moves one-for-one with n; sheet-flow normal depth moves as n^0.6, so the
-physical band is 1/0.6 = 1.67× too wide — but the retained eigenmodes capture only ~0.8 of the
-depth field at the default mode count, and the two cancel to the measured 1.32 (member coverage
-0.82). `MANNING_ELASTICITY 0.6` is the physical value; at the default modes it drops coverage to
-0.65 (the capture loss is no longer hidden), and only with `MODES` ≈ 5 % of cells does it give a
-calibrated band (0.80 / 0.91 measured). On a converging channel the pooled number
-looked like an elasticity of ~0.27; binned by depth (W4b) the Monte Carlo's elasticity is 0.4–0.6
-everywhere and the excess is the ROM's: thin cells next to deep water inherit their neighbour's
-absolute deviation through the truncated basis (an 8× over-width on 3–10 mm films beside a 40 cm
-thalweg, 1.75× in the thalweg itself). **Read 2D bands as calibrated where the water is deep
-relative to its surroundings, and as a ranking on films adjacent to deep water.** The default
-stays 1.0.
+**How the 2D band treats Manning and rainfall differently (2026-10-11).** The two kinds of
+uncertainty behave differently, and each member carries both in the form that matches:
+
+- **Manning's n is multiplicative.** Rougher ground raises water depth by a similar fraction
+  everywhere, on a 3 mm film as on a 40 cm channel. This part of the deviation is carried as a
+  fraction of the deterministic depth.
+- **Rainfall (and soft rain, inflow forcings and 1D↔2D exchange) is additive.** It lands mostly
+  on thin films and drains into channels. This part is carried as an added depth.
+
+A member's depth is `h_det × (1 + Manning fraction) + rainfall deviation`. This is not a setting.
+Using one form for both fails one or the other: an added-depth Manning deviation hands a thin film
+its deep neighbour's deviation (the channel band was 2.5× too wide), and a fractional rainfall
+deviation cannot hold the water rain puts on a film (the channel rain band collapsed to 5 %
+coverage). With both, the validated cells measure (member coverage / median width ratio):
+plane Manning 0.86 / 1.36, channel Manning 0.82 / 1.31, plane rain 0.89 / 1.32 and 0.88 / 1.42,
+channel rain 0.94 / 1.87. The last is conservative (wider than the Monte Carlo) and is the one 2D
+cell that is not yet calibrated. A model with no open boundary (every edge WALL) uses the
+added-depth form for Manning too, because without an outlet the fractional form has nothing to
+anchor to and its band would collapse.
 
 **How `MANNINGS_CORR_LEN` is integrated (H15, 2026-10-07).** A spatial Manning field cannot
 ride one shared reduced operator, so the router assembles one reduced operator per member
@@ -1124,23 +1127,16 @@ The generated field has mean 1.0 and standard deviation ≈ `MANNINGS_PERT` (aft
 The correlation length should match your best estimate of the spatial coherence of roughness
 variation (e.g., land-use patch sizes, paving unit widths).
 
-### 6.2 Auto vs explicit K_eff
+### 6.2 K_eff is always automatic
 
-`K_EFF AUTO` (the default, triggered by any value ≤ 0) is appropriate for most runs. Set it
-explicitly if:
-- The mesh is partially wet at start and the automatic estimate is computed over a non-
-  representative wet region.
-- You want bit-reproducible results independent of the initial depth distribution.
-- The AUTO estimate produces unreasonably large spread (K_eff too large → fast decay → spread
-  underestimated; K_eff too small → slow decay → spread overestimated).
-
-To diagnose: enable verbose mode and check the logged K_eff at first seed. Then set it
-explicitly if needed:
-
-```ini
-[2D_ROM]
-K_EFF    8.5    ; m^(4/3)/s — set from logged AUTO value
-```
+K_eff, the diffusive scale of the 2D deviation operator, is derived from the mesh and the
+current flow every time the operator is refreshed. It is not a setting. Earlier versions
+accepted `K_EFF <value>` to pin it; since 2026-10-11 a positive value is an input error and a
+value ≤ 0 (the old spelling of AUTO) is accepted and changes nothing. The same applies to the
+other operator dials (`LEGACY_OPERATOR`, `ALPHA_PAR`, `ALPHA_PERP`, `C_FACTOR`,
+`GROUND_SCALE`, `MANNING_ELASTICITY`, `DIFFUSIVITY_SCALE`, `RELATIVE_DEVIATION`): a line that
+restates the built-in value loads, any other value is refused with the reason. The 2D model
+runs one validated configuration, so two users with the same model get the same bands.
 
 ### 6.3 Reseeding (2D only — basis coverage, not drift correction)
 
