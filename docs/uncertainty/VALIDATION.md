@@ -2977,5 +2977,53 @@ Same build, full 24 h, source off → on, band / local depth:
 | `no_flow` | 0.110 → 0.096 | 0.78 → 1.15 | 2.91 → 45.0 | 11.6 → 45.7 |
 
 The median barely moves; the upper tail roughly doubles, including in
-`steady` samples. Bellinge has no Monte Carlo, so this is a direction, not a
-verdict. The regression lock passes either way.
+`steady` samples. The regression lock passes either way.
+
+## 8. First Bellinge Monte Carlo (2026-10-12)
+
+21 full 24 h runs with every conduit's n scaled by the ±20 % strata
+midpoints, against one ROM run per source, 1,011 nodes × 1,440 report
+times. The members run as parallel processes through the harness's
+`OneMemberDump` mode, then `tests/regression/score_h17_mc.py` scores
+them with the gates' own definitions. The scorer reproduces the Example 8
+gate exactly (0.757 / 1.046).
+
+| Samples | old source | flow source |
+|---|---|---|
+| all | 0.772 / 2.459 | 0.730 / 1.710 |
+| `steady` flag | 0.763 / 2.545 | 0.714 / 1.575 |
+| `transient` flag | 0.827 / 2.220 | 0.829 / 2.938 |
+| `no_flow` flag | 0.756 / 1.492 | 0.725 / 1.236 |
+| MC spread 1 mm – 1 cm | 0.791 / 6.099 | 0.737 / 1.922 |
+| MC spread 1 – 5 cm | 0.798 / 2.376 | 0.743 / 2.236 |
+| MC spread 5 – 30 cm | 0.720 / 1.030 | 0.692 / 1.123 |
+| MC spread ≥ 30 cm | 0.571 / 0.523 | **0.703 / 0.971** |
+
+(member coverage / width median.) Bellinge is **ranking only** under both
+sources. The old source reached its higher pooled coverage by being six times
+too wide on millimetre spreads, and it was half-width on the largest,
+decision-relevant spreads. The flow source is close to the right width in
+every spread class and is the better source where spread matters. Coverage
+near 0.70 at a width near 1 means the bands are mis-centred against the
+members, not mis-sized. That residual was not chased.
+
+Two corrections follow:
+
+- **The `steady` flag is calibrated on every test fixture but NOT on
+  Bellinge** (0.714 / 1.575). The Example 8 assertion stays, but the flag
+  means "the regime where the band was calibrated on the fixtures", not a
+  guarantee on any network.
+- The widest Bellinge nodes are the G75S… series, at 15–19× wide and ~0.97
+  coverage. They are conservative, not wrong in direction.
+
+Reproduction (about 70 min on 8 cores, Debug):
+
+```
+H17_ONE_INP=<prepared deck> H17_ONE_MULT=<m> H17_ONE_ROM=0|1 H17_FLOW_SOURCE=0|1 \
+H17_ONE_OUT=<dir>/<tag>.txt H17_WINDOW_H=24 \
+  test_rom_coverage_structures --gtest_filter='*OneMember*'
+python3 tests/regression/score_h17_mc.py <dir> rom_off rom_on
+```
+
+The prepared deck is the Bellinge `.inp` with REPORT_START_TIME 00:00:00 and an
+absolute rainfall path, the same edits the Bellinge lock test makes.

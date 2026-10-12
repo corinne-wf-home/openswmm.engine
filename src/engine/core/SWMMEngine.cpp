@@ -11805,7 +11805,8 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
 //              band relaxes to. Measured both ways (a draining force main runs
 //              narrow, a filling pool wide). Example 8: coverage 0.32.
 //   steady     neither: the regime the calibrated gates cover. Example 8:
-//              coverage 0.90, width 1.33.
+//              coverage 0.90, width 1.33. Not a guarantee on every network:
+//              Bellinge's first Monte Carlo gives 0.71 / 1.58 for steady.
 // A supercritical flag was measured and dropped: with the directional operator
 // (H14) supercritical samples are calibrated on every fixture (0.88-0.91).
 void SWMMEngine::refreshRom1dBandFlags() noexcept {

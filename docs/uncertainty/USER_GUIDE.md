@@ -842,11 +842,13 @@ gates calibrated:
 
 | `flag` | Meaning | Measured against brute-force Monte Carlo |
 |---|---|---|
-| `steady` | Flow leaves the node and inflow matches outflow within 10 %. | Calibrated on every 1D gate: member coverage 0.89–0.94, width ratio 0.98–1.33. |
+| `steady` | Flow leaves the node and inflow matches outflow within 10 %. | Calibrated on every 1D test fixture: member coverage 0.89–0.94, width ratio 0.98–1.33. Not on Bellinge (0.71 / 1.58), where the band is about the right width but somewhat off-centre. |
 | `transient` | The node is filling or draining (inflow and outflow differ by more than 10 %). | The band can be off either way: a filling pool ran 2.7× wide, a draining force main far too narrow. |
 | `no_flow` | Nothing leaves the node: still water, a pump wet well between cycles, a channel below a weir that has stopped spilling. | The Manning band is near zero, but members can still differ by stored volume. Too narrow (coverage 0.69 on Example 8). |
 
-Read `steady` bands as probabilities and the other two as rankings. Before H17 the file had
+On the test fixtures, read `steady` bands as probabilities and the other two
+as rankings. On a large real network, treat all three as rankings until a
+Monte Carlo on that network says otherwise; Bellinge's is ranking only. Before H17 the file had
 five columns; a reader that splits on commas and takes the first five keeps working.
 
 ### 5.2 Typical spatial patterns
@@ -1550,7 +1552,10 @@ xarray as a supplementary group.
     ratio of 1.05. Coverage is 0.76, below the 0.80 floor, because two places spread by
     stored volume rather than by flow: the force main after the pump stops, and the channel
     below a weir after it spills. There the band can be centimetres too narrow; treat it as a
-    ranking. See `docs/uncertainty/VALIDATION.md`, "H17".
+    ranking. On Bellinge (1,011 nodes, first Monte Carlo 2026-10-12) the bands are close to
+    the right width at every spread size (0.97 on the largest spreads, where the earlier
+    source was half-width), but coverage is 0.73: a ranking, not a calibrated interval. See
+    `docs/uncertainty/VALIDATION.md`, "H17".
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from

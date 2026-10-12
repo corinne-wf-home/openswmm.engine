@@ -210,7 +210,47 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
 
 }  // namespace
 
+// H17: one-member dump mode for large networks (Bellinge), so members can run
+// as parallel processes. Skipped unless H17_ONE_INP is set. Env:
+//   H17_ONE_INP   deck path      H17_ONE_MULT  conduit n multiplier
+//   H17_ONE_ROM   1 = add the ROM spec and dump q05/q95/flag
+//   H17_ONE_OUT   dump path      H17_WINDOW_H  window (h)
+// Dump: line 1 = report times; then per node "name kind v1 v2 ..." with
+// kind in {h, q05, q95, flag}. Scored by tests/regression/score_h17_mc.py.
+TEST(RomCoverageStructures, OneMemberDump) {
+    const char* inp = std::getenv("H17_ONE_INP");
+    if (!inp) GTEST_SKIP() << "H17_ONE_INP not set";
+    const std::string base = readFile(inp);
+    ASSERT_FALSE(base.empty()) << inp;
+    const double mult = std::getenv("H17_ONE_MULT") ? std::atof(std::getenv("H17_ONE_MULT")) : 1.0;
+    const bool with_rom = std::getenv("H17_ONE_ROM") && std::atoi(std::getenv("H17_ONE_ROM")) != 0;
+    const char* outp = std::getenv("H17_ONE_OUT");
+    ASSERT_NE(outp, nullptr) << "H17_ONE_OUT not set";
+    double window_h = 24.0;
+    if (const char* v = std::getenv("H17_WINDOW_H")) window_h = std::atof(v);
+    const auto names = scoredNodes(base);
+    const std::string tag = std::string("one_") + (with_rom ? "rom_" : "mc_") + std::to_string(mult);
+    RunResult r = runCase(deck(base, mult, with_rom), tag, with_rom, names, window_h * 3600.0);
+    ASSERT_TRUE(r.ok);
+    std::ofstream f(outp);
+    f.precision(10);
+    for (double t : r.times) f << t << ' ';
+    f << '\n';
+    for (const auto& [nm, hv] : r.heads) {
+        f << nm << " h";
+        for (double v : hv) f << ' ' << v;
+        f << '\n';
+        if (with_rom && r.q05.count(nm)) {
+            f << nm << " q05"; for (double v : r.q05.at(nm)) f << ' ' << v; f << '\n';
+            f << nm << " q95"; for (double v : r.q95.at(nm)) f << ' ' << v; f << '\n';
+            f << nm << " flag"; for (int v : r.flag.at(nm)) f << ' ' << v; f << '\n';
+        }
+    }
+    std::printf("[H17-one] %s times=%zu nodes=%zu -> %s\n", tag.c_str(), r.times.size(), r.heads.size(), outp);
+}
+
 TEST(RomCoverageStructures, Example8ConduitManningBandsVsMonteCarlo) {
+    if (std::getenv("H17_ONE_INP")) GTEST_SKIP() << "one-member dump mode";
     const std::string base = readFile(std::string(REGRESSION_DATA_DIR) + "/Example8.inp");
     ASSERT_FALSE(base.empty()) << "Example8.inp not found under " << REGRESSION_DATA_DIR;
     const auto names = scoredNodes(base);
@@ -290,7 +330,9 @@ TEST(RomCoverageStructures, Example8ConduitManningBandsVsMonteCarlo) {
         std::printf("[H17-flag] %-13s samples=%5d member-coverage=%.3f width-med=%.3f\n",
                     fg < 0 ? "?" : openswmm::SWMMEngine::rom1dBandFlagName(static_cast<std::uint8_t>(fg)),
                     st.n, st.cov / st.n, med(st.ratios));
-    // H17 step 4: the CSV's `steady` flag promises a calibrated band. Gate it.
+    // H17 step 4: on this fixture the `steady` samples are calibrated; gate it.
+    // (Not a network-independent promise: Bellinge steady is 0.714 / 1.575,
+    // VALIDATION.md "H17 §8".)
     ASSERT_TRUE(by_flag.count(0) && by_flag.at(0).n > 0) << "no steady-flagged samples";
     EXPECT_TRUE(mcq::reportCalibration("Example 8, steady-flagged bands", by_flag.at(0).cov / by_flag.at(0).n,
                                        med(by_flag.at(0).ratios), "-"))
