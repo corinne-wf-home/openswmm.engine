@@ -11399,6 +11399,7 @@ void SWMMEngine::buildROM1D() noexcept {
     int k_modes = std::min(20, n_active - 1);
     if (surface_router_.options().enable_rom)
         k_modes = std::min(surface_router_.options().rom_modes, n_active - 1);
+    if (rom1d_k_modes_override_ > 0) k_modes = std::min(rom1d_k_modes_override_, n_active - 1);
     k_modes = std::max(k_modes, 1);
 
     rom1d_basis_ = std::make_unique<uncertainty::GraphEigenBasis>();
@@ -11516,6 +11517,8 @@ void SWMMEngine::buildROM1D() noexcept {
         h0[static_cast<std::size_t>(ai)] = ctx_.nodes.head[ui];
     }
     rom1d_->seed(h0.data());
+
+    rom1d_->quasi_static_residual = rom1d_qsr_;   // H17: on by default
 
     // Forward to the 2D module so per-member coupling heads can be read at
     // shared nodes (SpectralROM::applyCouplingFlux -> reconstructHead). A

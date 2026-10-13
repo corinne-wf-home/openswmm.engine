@@ -3003,14 +3003,17 @@ gate exactly (0.757 / 1.046).
 sources. The old source reached its higher pooled coverage by being six times
 too wide on millimetre spreads, and it was half-width on the largest,
 decision-relevant spreads. The flow source is close to the right width in
-every spread class and is the better source where spread matters. Coverage
-near 0.70 at a width near 1 means the bands are mis-centred against the
-members, not mis-sized. That residual was not chased.
+every spread class and is the better source where spread matters. (An
+earlier version of this section read coverage near 0.70 at a width near 1 as
+mis-centring. §10 shows that was wrong: misses were symmetric and the centre
+exact; the bands were the right width on average but four times too narrow on
+one class of nodes and wide on others.)
 
 Two corrections follow:
 
-- **The `steady` flag is calibrated on every test fixture but NOT on
-  Bellinge** (0.714 / 1.575). The Example 8 assertion stays, but the flag
+- **The `steady` flag was calibrated on every test fixture but not on
+  Bellinge** (0.714 / 1.575) under the flow source alone. With the quasi-static
+  correction (§10) it is calibrated there too (0.855 / 1.009). The Example 8 assertion stays, but the flag
   means "the regime where the band was calibrated on the fixtures", not a
   guarantee on any network.
 - The widest Bellinge nodes are the G75S… series, at 15–19× wide and ~0.97
@@ -3027,3 +3030,107 @@ python3 tests/regression/score_h17_mc.py <dir> rom_off rom_on
 
 The prepared deck is the Bellinge `.inp` with REPORT_START_TIME 00:00:00 and an
 absolute rainfall path, the same edits the Bellinge lock test makes.
+
+## 9. Settings audit: the three remaining 2D numerics settings
+
+Measured on the 2D production gate (member coverage / width / wall time):
+
+| Variant | Coverage | Width | Time |
+|---|---|---|---|
+| shipped defaults | 0.864 | 1.360 | 406 s |
+| `MODE_DROP_THRESHOLD 0` (never drop) | 0.864 | 1.360 | 411 s |
+| `PARAMETRIC_TAILS YES` | 0.875 | 1.465 | 411 s |
+
+- **`MODE_DROP_THRESHOLD`**: no effect. Fixed at its old default.
+- **`PARAMETRIC_TAILS`**: +0.011 coverage for +0.105 width on an already
+  over-wide band. Removed.
+- **`WET_RESEED_*`**: on the shipped path the eigenbasis is fixed geometry, so a
+  wet-area re-seed rebuilt nothing and reset every member to zero.
+  `SurfaceROMRouterOperator.WettedAreaGrowthDoesNotEraseTheBand` measures it.
+  With the trigger armed and the fix removed, a cell's band fell from 1.07e-3
+  to 4.6e-4. Re-seeding now happens only on the internal legacy path. Removed.
+
+All three keys refuse any value but their old default.
+
+## 10. Why Bellinge's bands were wrong, and the quasi-static correction
+
+Breaking §8's Bellinge result down by how fast the deterministic head moves:
+
+| Head change per minute / MC width | Samples | Coverage | Width |
+|---|---|---|---|
+| < 0.01 (steady) | 68,894 | 0.420 | 0.27 |
+| 0.01 – 0.1 | 77,439 | 0.783 | 1.62 |
+| 0.1 – 1 | 90,917 | 0.823 | 1.60 |
+
+The failures were the steady samples: shallow laterals (G71F…, G72F…, about
+1 ft deep) through the 5–24 h recession. There the members' order follows
+roughness cleanly, and the Monte Carlo spread is Manning's free-surface
+response. Misses were symmetric (15 % below, 15 % above) and the band centre
+sat on the Monte Carlo median.
+
+Three hypotheses were tested:
+
+- **Slow modes not yet settled.** Relaxation ×10 changed nothing (0.420 /
+  0.272), so the ROM was already at its fixed point.
+- **Too few modes.** 40 modes moved the class only to 0.457 / 0.340. An
+  80-mode run was too slow to finish in Debug.
+- **Wrong scale.** Carrying Manning as a fraction of local depth (the 2D
+  two-channel design) made Bellinge much worse (0.390 / 0.209) and Example 8
+  worse (0.661). Carrying it as a fraction of the response itself also made
+  Example 8 worse (0.646). In 1D the response is not proportional to depth:
+  a shallow node in backwater rises with the water below it. Both variants
+  were removed. With Manning absolute, splitting it from rainfall changes
+  nothing, because the two superpose linearly.
+
+A φ trace at the failing nodes settled it. φ was right there (0.5–1.1 ft,
+0.4–0.8 of depth), but the 20-mode reconstruction PPᵀφ kept 0.02–0.1 ft of it,
+sometimes with the wrong sign. Truncation was dropping a localized response.
+
+**Fix: the quasi-static (mode-acceleration) correction.** The part of φ the
+kept modes cannot represent, r = φ − PPᵀφ, belongs to faster modes than any
+kept one. It is added at its steady value (mmᵢ − 1)·r. The kept modes carry the
+dynamics. The steady band is exactly (mmᵢ − 1)·φ at every node, which
+`QuasiStaticResidual.SteadyBandIsTheFullResponseAtEveryNode` pins to 1e-9
+with 6 modes on a 20-node chain.
+
+| Gate (coverage / width) | Before | After |
+|---|---|---|
+| free-surface chain | 0.885 / 0.982 | 0.894 / 0.997 |
+| surcharged, `EXPLICIT` | 0.936 / 1.173 | 0.949 / 1.172 |
+| surcharged, `SEMI_IMPLICIT` | 0.916 / 1.956 | 0.906 / 1.672 |
+| front passage (H11) | 0.831 / 1.306 | 0.971 / 1.416 |
+| Example 8 | 0.757 / 1.046 | **0.810 / 1.102** |
+| Bellinge | 0.730 / 1.710 | **0.840 / 1.008** |
+| Bellinge `steady` | 0.714 / 1.575 | 0.855 / 1.009 |
+| Bellinge `transient` | 0.829 / 2.938 | 0.769 / 1.000 |
+| Bellinge `no_flow` | 0.725 / 1.236 | 0.530 / 0.330 |
+| Bellinge steady class above | 0.420 / 0.272 | 0.841 / 0.992 |
+
+Every 1D gate is now calibrated except the semi-implicit pool, which is
+conservative. Bellinge's misses are symmetric at 8.5 % each side. The `no_flow`
+class got narrower: no flow means φ = 0, so it has no residual to add, and its
+spread is stored volume (§4).
+
+The Bellinge regression lock with the correction (band / local depth):
+p50 0.198, p90 0.835, p99 3.62, max 24.6. For comparison, the flow source
+alone gave p90 4.20 and the original source p90 1.99. The tail that §7
+flagged as unvalidated was the wide half of the mixture §10 resolved.
+
+## 11. Smaller items re-measured (2026-10-12)
+
+- **H2 (pump-state basis cache).** With pumps in the graph, each of Example 8's
+  four pump switches triggers a basis rebuild in the same step (the first one
+  cold). They are 4 of 97 rebuilds. A cache would save at most those four,
+  under a cost the 60 s rebuild interval already bounds. Not worth building.
+- **SP4 early-time continuity residual.** Legacy EPA SWMM 5 gives the
+  identical error to three decimals in every case: −9.358 % at 30 s steps over
+  5 min, −11.277 % at 1 s steps, −0.779 % over 1 h. It is SWMM 5's own
+  accounting for a pipe filling from dry, and it shrinks with run length.
+  Inherited by design, not a defect.
+- **H9 (dry-bed wetting).** Upstream's `FLOW_ROUTING FV` solver reproduces the
+  Ritter dry-bed dam break within 3 % relative L1 (`FvAnalytic.RitterDryBed
+  DamBreak`), and Stoker as well. A wetting criterion for the Picard
+  dynamic-wave scheme is not needed; dry-bed fronts belong to FV routing.
+- **New gap: the sidecar under `FLOW_ROUTING FV` is unvalidated.** A quick
+  Example 8 run produces bands up to 32 ft. The basis weights come from the
+  dynamic-wave solver's snapshot, which FV does not fill. Needs its own work.

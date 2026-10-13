@@ -237,6 +237,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     if (!phase_enabled) {
         static_cast<openswmm::SWMMEngine*>(handle)->rom1dPhaseConfig().enabled = false;
     }
+        if (const char* q = std::getenv("H17_QSR")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dQuasiStatic() = std::atoi(q) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
@@ -810,9 +811,9 @@ void assertSurchargedCell(const char* label, const SurchargeCellResult& r) {
                 r.ratio_max, r.surcharged_frac, r.n_width);
 
     // C1, H17 (2026-10-12): both continuity modes are validated cells under
-    // the flow-response Manning source and assert the floor. Measured
-    // EXPLICIT 0.936 / 1.173 (calibrated; was 0.736 / 0.782 ranking only),
-    // SEMI_IMPLICIT 0.916 / 1.956 (conservative: J4/J5 are 2.7x/3.9x wide
+    // the flow-response Manning source and assert the floor. Measured with the
+    // quasi-static residual: EXPLICIT 0.949 / 1.172 (calibrated; was 0.736 /
+    // 0.782 ranking only), SEMI_IMPLICIT 0.906 / 1.672 (conservative: J4/J5 wide
     // because the pool is still filling at the window -- 14.1 cfs in, 11.4
     // cfs out at t = 1 h -- and the ROM relaxes to the steady response
     // faster than the network does).

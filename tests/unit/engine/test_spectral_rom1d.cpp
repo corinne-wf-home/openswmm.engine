@@ -3093,3 +3093,74 @@ TEST(QuantileGemm, SortedMemberValuesStaysFullySortedUnderGemm) {
                                           << ": sortedMemberValues() must stay fully ascending under GEMM";
     }
 }
+
+// ============================================================================
+// H17 (2026-10-12) — quasi-static (mode-acceleration) residual
+// ============================================================================
+
+namespace {
+// Drive the fixture to its Manning fixed point with a response field the kept
+// modes cannot represent (a spike), and return member-minus-deterministic
+// heads at every node.
+std::vector<double> steadyDeviations(bool quasi_static, std::vector<double>& phi) {
+    ROM1DFixture f;
+    f.rom.runoff_pert = 0.0;
+    f.rom.quasi_static_residual = quasi_static;
+    f.rom.initialize();
+    const auto N = static_cast<std::size_t>(f.N);
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0);
+    phi.assign(N, 0.2);
+    phi[15] = 1.0;   // localized: 6 smooth modes of a 20-node chain cannot hold it
+    f.rom.seed(h_det.data());
+    for (int step = 0; step < 400; ++step)
+        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+    f.rom.computeQuantiles(h_det.data(), nullptr);
+    std::vector<double> dev(N * static_cast<std::size_t>(f.M));
+    for (int m = 0; m < f.M; ++m)
+        for (std::size_t i = 0; i < N; ++i)
+            dev[static_cast<std::size_t>(m) * N + i] =
+                f.rom.reconstructHead(m, static_cast<int>(i)) - h_det[i] -
+                (f.rom.mannings_mult[static_cast<std::size_t>(m)] - 1.0) * phi[i];
+    return dev;
+}
+}  // namespace
+
+TEST(QuasiStaticResidual, SteadyBandIsTheFullResponseAtEveryNode) {
+    // With the correction the steady deviation of member i at node t is
+    // exactly (mm_i - 1) * phi_t, although only 6 of 20 modes are kept.
+    std::vector<double> phi;
+    const auto err = steadyDeviations(true, phi);
+    double worst = 0.0;
+    for (double e : err) worst = std::max(worst, std::fabs(e));
+    EXPECT_LT(worst, 1.0e-9) << "steady band differs from (mm-1)*phi";
+}
+
+TEST(QuasiStaticResidual, WithoutItTruncationLosesTheLocalizedResponse) {
+    // The same drive without the correction misses a large share of the
+    // spike: this is the Bellinge shallow-lateral failure in miniature, and it
+    // proves the test above bites.
+    std::vector<double> phi;
+    const auto err = steadyDeviations(false, phi);
+    double worst = 0.0;
+    for (double e : err) worst = std::max(worst, std::fabs(e));
+    EXPECT_GT(worst, 0.02) << "truncated fixed point unexpectedly exact";
+}
+
+TEST(QuasiStaticResidual, ZeroPerturbationStaysExact) {
+    // mm = 1 for every member: the residual term is (mm - 1) * r = 0 exactly.
+    ROM1DFixture f;
+    f.rom.mannings_pert = 0.0;
+    f.rom.runoff_pert   = 0.0;
+    f.rom.initialize();
+    const auto N = static_cast<std::size_t>(f.N);
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.2);
+    phi[15] = 1.0;
+    f.rom.seed(h_det.data());
+    for (int step = 0; step < 50; ++step)
+        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+    f.rom.computeQuantiles(h_det.data(), nullptr);
+    for (std::size_t i = 0; i < N; ++i) {
+        EXPECT_EQ(f.rom.q05[i], h_det[i]);
+        EXPECT_EQ(f.rom.q95[i], h_det[i]);
+    }
+}

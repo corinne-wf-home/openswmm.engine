@@ -19,11 +19,14 @@
  * MEASURED 2026-10-12 (member coverage / width median, all samples):
  *   conduit-only ROM graph, depth x elasticity source   0.761 / 1.636
  *   + structure edges                                    0.773 / 1.966
- *   + flow-response source (shipped)                     0.757 / 1.046
+ *   + flow-response source                               0.757 / 1.046
+ *   + quasi-static residual (shipped)                    0.810 / 1.102  CALIBRATED
  * The widths are right node by node (JI4 15.9 -> 1.03, JI5 13.6 -> 0.63,
  * Well 4.6 -> 0.99, force main while pumping 7 ft -> 0.26 ft vs MC 0.21 ft).
- * Coverage stays under the 0.80 floor, so this cell is RANKING ONLY. The
- * misses are centimetre-scale spreads at nodes with no steady flow: the
+ * The quasi-static residual (SpectralROM1D::quasi_static_residual) lifts the
+ * cell over the floor: the kept modes no longer smear a localized response.
+ * The remaining misses are centimetre-scale spreads at nodes with no steady
+ * flow: the
  * force main after the pump stops (JI10..JI13) and the weir-fed surface
  * channel (J5, J8, J9, J11). There the members differ by stored VOLUME --
  * when the pump stopped, how much spilled -- which a steady head response
@@ -31,10 +34,10 @@
  *
  * Asserted: the run completes, the width median stays inside the standing
  * [0.3, 3.0] sanity band (measured 1.046), and the samples the output CSV
- * flags `steady` are calibrated (step 4; measured 0.905 / 1.332). The
- * pooled C1 floor is printed, not asserted (ranking-only cell); the misses
- * sit under the `no_flow` (0.689 / 0.212) and `transient` (0.315 / 0.000)
- * flags, which is what those flags tell the user.
+ * flags `steady` are calibrated (step 4; measured 0.944 / 1.350). The pooled
+ * C1 verdict (0.810, margin 0.01) is printed, not asserted; the misses sit
+ * under the `no_flow` (0.694 / 0.213) and `transient` (0.465 / 0.393) flags,
+ * which is what those flags tell the user.
  *
  * Env knobs: H17_WINDOW_H (sampling window, default the full 12 h),
  * H17_NODE=a,b prints a time trace for those nodes, H17_FLOW_SOURCE=0
@@ -161,8 +164,14 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
         std::remove((pfx + ".rom_diag.csv").c_str());
         std::remove((pfx + ".rom_threshold.csv").c_str());
     };
-    if (swmm_engine_open(h, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0 ||
-        swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {
+    bool opened = swmm_engine_open(h, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) == 0;
+    if (opened) {
+        auto* e0 = static_cast<openswmm::SWMMEngine*>(h);
+        if (const char* v = std::getenv("H17_K_MODES")) e0->rom1dModeCountOverride() = std::atoi(v);
+        if (const char* v = std::getenv("H17_K1D_SCALE")) e0->rom1dK1dScale() = std::atof(v);
+        if (const char* q = std::getenv("H17_QSR")) e0->rom1dQuasiStatic() = std::atoi(q) != 0;
+    }
+    if (!opened || swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {
         std::printf("[H17] %s failed to start: %s\n", tag.c_str(), swmm_get_last_error_msg(h));
         cleanup();
         return out;
@@ -180,14 +189,72 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
 
     double elapsed = 1.0, t_prev = 0.0;
     int stalled = 0;
+    std::ofstream phi_out;
+    std::map<std::string, int> phi_nodes;
+    if (with_rom && std::getenv("H17_PHI_OUT") && std::getenv("H17_PHI_NODES")) {
+        phi_out.open(std::getenv("H17_PHI_OUT"));
+        std::stringstream ss(std::getenv("H17_PHI_NODES"));
+        std::string nm;
+        while (std::getline(ss, nm, ',')) if (idx.count(nm)) phi_nodes[nm] = idx.at(nm);
+    }
+    // H2 re-measure (2026-10-12): H17_PUMP_TRACE=1 prints every pump on/off
+    // switch and every basis rebuild (cold-forced or not) with its time.
+    const bool pump_trace = with_rom && std::getenv("H17_PUMP_TRACE");
+    std::vector<int> pumps;
+    std::vector<char> pump_on;
+    int last_att = 0, last_cold = 0;
+    if (pump_trace) {
+        for (int j = 0; j < static_cast<int>(ctx.links.type.size()); ++j)
+            if (ctx.links.type[static_cast<std::size_t>(j)] == openswmm::LinkType::PUMP) {
+                pumps.push_back(j); pump_on.push_back(0);
+            }
+    }
     for (int guard = 0; elapsed != 0.0 && guard < 500000; ++guard) {
         if (swmm_engine_step(h, &elapsed) != 0) break;
         const double t_now = (elapsed > 0.0) ? elapsed * 86400.0 : end_time_s;
+        if (pump_trace && rom) {
+            for (std::size_t p = 0; p < pumps.size(); ++p) {
+                const char on = std::fabs(ctx.links.flow[static_cast<std::size_t>(pumps[p])]) > 1e-6;
+                if (on != pump_on[p]) {
+                    std::printf("[H2-trace] t=%7.0f pump %s %s\n", t_now,
+                                ctx.link_names.name_of(pumps[p]).c_str(), on ? "ON" : "OFF");
+                    pump_on[p] = on;
+                }
+            }
+            if (rom->basis_updates_attempted_ != last_att || rom->basis_rebuilds_cold_forced_ != last_cold) {
+                std::printf("[H2-trace] t=%7.0f rebuild%s (attempts %d, cold-forced %d)\n", t_now,
+                            rom->basis_rebuilds_cold_forced_ != last_cold ? " COLD" : "",
+                            rom->basis_updates_attempted_, rom->basis_rebuilds_cold_forced_);
+                last_att = rom->basis_updates_attempted_; last_cold = rom->basis_rebuilds_cold_forced_;
+            }
+        }
         stalled = (t_now - t_prev < 1e-9) ? stalled + 1 : 0;
         if (stalled > 200) break;
         for (double b = std::floor(t_prev / kReportStep + 1.0) * kReportStep;
              b <= t_now + 1e-6 && b <= end_time_s + 1e-6; b += kReportStep) {
             out.times.push_back(b);
+            // H17 diagnostic: phi and its truncated reconstruction P P^T phi at
+            // the nodes named in H17_PHI_NODES, one line per node per report.
+            if (rom && phi_out.is_open()) {
+                const auto& phi = eng->rom1dFlowResponse();
+                const auto& P = rom->basis->P;
+                const std::size_t nn = static_cast<std::size_t>(rom->n_nodes);
+                const std::size_t nk = static_cast<std::size_t>(rom->n_kept);
+                if (phi.size() == nn) {
+                    std::vector<double> c(nk, 0.0);
+                    for (std::size_t j = 0; j < nk; ++j)
+                        for (std::size_t i = 0; i < nn; ++i) c[j] += P[j * nn + i] * phi[i];
+                    for (const auto& [nm, ui] : phi_nodes) {
+                        const int ai = rom->full_to_active[static_cast<std::size_t>(ui)];
+                        if (ai < 0) continue;
+                        double rec = 0.0;
+                        for (std::size_t j = 0; j < nk; ++j) rec += P[j * nn + static_cast<std::size_t>(ai)] * c[j];
+                        phi_out << b << ' ' << nm << ' ' << phi[static_cast<std::size_t>(ai)] << ' ' << rec << ' '
+                                << (ctx.nodes.head[static_cast<std::size_t>(ui)] - ctx.nodes.invert_elev[static_cast<std::size_t>(ui)])
+                                << ' ' << (rom->q95[static_cast<std::size_t>(ai)] - rom->q05[static_cast<std::size_t>(ai)]) << '\n';
+                    }
+                }
+            }
             for (const auto& [nm, ui] : idx) {
                 out.heads[nm].push_back(ctx.nodes.head[static_cast<std::size_t>(ui)]);
                 if (rom && rom->is_ready()) {
@@ -336,13 +403,13 @@ TEST(RomCoverageStructures, Example8ConduitManningBandsVsMonteCarlo) {
     ASSERT_TRUE(by_flag.count(0) && by_flag.at(0).n > 0) << "no steady-flagged samples";
     EXPECT_TRUE(mcq::reportCalibration("Example 8, steady-flagged bands", by_flag.at(0).cov / by_flag.at(0).n,
                                        med(by_flag.at(0).ratios), "-"))
-        << "bands flagged `steady` must stay calibrated (measured 0.905 / 1.332)";
+        << "bands flagged `steady` must stay calibrated (measured 0.944 / 1.350)";
     const double cov = cov_sum / n_tot, wmed = med(all_ratios);
     std::printf("[H17] Example 8 samples=%d member-coverage=%.3f width-med=%.3f\n", n_tot, cov, wmed);
     mcq::reportCalibration("Example 8 conduit Manning (structures)", cov, wmed,
-                           "volume memory after pump stop / weir spill (H17 note)");
-    EXPECT_GE(wmed, 0.3) << "Example 8 band collapsed (measured 1.046)";
-    EXPECT_LE(wmed, 3.0) << "Example 8 band blew up (measured 1.046)";
+                           "-");
+    EXPECT_GE(wmed, 0.3) << "Example 8 band collapsed (measured 1.102)";
+    EXPECT_LE(wmed, 3.0) << "Example 8 band blew up (measured 1.102)";
     if (n_mat > 0)
         std::printf("[H17] material spreads only (MC width >= 0.05 ft): samples=%d member-coverage=%.3f width-med=%.3f\n",
                     n_mat, mat_cov / n_mat, med(mat_ratios));

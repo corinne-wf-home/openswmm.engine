@@ -146,10 +146,10 @@ Controls the ROM solver. All keywords are optional; defaults shown.
 | `RAINFALL_PERT` | `0.20` | ≥ 0 | Half-range for rainfall intensity. Overridden by `[UNCERTAINTY] 2D RAINFALL`. |
 | `MANNINGS_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for Manning's n field. 0 = uniform scalar per member (fast). |
 | `RAINFALL_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for rainfall field. 0 = uniform scalar per member. |
-| `WET_RESEED_FRACTION` | `0.05` | [0, 1] | 2D-only. Rebuild the ROM basis (and reset every member's deviation to zero) when the wet-cell count changes by more than this fraction of n_tri, so the ROM extends coverage to newly-wet cells. Not a periodic drift correction — see §4.5, §6.3. No 1D equivalent; the 1D ROM never reseeds. |
-| `WET_RESEED_MIN_INTERVAL` | `60.0` | ≥ 0 | Minimum simulation time (s) between consecutive wet-domain rebuilds. Prevents excessive rebuilding on an oscillating wetting front. |
-| `PARAMETRIC_TAILS` | `NO` | YES/NO | Fit a log-normal to the wet-member sub-population and use the analytic 95th percentile as q95 (reduces noise from top 1–2 samples when M is small). q05/q50 remain sort-based. |
-| `MODE_DROP_THRESHOLD` | `1e-10` | ≥ 0 | Drop mode j from `advance()` when its energy E_j and rainfall forcing are both below this threshold. Automatically reactivated by rainfall. |
+
+`WET_RESEED_FRACTION`, `WET_RESEED_MIN_INTERVAL`, `PARAMETRIC_TAILS` and `MODE_DROP_THRESHOLD`
+were retired on 2026-10-12 after measurement (VALIDATION.md "H17 §9"). A line that restates the
+old default (0.25, 600, NO, 1e-10) still loads; any other value is refused with the reason.
 
 ### 3.2 `[UNCERTAINTY]`
 
@@ -388,16 +388,10 @@ exactly on `h_det` for the rest of the run.
 3. `computeQuantiles(h_det, parametric_tails)` reconstructs per-cell depths for all M members
    (`h_det + P·δa`, floored at 0) and sorts to get q05/q50/q95.
 
-**Basis rebuild on wet-domain growth** — extending ROM coverage, not correcting drift:
-
-If the wet-cell count changes by more than `WET_RESEED_FRACTION × n_tri` since the last seed,
-and at least `WET_RESEED_MIN_INTERVAL` seconds have elapsed, the ROM rebuilds its depth-weighted
-basis and re-seeds from the current CVODE depth (all deviations reset to zero). This exists
-solely to extend the ROM's coverage to a newly-wet region that the previous basis didn't
-represent — it is not a periodic correction for accumulated drift (the deviation formulation
-has no drift to correct: the nominal member never leaves the deterministic trajectory). Spread
-briefly collapses to zero at a rebuild and re-grows as members diverge again; the median is
-unaffected either way, since it already tracks `h_det`.
+**No reseeding.** The 2D eigenbasis is built once over the whole mesh, dry cells included, so
+a cell that wets later is already represented. Members' deviations are never reset. (Until
+2026-10-12 a wet-area trigger re-seeded the ROM; on this basis it rebuilt nothing and only
+erased the band, so it was removed. VALIDATION.md "H17 §9".)
 
 #### 1D ROM — what runs when
 
@@ -713,9 +707,6 @@ h_i[t] = max(0,  Σ_j P[t,j] · a_{i,j})      for member i, cell t
 The three output fields are the sorted 5th, 50th, and 95th percentile of `{h_i[t] : i=0..M-1}`
 at each cell `t` independently.
 
-With `PARAMETRIC_TAILS YES`: for cells where ≥ 4 members are wet, fits a log-normal to the
-wet sub-population and replaces the sort-based q95 with the analytic 95th percentile of that
-fit. This suppresses noise from the top 1–2 samples when M is small (< 30).
 
 ### 4.10 Spatial uncertainty fields
 
@@ -842,13 +833,13 @@ gates calibrated:
 
 | `flag` | Meaning | Measured against brute-force Monte Carlo |
 |---|---|---|
-| `steady` | Flow leaves the node and inflow matches outflow within 10 %. | Calibrated on every 1D test fixture: member coverage 0.89–0.94, width ratio 0.98–1.33. Not on Bellinge (0.71 / 1.58), where the band is about the right width but somewhat off-centre. |
-| `transient` | The node is filling or draining (inflow and outflow differ by more than 10 %). | The band can be off either way: a filling pool ran 2.7× wide, a draining force main far too narrow. |
-| `no_flow` | Nothing leaves the node: still water, a pump wet well between cycles, a channel below a weir that has stopped spilling. | The Manning band is near zero, but members can still differ by stored volume. Too narrow (coverage 0.69 on Example 8). |
+| `steady` | Flow leaves the node and inflow matches outflow within 10 %. | Calibrated on every 1D gate, Bellinge included: member coverage 0.86–0.95, width ratio 1.00–1.35. |
+| `transient` | The node is filling or draining (inflow and outflow differ by more than 10 %). | Off either way: a filling pool ran 3× wide; on Example 8 coverage 0.47, on Bellinge 0.77 at about the right width. |
+| `no_flow` | Nothing leaves the node: still water, a pump wet well between cycles, a channel below a weir that has stopped spilling. | The Manning band is near zero, but members can still differ by stored volume. Too narrow: coverage 0.69 on Example 8, 0.53 on Bellinge. |
 
-On the test fixtures, read `steady` bands as probabilities and the other two
-as rankings. On a large real network, treat all three as rankings until a
-Monte Carlo on that network says otherwise; Bellinge's is ranking only. Before H17 the file had
+Read `steady` bands as probabilities and the other two as rankings. On a
+network of your own, `steady` is a probability to the extent your network
+resembles the validated ones (a 5-node chain, EPA Example 8, Bellinge). Before H17 the file had
 five columns; a reader that splits on commas and takes the first five keeps working.
 
 ### 5.2 Typical spatial patterns
@@ -885,7 +876,7 @@ q95 − q05 ≈ 2 · p · |∂(depth)/∂(Manning's n)| · n_base
 |---|---|
 | 10–20 | Rapid screening runs, qualitative band shape only. q05/q95 noisy. |
 | 50 | Default. Acceptable quantile accuracy (± ~5% of spread). |
-| 100 | Required if using `PARAMETRIC_TAILS NO` and need reliable q95 tail. |
+| 100 | Finer quantile granularity; measured not to change coverage on the gates. |
 | 200+ | Diminishing returns; use if publishing or for regulatory submissions. |
 
 Cost scales exactly as O(M). Doubling M doubles ROM overhead (which is already ~1% of total
@@ -1153,42 +1144,15 @@ other operator dials (`LEGACY_OPERATOR`, `ALPHA_PAR`, `ALPHA_PERP`, `C_FACTOR`,
 restates the built-in value loads, any other value is refused with the reason. The 2D model
 runs one validated configuration, so two users with the same model get the same bands.
 
-### 6.3 Reseeding (2D only — basis coverage, not drift correction)
+### 6.3 Retired numerics settings
 
-Under the deviation formulation, the ROM's median always tracks the live deterministic depth
-field (§4.6) — there is no periodic drift to correct, and the 1D ROM has no reseed mechanism
-at all. The one remaining reseed trigger is 2D-specific and purely about **basis coverage**:
-the ROM's eigenbasis is built over the wet region at seed time, so as the wetting front
-advances into previously-dry cells, the basis needs rebuilding to represent them.
-`WET_RESEED_FRACTION` controls how aggressively this rebuild fires:
+Three further `[2D_ROM]` settings were measured on the 2D gate and retired (2026-10-12):
 
-```ini
-[2D_ROM]
-WET_RESEED_FRACTION       0.02   ; rebuild when wet area changes by 2% of domain
-WET_RESEED_MIN_INTERVAL   30.0   ; at most once every 30 s
-```
-
-After each rebuild, every member's deviation resets to zero (all members restart exactly on
-the deterministic solution) and spread re-grows from there — but the median is unaffected,
-since it already equalled the deterministic solution before and after the rebuild. If your
-output frequency is coarser than the rebuild interval, the brief spread reset is not visible
-in the output.
-
-### 6.4 Parametric tails
-
-With small M (< 30) the sort-based q95 is noisy because only 1–2 samples determine the top
-percentile. `PARAMETRIC_TAILS YES` fits a log-normal to the wet-cell population and uses the
-analytic 95th percentile:
-
-```ini
-[2D_ROM]
-MEMBERS           20
-PARAMETRIC_TAILS  YES
-```
-
-The log-normal fit uses method of moments on the log-transformed wet depths. It may
-overestimate q95 if the true distribution has a lighter tail than log-normal — always verify
-against a high-M run before relying on parametric tails for design decisions.
+| Setting | What it did | Measured | Now |
+|---|---|---|---|
+| `WET_RESEED_FRACTION`, `WET_RESEED_MIN_INTERVAL` | Re-seeded the ROM when the wetted area changed. | On the shipped basis the re-seed rebuilt nothing and reset every member to zero, erasing the band. | Removed. Re-seeding happens only on the internal legacy path, whose basis does change. |
+| `PARAMETRIC_TAILS` | Replaced q95 by a log-normal fit to the wet members. | Coverage 0.864 → 0.875 but width 1.36 → 1.47 on an already over-wide band. | Removed; q95 is sort-based. |
+| `MODE_DROP_THRESHOLD` | Skipped modes with negligible energy. | No change to bands or runtime. | Fixed at its old default. |
 
 ---
 
@@ -1449,8 +1413,8 @@ xarray as a supplementary group.
    solution regardless of basis age (§4.6) — but the *spread* (the Manning- and
    forcing-sensitivity magnitude) is computed against that possibly-stale operator, so it can be
    under- or over-estimated if the true diffusive structure (wet-cell coverage, effective
-   conductance) has moved significantly since the last rebuild. The `WET_RESEED_FRACTION` guard
-   (2D) and periodic `updateBasis()` calls (1D) limit how stale the operator can get; neither
+   conductance) has moved significantly since the last rebuild. Periodic operator refreshes
+   (2D) and `updateBasis()` calls (1D) limit how stale the operator can get; neither
    guarantees perfect spread accuracy for rapidly evolving wetting fronts or hydraulic jumps.
 
 2. **1D ROM is diffusion-wave; DYNWAVE is not.** SWMM's 1D solver integrates the full
@@ -1538,24 +1502,20 @@ xarray as a supplementary group.
    row in `[DWF]` was added to the node's dry-weather flow instead of loading the
    pollutant. Both were already fixed upstream and arrived with the rebase.
 
-10. **Surcharged bands are validated under both `NODE_CONTINUITY` modes; networks with
-    pumps and weirs are a ranking.** Since PR H17 the 1D ROM derives each node's response to
-    roughness from the solver's own flows. Every conduit's flow scales as 1/n, and the
-    sidecar computes the head shift that lets each conduit carry its flow again. A
-    free-surface reach comes out at 0.6 of its depth and a full pipe at twice its friction
-    loss, with no constant chosen. Pumps, orifices, weirs and outlets are part of the ROM's
-    network graph. A free structure passes a flow set by its upstream head, so it absorbs
-    extra head rather than relaying it. Against brute-force Monte Carlo on the surcharged test
-    chain, member coverage is 0.94 under `EXPLICIT` (calibrated) and 0.92 under
-    `SEMI_IMPLICIT` (conservative: the pool is still filling at the end of the window). On EPA
-    Example 8 (a pump, an orifice, four weirs) widths are right node by node, with a median
-    ratio of 1.05. Coverage is 0.76, below the 0.80 floor, because two places spread by
-    stored volume rather than by flow: the force main after the pump stops, and the channel
-    below a weir after it spills. There the band can be centimetres too narrow; treat it as a
-    ranking. On Bellinge (1,011 nodes, first Monte Carlo 2026-10-12) the bands are close to
-    the right width at every spread size (0.97 on the largest spreads, where the earlier
-    source was half-width), but coverage is 0.73: a ranking, not a calibrated interval. See
-    `docs/uncertainty/VALIDATION.md`, "H17".
+10. **1D bands are validated on surcharged chains, on a pumped combined sewer and on a
+    1,011-node network.** Since PR H17 the 1D ROM derives each node's response to roughness
+    from the solver's own flows: every conduit's flow scales as 1/n, and the sidecar computes
+    the head shift that lets each conduit carry its flow again. A free-surface reach comes out
+    at 0.6 of its depth and a full pipe at twice its friction loss, with no constant chosen.
+    The kept modes carry how the network moves toward that response; the part they cannot
+    represent is added at its steady value (a quasi-static correction), so a localized response
+    on a shallow lateral is not smeared onto the trunk. Pumps, orifices, weirs and outlets are
+    part of the network graph. Measured against brute-force Monte Carlo (member coverage /
+    width): surcharged chain 0.949 / 1.17 (`EXPLICIT`) and 0.906 / 1.67 (`SEMI_IMPLICIT`,
+    conservative while the pool fills); EPA Example 8 0.810 / 1.10; Bellinge 0.840 / 1.01. Two
+    places remain rankings, and the output flags them: the force main after a pump stops and
+    a channel after a weir stops spilling (`no_flow`), where members differ by stored volume
+    rather than by flow. See `docs/uncertainty/VALIDATION.md`, "H17".
 
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from

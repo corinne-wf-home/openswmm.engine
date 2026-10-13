@@ -574,7 +574,12 @@ of a filling front -- has no steady state for roughness to shift and gets no
 Manning band (front timing is the phase channel's job). Pumps, orifices,
 weirs and outlets are edges of the ROM's graph, and a free structure passes a
 flow set by its upstream head, so it absorbs extra head instead of relaying
-it. This replaced a per-node elasticity of 0.6 blending to 2.0 across the
+it. The kept eigenmodes carry how the network moves toward that response; the
+part of the response they cannot represent belongs to faster modes than any
+kept one, so it is added at its steady value instead of being dropped (the
+"mode-acceleration" correction familiar from structural dynamics). Without it,
+20 smooth modes kept only 5–15 % of the response on Bellinge's shallow
+laterals, and their bands were four times too narrow. This replaced a per-node elasticity of 0.6 blending to 2.0 across the
 crown (PR H5b), which could not see a node drowned by a chokepoint further
 down (`NODE_CONTINUITY EXPLICIT` member coverage 0.74 then, 0.94 now) and
 scaled a force main's 16 ft of backwater as if it were friction (7 ft wide

@@ -273,6 +273,7 @@ void SpectralROM1D::seed(const double* h_nodes) {
     // trajectory (δa = 0). h_nodes primes h_det_last_ for reconstructHead()
     // until the first advance() supplies a fresh deterministic reference.
     std::fill(a_ensemble.begin(), a_ensemble.end(), 0.0);
+    qsr_r_.clear();
     h_det_last_.assign(h_nodes, h_nodes + static_cast<std::size_t>(n_nodes));
 
     // PR H11: reset the ROM's own clock and phase-coordinate history so a
@@ -342,6 +343,30 @@ void SpectralROM1D::advance(double dt, double K1d,
             dot_b += Pj[i] * (a * bref[i]);
         }
         b_coarse[j] = dot_b;
+    }
+    // Quasi-static residual: the part of the target the kept modes leave out.
+    // Only for a supplied response field: the h_det fallback is an absolute
+    // head, not a response, and its residual (including any constant part an
+    // ungrounded basis discards) is not a Manning sensitivity.
+    if (quasi_static_residual && sens_ref) {
+        qsr_r_.assign(nn, 0.0);
+        for (std::size_t i = 0; i < nn; ++i)
+            qsr_r_[i] = (alpha ? alpha[i] : 1.0) * bref[i];
+        for (std::size_t j = 0; j < nk; ++j) {
+            const double* Pj = &basis->P[j * nn];
+            const double bj = b_coarse[j];
+            for (std::size_t i = 0; i < nn; ++i) qsr_r_[i] -= Pj[i] * bj;
+        }
+        qsr_mm1_.assign(static_cast<std::size_t>(n_ensemble), 0.0);
+        for (int m = 0; m < n_ensemble; ++m) {
+            const auto um = static_cast<std::size_t>(m);
+            double mm = mannings_mult[um];
+            for (const auto& ep : extra_params_)
+                if (ep.entry == ParamEntry::RATE_MULT) mm *= ep.column[um];
+            qsr_mm1_[um] = mm - 1.0;
+        }
+    } else {
+        qsr_r_.clear();
     }
     const double* loc_field = soft_loc_field_ ? soft_loc_field_ : runoff_per_node;
     if (loc_field) {
@@ -779,6 +804,16 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
     // defensive check). When inactive every member's reference is
     // h_det_active[t] -- the loop below is then bit-identical to the
     // pre-H11 code path.
+    // Quasi-static residual of the Manning channel, at its steady value.
+    if (qsr_r_.size() == nn && qsr_mm1_.size() == M) {
+        for (std::size_t t = 0; t < nn; ++t) {
+            const double r = qsr_r_[t];
+            if (r == 0.0) continue;
+            double* row = &recon_buf_[t * M];
+            for (std::size_t i = 0; i < M; ++i) row[i] += qsr_mm1_[i] * r;
+        }
+    }
+
     const bool phase_active = phase_cfg.enabled && !tbar_.empty() && !hist_.empty();
 
     // Add the deterministic (or, under H11, per-member phase-shifted)
@@ -1046,6 +1081,7 @@ double SpectralROM1D::reconstructHead(int member, int active_node) const noexcep
         if (!mode_active[j]) continue;
         h += basis->P[j * nn + uk] * ai[j];
     }
+    if (qsr_r_.size() == nn && ui < qsr_mm1_.size()) h += qsr_mm1_[ui] * qsr_r_[uk];
     return std::max(h, 0.0);
 }
 

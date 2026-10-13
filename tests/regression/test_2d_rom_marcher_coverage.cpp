@@ -317,6 +317,11 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0,
     static const bool kRelative = [](){
         const char* v = std::getenv("W3_RELATIVE"); return !v || std::atoi(v) != 0; }();
     rom.relative_deviation = kRelative && rung != Rung::LEGACY;
+    // Settings audit (2026-10-12): W3_MODE_DROP overrides the mode-drop
+    // threshold (0 = never drop), W3_PARAM_TAILS=1 enables the log-normal q95.
+    if (const char* v = std::getenv("W3_MODE_DROP")) rom.mode_drop_threshold = std::atof(v);
+    static const bool kParamTails = [](){
+        const char* v = std::getenv("W3_PARAM_TAILS"); return v && std::atoi(v) != 0; }();
     std::vector<double> ones(kM, 1.0);
     rom.setExternalSamples(mult, ones);   // member i ↔ MC member i
     rom.initialize();
@@ -375,7 +380,7 @@ RomBands runRomRung(Rung rung, const MeshData& mesh0,
 
         rom.advance(kRep, K_legacy, /*rainfall=*/nullptr,
                     /*h_cell=*/nullptr, /*h_det=*/hdet[r].data());
-        rom.computeQuantiles(hdet[r].data());
+        rom.computeQuantiles(hdet[r].data(), kParamTails);
         out.q05[r] = rom.q05;
         out.q95[r] = rom.q95;
     }

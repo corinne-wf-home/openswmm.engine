@@ -708,6 +708,12 @@ public:
     /// dissipation lambda*K1d. Not parser-exposed; set through the C++ handle
     /// between open() and the first step.
     double& rom1dK1dScale() noexcept { return rom1d_k1d_scale_; }
+    /// Measurement hook: 1D ROM mode count (0 = built-in rule). Set before initialize().
+    int& rom1dModeCountOverride() noexcept { return rom1d_k_modes_override_; }
+    /// Internal A/B hook: quasi-static residual of the Manning channel (default on). Set before initialize().
+    bool& rom1dQuasiStatic() noexcept { return rom1d_qsr_; }
+    /// Diagnostic: the last flow-response field phi per active node (H17).
+    const std::vector<double>& rom1dFlowResponse() const noexcept { return rom1d_fs_phi_; }
     /// PR H17: Manning sensitivity from the steady linearized flow response
     /// instead of depth x a fixed elasticity (internal hook while measured).
     bool& rom1dFlowSource() noexcept { return rom1d_flow_source_; }
@@ -728,6 +734,8 @@ public:
     double rom1dLastK1d() const noexcept { return rom1d_last_k1d_; }
 private:
     double rom1d_k1d_scale_ = 1.0;
+    int rom1d_k_modes_override_ = 0;
+    bool rom1d_qsr_ = true;   ///< H17 quasi-static residual (internal A/B hook)
     double rom1d_last_k1d_ = 0.0;
 
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */

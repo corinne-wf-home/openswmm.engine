@@ -147,6 +147,18 @@ struct SpectralROM1D {
     /// = P[:,j]^T (h_i − h_det).  Zero for the nominal member at all times.
     std::vector<double> a_ensemble;
 
+    /// H17 (2026-10-12): quasi-static (mode-acceleration) correction of the
+    /// Manning channel. The part of the response field phi that the kept modes
+    /// cannot represent, r = phi - P P^T phi, belongs to modes faster than any
+    /// kept one, so it is added at its steady value (mm_i - 1) * r instead of
+    /// being dropped. The steady band is then exactly (mm_i - 1) * phi at every
+    /// node, with the kept modes carrying only the dynamics. On Bellinge
+    /// (1,011 nodes, 20 modes) truncation kept 5-15 % of phi on shallow
+    /// laterals; with the correction the network's bands are calibrated
+    /// (VALIDATION.md "H17 §10"). Applies only when advance() is given a
+    /// response field (sens_ref); off only as an internal A/B hook.
+    bool quasi_static_residual = true;
+
     /// Pre-projected runoff forcing: r_coarse[j] = P[:,j]^T * runoff_per_node.
     std::vector<double> r_coarse;
 
@@ -588,6 +600,7 @@ private:
     /// Deterministic head passed to the most recent advance()/seed() call
     /// (length n_nodes). Used by reconstructHead().
     std::vector<double> h_det_last_;
+    std::vector<double> qsr_r_, qsr_mm1_;   ///< quasi-static residual field / per-member (mm - 1)
 
     std::vector<double> ensemble_runoff_;
     double mean_ensemble_runoff_ = 0.0;

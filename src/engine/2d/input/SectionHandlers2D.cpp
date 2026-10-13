@@ -1241,25 +1241,33 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         if (v > 0.0)
             return "K_EFF is no longer a setting: it is always derived from the "
                    "mesh and flow. Remove the line.";
-    } else if (iequals(key, "WET_RESEED_FRACTION")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0 || v > 1.0) return "WET_RESEED_FRACTION must be in [0, 1]";
-        opts.rom_wet_reseed_fraction = v;
-    } else if (iequals(key, "WET_RESEED_MIN_INTERVAL")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "WET_RESEED_MIN_INTERVAL must be >= 0";
-        opts.rom_wet_reseed_min_interval = v;
-    } else if (iequals(key, "PARAMETRIC_TAILS")) {
-        if (iequals(val, "YES") || val == "1")
-            opts.rom_parametric_tails = true;
-        else if (iequals(val, "NO") || val == "0")
-            opts.rom_parametric_tails = false;
-        else
-            return "Invalid PARAMETRIC_TAILS value (YES/NO)";
-    } else if (iequals(key, "MODE_DROP_THRESHOLD")) {
-        double v = tryParseDouble(val, ok);
-        if (!ok || v < 0.0) return "MODE_DROP_THRESHOLD must be >= 0";
-        opts.rom_mode_drop_threshold = v;
+    } else if (iequals(key, "WET_RESEED_FRACTION") ||
+               iequals(key, "WET_RESEED_MIN_INTERVAL") ||
+               iequals(key, "PARAMETRIC_TAILS") ||
+               iequals(key, "MODE_DROP_THRESHOLD")) {
+        // Retired 2026-10-12 (settings audit, VALIDATION.md "H17 §9"):
+        //  - WET_RESEED_*: on the shipped path the eigenbasis is fixed
+        //    geometry, so a reseed rebuilt nothing and only zeroed every
+        //    member's deviation -- it erased the band when the wetted area
+        //    grew. Reseeding now happens only where the basis is rebuilt.
+        //  - PARAMETRIC_TAILS: +0.011 coverage for +0.105 width on the 2D
+        //    gate (an already over-wide band pushed toward the 1.5 ceiling).
+        //  - MODE_DROP_THRESHOLD: no measurable effect on bands or runtime.
+        // Restating the old default still loads; anything else is refused.
+        bool is_default = false;
+        if (iequals(key, "PARAMETRIC_TAILS")) {
+            is_default = iequals(val, "NO") || val == "0";
+        } else {
+            const double v = tryParseDouble(val, ok);
+            if (ok) {
+                if (iequals(key, "WET_RESEED_FRACTION"))     is_default = (v == 0.25 || v == 0.0);
+                if (iequals(key, "WET_RESEED_MIN_INTERVAL")) is_default = (v == 600.0 || v == 0.0);
+                if (iequals(key, "MODE_DROP_THRESHOLD"))     is_default = (v == 1.0e-10);
+            }
+        }
+        if (!is_default)
+            return key + " is no longer a setting: measured, it did not improve "
+                   "the bands (see docs/uncertainty/VALIDATION.md). Remove the line.";
     } else if (iequals(key, "MANNINGS_CORR_LEN")) {
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0) return "MANNINGS_CORR_LEN must be >= 0";

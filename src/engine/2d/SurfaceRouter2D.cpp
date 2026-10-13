@@ -2299,6 +2299,11 @@ void SurfaceRouter2D::seedROM() {
 
 void SurfaceRouter2D::maybeReseedROM(double t) {
     if (!rom_ || !rom_seeded_) return;
+    // Settings audit (2026-10-12): only the legacy depth-weighted path
+    // rebuilds its basis on reseed. On the shipped path the basis is fixed
+    // geometry, so a reseed would only zero every member's deviation and
+    // erase the band when the wetted area grows.
+    if (!options_.rom_legacy_operator) return;
     if (options_.rom_wet_reseed_fraction <= 0.0) return;
     if (t - rom_last_seed_t_ < options_.rom_wet_reseed_min_interval) return;
 

@@ -403,3 +403,39 @@ TEST(SurfaceROMRouterOperator, GroundingEnginesOnlyWithAnOpenBoundaryEdge) {
     EXPECT_EQ(num_null_open, 0)
         << "one NORMAL_FLOW edge should ground the basis and remove it";
 }
+
+TEST(SurfaceROMRouterOperator, WettedAreaGrowthDoesNotEraseTheBand) {
+    // Settings audit (2026-10-12): on the shipped path the eigenbasis is fixed
+    // geometry, so a wet-area reseed rebuilt nothing and only zeroed every
+    // member's deviation. With the old trigger armed as aggressively as it
+    // goes (no minimum interval), the band must be exactly the band with the
+    // trigger off: reseeding is now confined to the legacy path, whose basis
+    // actually changes.
+    const fs::path dir = fs::current_path() / "rom_router_operator_out";
+    fs::create_directories(dir);
+    { std::ofstream f(dir / "reseed.inp"); f << buildModel(true); }
+    std::vector<double> band[2];
+    for (const bool armed : {false, true}) {
+        auto configure = [armed](openswmm::twoD::SolverOptions2D& o) {
+            o.enable_rom = true; o.rom_members = 12; o.rom_modes = 6;
+            o.rom_mannings_pert = 0.20; o.rom_rainfall_pert = 0.0;
+            o.rom_wet_reseed_fraction = armed ? 0.01 : 0.0;
+            o.rom_wet_reseed_min_interval = 0.0;
+        };
+        auto eng = driveRun(dir / "reseed.inp", dir / "reseed.rpt", dir / "reseed.out", configure);
+        ASSERT_NE(eng, nullptr);
+        const auto* rom = static_cast<openswmm::SWMMEngine*>(eng)->surfaceRouter2D().rom();
+        ASSERT_NE(rom, nullptr);
+        for (std::size_t c = 0; c < rom->q05.size(); ++c)
+            band[armed ? 1 : 0].push_back(rom->q95[c] - rom->q05[c]);
+        swmm_engine_end(eng); swmm_engine_report(eng);
+        swmm_engine_close(eng); swmm_engine_destroy(eng);
+    }
+    ASSERT_EQ(band[0].size(), band[1].size());
+    double max_band = 0.0;
+    for (std::size_t c = 0; c < band[0].size(); ++c) {
+        EXPECT_EQ(band[1][c], band[0][c]) << "cell " << c;
+        max_band = std::max(max_band, band[0][c]);
+    }
+    EXPECT_GT(max_band, 0.0);
+}

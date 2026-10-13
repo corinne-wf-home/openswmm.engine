@@ -124,10 +124,6 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsScalarOptions) {
         "MODES                    8\n"
         "MANNINGS_PERT            0.15\n"
         "RAINFALL_PERT            0.10\n"
-        "WET_RESEED_FRACTION      0.30\n"
-        "WET_RESEED_MIN_INTERVAL  500\n"
-        "PARAMETRIC_TAILS         YES\n"
-        "MODE_DROP_THRESHOLD      1e-8\n"
         "MANNINGS_CORR_LEN        5.0\n"
         "RAINFALL_CORR_LEN        3.0\n";
 
@@ -142,10 +138,6 @@ TEST(SurfaceROMInputParser, TwoDRomSectionSetsScalarOptions) {
     EXPECT_DOUBLE_EQ(o.rom_mannings_pert, 0.15);
     EXPECT_DOUBLE_EQ(o.rom_rainfall_pert, 0.10);
     EXPECT_DOUBLE_EQ(o.rom_k_eff, 0.0);   // K_EFF retired: always AUTO
-    EXPECT_DOUBLE_EQ(o.rom_wet_reseed_fraction, 0.30);
-    EXPECT_DOUBLE_EQ(o.rom_wet_reseed_min_interval, 500.0);
-    EXPECT_TRUE(o.rom_parametric_tails);
-    EXPECT_DOUBLE_EQ(o.rom_mode_drop_threshold, 1e-8);
     EXPECT_DOUBLE_EQ(o.rom_mannings_corr_len, 5.0);
     EXPECT_DOUBLE_EQ(o.rom_rainfall_corr_len, 3.0);
 
@@ -166,7 +158,9 @@ TEST(SurfaceROMInputParser, TwoDRomRetiredDialsAcceptOnlyTheBuiltInValues) {
         "ALPHA_PAR " + num(def.rom_alpha_par) + "\nALPHA_PERP " + num(def.rom_alpha_perp) +
         "\nC_FACTOR " + num(def.rom_c_factor) + "\nGROUND_SCALE " + num(def.rom_ground_scale) +
         "\nMANNING_ELASTICITY " + num(def.rom_manning_elasticity) +
-        "\nDIFFUSIVITY_SCALE " + num(def.rom_diffusivity_scale) + "\n";
+        "\nDIFFUSIVITY_SCALE " + num(def.rom_diffusivity_scale) + "\n"
+        "WET_RESEED_FRACTION 0.25\nWET_RESEED_MIN_INTERVAL 600\n"
+        "PARAMETRIC_TAILS NO\nMODE_DROP_THRESHOLD 1e-10\n";
     std::string err;
     auto eng = parseOnly(dir, "rom_dials_default", restated, &err);
     ASSERT_NE(eng, nullptr) << "restating the defaults must load: " << err;
@@ -182,7 +176,9 @@ TEST(SurfaceROMInputParser, TwoDRomRetiredDialsAcceptOnlyTheBuiltInValues) {
     for (const char* line : {"LEGACY_OPERATOR YES", "ALPHA_PAR 0.5", "ALPHA_PERP 1.5",
                              "C_FACTOR 1.2", "GROUND_SCALE 0.4", "MANNING_ELASTICITY 0.6",
                              "DIFFUSIVITY_SCALE 2.5", "K_EFF 0.9", "RELATIVE_DEVIATION NO",
-                             "RELATIVE_DEVIATION MAYBE"}) {
+                             "RELATIVE_DEVIATION MAYBE", "WET_RESEED_FRACTION 0.3",
+                             "WET_RESEED_MIN_INTERVAL 500", "PARAMETRIC_TAILS YES",
+                             "MODE_DROP_THRESHOLD 1e-8"}) {
         std::string e;
         auto bad = parseOnly(dir, "rom_dial_bad",
                              std::string("\n[2D_ROM]\nENABLE YES\n") + line + "\n", &e);

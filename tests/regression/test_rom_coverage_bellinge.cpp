@@ -483,7 +483,9 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
     //   band / local depth   : p50 0.262 -> 0.318   p90 1.99 -> 4.20
     //                          p99 4.87 -> 15.07    max 24.7 -> 45.7
     //   steady-flagged only  : p90 1.98 -> 4.06    transient p90 2.09 -> 4.88
-    // No Bellinge Monte Carlo exists; the wider tail is unvalidated here.
+    // With the quasi-static residual (2026-10-12): p50 0.198, p90 0.835,
+    // p99 3.62, max 24.6. The first Bellinge Monte Carlo (VALIDATION.md "H17
+    // §8, §10") rates these bands calibrated: coverage 0.840, width 1.008.
     // The previous baseline (max 0.007, coverage 0.990) came from a run that
     // stopped at 20,000 steps and never reached the storm; it was ~40x too low.
     EXPECT_GT(nonzero_spreads, 0)
