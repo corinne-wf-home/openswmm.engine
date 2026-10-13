@@ -38,15 +38,20 @@
 
 #include "../../../../include/openswmm/plugin_sdk/IOutputPlugin.hpp"
 
+#include "../../io/CheckpointOutputPublication.hpp"
 #include <string>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <hdf5.h>
 
+namespace openswmm { class SWMMEngine; }
 namespace openswmm::twoD {
 
 struct MeshData;          // forward declaration
 struct SolverOptions2D;   // forward declaration
+class SourceResultHistory;
 
 /**
  * @brief Default 2D output plugin: writes CF/UGRID-compliant HDF5 file.
@@ -211,7 +216,36 @@ public:
     /// Bitmask of report2d::Var groups in effect (for tests / the C API).
     unsigned reportVariables() const noexcept { return report_vars_; }
 
+    /// Producer handoff of immutable accepted source histories; HDF5 remains
+    /// exclusively on the output owner thread. Optional internal hook, no
+    /// automatic runtime ownership activation or plugin SDK payload change.
+    void enqueueSourceHistory(std::shared_ptr<const SourceResultHistory> history);
+
+
 private:
+    friend class openswmm::SWMMEngine;
+    // Internal single-file, water-only continuation. IO must be idle.
+    bool checkpoint_fresh_ = false;
+    bool checkpoint_write_failed_ = false;
+    void checkpointWriteStatus(herr_t);
+    std::string checkpoint_header_;
+    struct PreparedCheckpoint;
+    std::string checkpointBytes(const SimulationContext&, double next_report_ms,
+                                const SimulationSnapshot&);
+    std::shared_ptr<PreparedCheckpoint> prepareCheckpoint(const SimulationContext&,
+        double next_report_ms, const SimulationSnapshot&, const SourceResultHistory*, std::string);
+    void installCheckpoint(PreparedCheckpoint&);
+    io::CheckpointOutputPublication::Output checkpointPublication(const PreparedCheckpoint&) const;
+    void adoptCheckpoint(PreparedCheckpoint&) noexcept;
+    void validateCheckpoint(hid_t, const SimulationContext&, double, const SimulationSnapshot&,
+                            hsize_t, double, bool) const;
+    std::vector<hid_t*> checkpointDatasets();
+    void closeDatasets() noexcept;
+    std::string fileBytes() const;
+    std::mutex source_mutex_;
+    std::vector<std::shared_ptr<const SourceResultHistory>> source_pending_;
+    std::shared_ptr<const SourceResultHistory> source_written_;
+    int writePendingSourceHistory();
     // ---- results-file size controls (configureOutput) ----
     hid_t    storage_type_ = H5T_NATIVE_DOUBLE;  ///< H5T_IEEE_F32LE when FLOAT32
     int      compression_  = 4;                  ///< zlib level; 0 = none

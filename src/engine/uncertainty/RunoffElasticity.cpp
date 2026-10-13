@@ -30,7 +30,8 @@ struct CtxSnapshot {
 
 void RunoffElasticityProbe::step(runoff::RunoffSolver& solver, SimulationContext& ctx,
                                  double dt, double evap_rate, double infil_factor,
-                                 double recovery_factor, int month) {
+                                 double recovery_factor, int month,
+                                 const std::vector<int>* source_owners) {
     const int n = ctx.subcatches.count();
     if (n <= 0) return;
     const auto un = static_cast<std::size_t>(n);
@@ -52,9 +53,10 @@ void RunoffElasticityProbe::step(runoff::RunoffSolver& solver, SimulationContext
                           std::vector<double>& q_out) {
         solver.restoreState(st);
         // Same arguments as the engine's deterministic call (no boundary,
-        // source forcing or spatial fractions), then the rain scale.
+        // source forcing or spatial fractions; the same source-owner map),
+        // then the rain scale.
         solver.execute(ctx, dt, evap_rate, infil_factor, recovery_factor, month,
-                       nullptr, nullptr, nullptr, scale);
+                       nullptr, nullptr, nullptr, source_owners, scale);
         for (std::size_t i = 0; i < un; ++i) q_out[i] = ctx.subcatches.runoff[i];
         st = solver.saveState();
         snap.restore(ctx.subcatches);   // the consumed lid_return and the outputs

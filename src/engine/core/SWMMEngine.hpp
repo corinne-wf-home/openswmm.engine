@@ -97,7 +97,9 @@
 #ifdef OPENSWMM_HAS_2D
 #include "../uncertainty/GridFileReader.hpp"
 #endif
-namespace openswmm::twoD { class Default2DOutputPlugin; }
+#include "../2d/coupling/RuntimeWaterDriverCheckpoint.hpp"
+#include "../hydrology/SourceWaterDeliveryBridge.hpp"
+namespace openswmm::twoD { class Default2DOutputPlugin; class EngineSourceResultHistory; }
 #endif
 
 #include <array>
@@ -116,6 +118,8 @@ extern "C" {
 }
 
 namespace openswmm {
+
+class DefaultOutputPlugin;
 
 /**
  * @brief Registered callback bundle (all optional).
@@ -200,6 +204,8 @@ public:
      */
     int step(double* elapsed_time) noexcept;
     int advanceTo(double seconds, double* actual) noexcept;
+    /// Internal coupling clock: accepted seconds for the explicit private profile.
+    double runtimeCouplingTime() const noexcept;
     bool runtimeUpdateAllowed() const noexcept { return !runtime_pipeline_; }
 
     /**
@@ -223,6 +229,39 @@ public:
      *          `delete engine` (via swmm_engine_destroy()) to free memory.
      */
     int close() noexcept;
+
+    // Internal, same-platform water-only hydraulic session restart. Enable at
+    // start()'s initial boundary; restore into an identically initialized fresh
+    // session. No public C API; external water drivers require their participant.
+    // Private binary-output qualification: initialize(), prepare this mode,
+    // start(1), then enable checkpointing. Requires a new output destination.
+    std::string prepareOutputCheckpointing();
+    std::string enableCheckpointing();
+#ifdef OPENSWMM_HAS_2D
+    // Separate single-file mesh output qualification; initialize(), prepare,
+    // start(0), then attach the common source checkpoint stage.
+    std::string prepareSurfaceOutputCheckpointing();
+    /// Internal water-only joint binary/mesh continuation with recoverable publication.
+    std::string prepareCombinedOutputCheckpointing();
+    // Qualification attachment only: mesh-owned common sources, with ordinary
+    // engine runoff outside the mesh. Stage lifetime must cover the session.
+    std::string enableCheckpointing(twoD::CommonSourceStage& stage);
+    /// Explicit private spatial-source ownership; no authored/public activation.
+    std::string enableSpatialSourceCheckpointing(twoD::CommonSourceStage& stage);
+    /// Attach at the initial checkpoint boundary after the mesh water stage.
+    /// Caller owns the driver through close; it must send due updates itself.
+    std::string attachRuntimeWaterDriverCheckpoint(twoD::RuntimeWaterDriverCheckpoint&);
+    const runoff::SourceWaterDeliveryBridge* sourceDelivery() const { return source_delivery_.get(); }
+    /// Settle past surface work and publish newly completed private outlets
+    /// before adopting a future runtime prescription at the accepted engine time.
+    void flushRuntimeCouplingBoundary(bool changing_prescription=false);
+    // Accepted-engine water history, separate from source-interval recording.
+    // Caller keeps the recorder alive through end/close. Restore first, then resume.
+    std::string setEngineSourceResultHistory(twoD::EngineSourceResultHistory&,bool detailed_source_intervals=false);
+    std::string resumeEngineSourceResultHistory(twoD::EngineSourceResultHistory&);
+#endif
+    std::string saveCheckpoint(const std::string& path) const;
+    std::string loadCheckpoint(const std::string& path);
 
     // =========================================================================
     // Callback registration
@@ -746,6 +785,8 @@ private:
     /// OUTPUT_FILE is configured; used in start() to call prepareMeshAndDatasets
     /// once the mesh is built.
     twoD::Default2DOutputPlugin* surface_output_plugin_ = nullptr;
+    bool checkpoint_surface_output_ = false;
+    twoD::RuntimeWaterDriverCheckpoint* runtime_water_driver_ = nullptr;
 
     /// Point ctx_.twod_io at surface_router_'s mesh/options/boundary and
     /// pending parse rows so serialization consumers (InpWriter, GeoPackage
@@ -760,6 +801,32 @@ private:
     std::string out_path_;  ///< Binary output file path
 
     bool step_active_ = false, runtime_pipeline_ = false;
+    struct RestartState;
+    bool checkpoint_enabled_ = false, checkpoint_ready_ = false;
+    bool checkpoint_output_ = false;
+    DefaultOutputPlugin* binary_output_plugin_ = nullptr; // owned by PluginFactory
+    std::string checkpoint_model_;
+    void checkCheckpointProfile(bool attaching_surface = false) const;
+    std::string enableCheckpointingImpl(
+#ifdef OPENSWMM_HAS_2D
+        twoD::CommonSourceStage* stage, bool own_sources = false
+#endif
+    );
+    std::string checkpointModel() const;
+    void checkCheckpointBoundary() const;
+    std::string checkpointBytes(std::string&) const;
+    const std::vector<int>* ordinarySourceOwners() const noexcept;
+    bool ownsSpatialSource(int source) const noexcept;
+#ifdef OPENSWMM_HAS_2D
+    friend class twoD::EngineSourceResultHistory;
+    twoD::EngineSourceResultHistory* engine_source_history_ = nullptr;
+    void detachEngineSourceHistory() noexcept;
+    std::unique_ptr<runoff::SourceWaterDeliveryBridge> source_delivery_;
+    twoD::CommonSourceStage* source_stage_ = nullptr; // caller keeps the stage alive
+    std::array<double,6> source_totals_{}; // rain, ET, infiltration, return, runoff, drain (ft3)
+    std::array<double,6> sourceTotals(const runoff::SourceWaterDriver&, const runoff::SourceWaterDeliveryBridge&) const;
+    double spatialSourceStorage(const runoff::SourceWaterDriver&) const;
+#endif
     double exchange_target_ = -1.0;
 
     // Runoff clock (matching legacy OldRunoffTime / NewRunoffTime)
@@ -1028,7 +1095,7 @@ private:
      *                     coupling rate from the carried per-window exchange volume. */
     void assembleLateralInflows(double dt_routing) noexcept;
 
-    void stepRouting(double dt_routing) noexcept;
+    void stepRouting(double dt_routing);
 
     /**
      * @brief Update node and link statistics after routing.

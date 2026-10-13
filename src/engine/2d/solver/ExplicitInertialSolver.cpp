@@ -29,6 +29,8 @@
 
 #include "../subsurface/SubsurfaceSolver.hpp"
 #include "../subsurface/CommonSourceStage.hpp"
+#include "../subsurface/SourceResultHistory.hpp"
+#include "../subsurface/EngineSourceResultHistory.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -82,6 +84,10 @@ void ExplicitInertialSolver::initialize(MeshData& mesh, SurfaceStateData& state,
     state_ = &state;
     opts_  = &opts;
     common_stage_ = nullptr;
+    source_history_ = nullptr;
+    engine_source_history_ = nullptr;
+    checkpoint_ready_ = true;
+    source_phase_end_ = 0.0;
 
     const int nt = mesh.n_triangles();
     if (nt <= 0) return;
@@ -524,7 +530,8 @@ OPENSWMM_SOURCE_INLINE void ExplicitInertialSolver::applyCellSourceRow(
 }
 
 bool ExplicitInertialSolver::applyCellSources(int i, double dt) {
-    if (common_stage_ && common_stage_->ownsCell(i)) return false;
+    if (common_stage_ && common_stage_->ownsCell(i))
+        return common_stage_->runtimeWaterEnabled() && applyRuntimeSources(i,dt);
     CellSourceStep source;
     if (!prepareCellSources(i, dt, source)) return applyRuntimeSources(i, dt);
     if (species_on_) {
@@ -2335,13 +2342,15 @@ void ExplicitInertialSolver::runMacroCycle(double dt0, int nsub, double time) {
             // The GW cells of this rung fire AFTER the surface cells of the
             // same rung, so a cell that infiltrated in this substep hands the
             // water down within the substep rather than a rung later.
-            if (gw_) gw_->fireGwCells(k, (1 << k) * dt0, *state_, time + (s + 1 - (1 << k)) * dt0);
+            if (gw_) gw_->fireGwCells(k, (1 << k) * dt0, *state_, time + (s + 1 - (1 << k)) * dt0,
+                                      common_stage_ ? source_phase_end_ : -1.0);
         }
         // Node exchange is sampled at tier-0 cadence against the batch-frozen
         // 1D heads, exactly like the surface's junction exchange, and booked
         // into the GW cells' accumulators (G-B) rather than applied directly.
         if (gw_ && state_->nodes_1d)
             gw_->sampleNodeExchange(state_->nodes_1d, dt0);
+        captureSourceResults();
         if (dbg_invariant) {
             const double inv2 = invariant();
             if (std::fabs(inv2 - inv0) > 1.0e-9 * (std::fabs(inv0) + 1.0))
@@ -2356,7 +2365,11 @@ void ExplicitInertialSolver::runMacroCycle(double dt0, int nsub, double time) {
 }
 
 double ExplicitInertialSolver::advance(double t_current, double t_target) {
+    if (common_stage_ && (!checkpoint_ready_ || !std::isfinite(t_current) || !std::isfinite(t_target) ||
+        t_current != t_last_sync_ || t_current != common_stage_->completedEnd() || t_target < t_current))
+        throw std::invalid_argument("Common source marcher requires its accepted completed clock.");
     if (!initialized_ || t_target <= t_current) return t_target;
+    if (common_stage_) checkpoint_ready_ = false;
 
     double t = t_current;
     // The lazy-source clock persists across advances (inactive cells may owe
@@ -2466,9 +2479,11 @@ double ExplicitInertialSolver::advance(double t_current, double t_target) {
                 source_phase_end_ = s + 1 == nt ? t_target : t + (s + 1) * dt_tail;
                 fireCells(active_cells_, dt_tail, /*tier0=*/true);
                 if (gw_) {
-                    for (int k = 0; k < Kgw; ++k) gw_->fireGwCells(k, dt_tail, *state_, t + s * dt_tail);
+                    for (int k = 0; k < Kgw; ++k) gw_->fireGwCells(k, dt_tail, *state_, t + s * dt_tail,
+                                                                common_stage_ ? source_phase_end_ : -1.0);
                     if (state_->nodes_1d) gw_->sampleNodeExchange(state_->nodes_1d, dt_tail);
                 }
+                captureSourceResults();
                 ++substeps_run_;
                 ++last_steps_;
             }
@@ -2532,7 +2547,18 @@ double ExplicitInertialSolver::advance(double t_current, double t_target) {
         for (std::size_t k = 0; k < bc_cell_.size(); ++k)
             state_->edge_flux[bc_slot_[k]] = bc_accum_[k] / span;
 
+    refreshSourceResultBoundary();
+    checkpoint_ready_ = true;
     return t_target;
+}
+
+void ExplicitInertialSolver::refreshSourceResultBoundary() {
+    if(source_history_) {
+        // Final render/face publication belongs to the accepted boundary too.
+        // Update only its checkpoint match, never add a second source interval.
+        const auto error=source_history_->refreshCheckpointMatch(*common_stage_);
+        if(!error.empty())throw std::runtime_error("[2D_SOURCE_RESULTS] " + error);
+    }
 }
 
 void ExplicitInertialSolver::reinitialize(double /*t0*/) {
@@ -2624,8 +2650,37 @@ void ExplicitInertialSolver::setCommonSourceStage(CommonSourceStage& stage) {
     pinExternalSourceCells(stage.cells());
 }
 
+void ExplicitInertialSolver::setSourceResultHistory(SourceResultHistory& history) {
+    if (!common_stage_ || source_history_ || engine_source_history_ || t_last_sync_ != 0.0 || !history.tables().empty())
+        throw std::invalid_argument("Source results require an empty recorder and initial common source stage.");
+    const auto error = history.append(*common_stage_);
+    if (!error.empty()) throw std::invalid_argument(error);
+    source_history_ = &history;
+}
+void ExplicitInertialSolver::captureSourceResults() {
+    if(engine_source_history_) {
+        const auto error=engine_source_history_->captureSourceInterval(*common_stage_);
+        if(!error.empty())throw std::runtime_error("[2D_SOURCE_RESULTS] " + error);
+    }
+    if (!source_history_) return;
+    const auto error = source_history_->append(*common_stage_);
+    if (!error.empty()) throw std::runtime_error("[2D_SOURCE_RESULTS] " + error);
+}
+void ExplicitInertialSolver::resumeSourceResultHistory(SourceResultHistory& history) {
+    const auto error = checkpointBoundary();
+    if (!error.empty() || source_history_ || engine_source_history_)
+        throw std::invalid_argument(error.empty() ? "Source history already attached." : error);
+    const auto match = history.resume(*common_stage_);
+    if (!match.empty()) throw std::invalid_argument(match);
+    source_history_ = &history;
+}
+
 void ExplicitInertialSolver::finalize() {
     common_stage_ = nullptr;
+    source_history_ = nullptr;
+    engine_source_history_ = nullptr;
+    checkpoint_ready_ = false;
+    joint_checkpoint_ = false;
     if (initialized_) { settleAccumulators(); flushSourceLedgers(); }
     if (!telemetry_path_.empty() && !telemetry_.empty()) {
         if (std::FILE* f = openswmm::io::fopen_utf8(telemetry_path_, "w")) {

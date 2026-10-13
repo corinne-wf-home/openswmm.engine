@@ -57,7 +57,8 @@ public:
     /// elasticity(). Members are seeded from the deterministic state on the
     /// first call. Leaves the solver and ctx exactly as found.
     void step(runoff::RunoffSolver& solver, SimulationContext& ctx, double dt,
-              double evap_rate, double infil_factor, double recovery_factor, int month);
+              double evap_rate, double infil_factor, double recovery_factor, int month,
+              const std::vector<int>* source_owners = nullptr);
 
     /// Per-subcatchment elasticity, 1.0 until the first step (and wherever a
     /// member is dry). Sized to n_subcatch after the first step.

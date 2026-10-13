@@ -84,6 +84,7 @@ endfunction()
 #       engine component is written (see MASTER_IMPLEMENTATION_PLAN.md phases).
 
 add_gtest_unit(test_engine_tokenizer         test_tokenizer.cpp)
+add_gtest_unit(test_engine_inp_path_spaces   test_inp_path_spaces.cpp)
 add_gtest_unit(test_engine_name_index        test_name_index.cpp)
 add_gtest_unit(test_engine_name_case_parity  test_name_case_parity.cpp)
 add_gtest_unit(test_engine_options_parser    test_options_parser.cpp)
@@ -298,6 +299,7 @@ target_compile_definitions(test_engine_groundwater PRIVATE
     "BENCHMARK_DATA_DIR=\"${PROJECT_SOURCE_DIR}/tests/benchmarks\""
 )
 add_gtest_unit(test_engine_routing          test_routing.cpp)
+add_gtest_unit(test_engine_checkpoint       test_engine_checkpoint.cpp)
 target_compile_definitions(test_engine_routing PRIVATE
     "BENCHMARK_DATA_DIR=\"${PROJECT_SOURCE_DIR}/tests/benchmarks\""
 )
@@ -862,6 +864,17 @@ if(OPENSWMM_BUILD_2D)
         target_link_libraries(test_engine_2d_output_options PRIVATE ${HDF5_C_LIBRARIES})
         target_include_directories(test_engine_2d_output_options PRIVATE ${HDF5_INCLUDE_DIRS})
     endif()
+    if(OPENSWMM_2D_HDF5_OUTPUT)
+        target_compile_definitions(test_engine_checkpoint PRIVATE OPENSWMM_MESH_OUTPUT_CHECKPOINT_TEST=1)
+        if(TARGET hdf5::hdf5-shared)
+            target_link_libraries(test_engine_checkpoint PRIVATE hdf5::hdf5-shared)
+        elseif(TARGET hdf5::hdf5-static)
+            target_link_libraries(test_engine_checkpoint PRIVATE hdf5::hdf5-static)
+        else()
+            target_link_libraries(test_engine_checkpoint PRIVATE ${HDF5_C_LIBRARIES})
+            target_include_directories(test_engine_checkpoint PRIVATE ${HDF5_INCLUDE_DIRS})
+        endif()
+    endif()
     # E2 (2026-09-07) — TransportPolicy (Domain x Species matrix),
     # swmm_get_transport_matrix, the .rpt matrix block and the [2D_OPTIONS]
     # process keys (TRANSPORT_*, INFILTRATION, INFIL_STEP alias,
@@ -897,6 +910,7 @@ if(OPENSWMM_BUILD_2D)
     add_gtest_unit(test_engine_surface_exchange test_surface_exchange.cpp)
     add_gtest_unit(test_engine_source_clock_groups test_source_clock_groups.cpp)
     add_gtest_unit(test_engine_source_water_driver test_source_water_driver.cpp)
+    add_gtest_unit(test_engine_source_water_delivery_bridge test_source_water_delivery_bridge.cpp)
     add_gtest_unit(test_engine_common_source_stage test_common_source_stage.cpp)
     add_gtest_unit(test_engine_sigma_conservation test_sigma_conservation.cpp)
     target_compile_definitions(test_engine_common_source_stage PRIVATE OPENSWMM_R4_STAGE_OUT="${PROJECT_SOURCE_DIR}/tests/verification/surface_r4_stage_2026-10-06/models")
@@ -916,6 +930,7 @@ if(OPENSWMM_BUILD_2D)
     # of the transport matrix. Decks under tests/output/gw_transport_kernel.
     add_gtest_unit(test_engine_gw_source_forcing test_gw_source_forcing.cpp)
     add_gtest_unit(test_engine_runtime_coupling_api test_runtime_coupling_api.cpp)
+    add_gtest_unit(test_engine_runtime_water_checkpoint test_runtime_water_checkpoint.cpp)
     add_gtest_unit(test_engine_gw_transport_kernel test_gw_transport_kernel.cpp)
     target_compile_definitions(test_engine_gw_transport_kernel PRIVATE
         OPENSWMM_GW_TEST_OUT_DIR="${PROJECT_SOURCE_DIR}/tests/output")

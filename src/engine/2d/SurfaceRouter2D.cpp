@@ -8,6 +8,7 @@
 
 #include "SurfaceRouter2D.hpp"
 #include "../hydrology/LidNode.hpp"
+#include "../hydraulics/Routing.hpp"
 #include "gw/GwSourceResolver.hpp"
 #include "mesh/MeshBuilder.hpp"
 #include "mesh/VertexReconstruction.hpp"
@@ -15,6 +16,7 @@
 #include "mesh/QuadVfr.hpp"
 #include "solver/SurfaceFluxCalculator.hpp"
 #include "solver/ExplicitInertialSolver.hpp"
+#include "subsurface/CommonSourceStage.hpp"
 #ifdef OPENSWMM_HAS_2D
 #include "solver/SurfaceSolverFactory.hpp"
 #include "uncertainty/CorrelatedFieldGenerator.hpp"
@@ -206,6 +208,11 @@ void SurfaceRouter2D::prepareForEdit() {
 }
 
 void SurfaceRouter2D::initialize(SimulationContext& ctx) {
+    common_stage_ = nullptr;
+    source_context_ = nullptr;
+    joint_hydraulic_ = nullptr;
+    source_router_model_.clear();
+    source_boundary_ready_ = false;
     if(!aquifer_cfg_.surface_owners.empty())
         throw std::runtime_error("[2D_SURFACE_OWNERSHIP] Reviewed authoring is available; runtime recharge is unavailable until the R4 completed-interval water/quality/ET adapter is qualified. Remove ownership records to run the existing formulation.");
     ctx.surface_outfall_link_limit.clear();
@@ -1409,6 +1416,12 @@ void SurfaceRouter2D::step(SimulationContext& ctx, double dt, double t) {
 
 void SurfaceRouter2D::updateOutfallsPreRouting(SimulationContext& ctx, double dt) {
     if (!active_) return;
+    if (joint_hydraulic_ && !outfall_exchange_.points_.empty() &&
+        (!source_boundary_ready_ || outfall_exchange_.prepared_ || !std::isfinite(dt) || dt <= 0 ||
+         joint_hydraulic_->checkpoint_context_ != &ctx || !joint_hydraulic_->checkpoint_prepared_ ||
+         joint_hydraulic_->checkpoint_time_ != ctx.current_time ||
+         joint_hydraulic_->checkpoint_step_end_ != ctx.current_time + dt))
+        throw std::invalid_argument("Joint outfall preparation requires its tracked hydraulic interval and an unused reservation.");
     updateOutfallBoundaries(coupling_points_, mesh_, state_, ctx, options_);
     outfall_exchange_.prepare(mesh_, state_, options_, ctx, dt);
 }
@@ -1433,12 +1446,15 @@ void SurfaceRouter2D::refreshRenderFields() {
                                   options_.num_threads, render_eta_);
     co_render_elapsed_ = 0.0;
     render_dirty_      = false;
+    if (common_stage_)
+        static_cast<ExplicitInertialSolver*>(solver_.get())->refreshSourceResultBoundary();
 }
 
 
 void SurfaceRouter2D::coAdvanceStep(SimulationContext& ctx, double dt,
                                     double t) {
     if (dt <= 0.0) return;
+    if (common_stage_) source_boundary_ready_ = false;
     perf::ScopedTimer tm_window(perf::sec_2d_window);
     // Report-time blend: when this batch reaches/crosses the next report
     // instant, capture the batch-start depth/head as the blend's old side
@@ -1582,7 +1598,9 @@ void SurfaceRouter2D::coAdvanceStep(SimulationContext& ctx, double dt,
                 report_rain_cum_[i] = state_.rainfall_force_val[i] * span;
             else if (state_.rainfall_forced[i] == 2)
                 report_rain_cum_[i] += state_.rainfall_force_val[i] * span;
-            report_rain_cum_[i] = rain_cum_[i] + report_rain_cum_[i] * mesh_.tri_area[i];
+            const double area = common_stage_ ? common_stage_->meshWeatherArea(int(i)) : mesh_.tri_area[i];
+            if (common_stage_) report_rain_cum_[i] = std::max(0.0, report_rain_cum_[i]);
+            report_rain_cum_[i] = rain_cum_[i] + report_rain_cum_[i] * area;
         }
         report_rain_ms_ = ctx.next_report_ms;
     }
@@ -1599,7 +1617,7 @@ void SurfaceRouter2D::coAdvanceStep(SimulationContext& ctx, double dt,
         infil_elapsed_ += dt;
         if (infil_elapsed_ >= infil_.stepSeconds()) {
             infil_.updateRates(mesh_, state_, infil_elapsed_, surface::infiltrationFactors(ctx, t));
-            if (subsurface_.active()) subsurface_.publishInfiltration(state_, infil_.stepSeconds(), t);
+            if (subsurface_.active()) subsurface_.publishInfiltration(state_, infil_.stepSeconds(), common_stage_ ? sim_time_ : t);
             infil_elapsed_ = 0.0;
         }
     }
@@ -1654,6 +1672,10 @@ void SurfaceRouter2D::coAdvanceStep(SimulationContext& ctx, double dt,
     // uniform rate over the batch span instead of a single-step pulse —
     // cleared then accumulated so points sharing a node sum correctly.
     const std::vector<double>& exch = solver_->last_coupling_exchange();
+    if (common_stage_) {
+        for (std::size_t k=0; k<exch.size(); ++k)
+            coupling_cum_applied_[static_cast<std::size_t>(node_coupling_points_[k].cell_idx)] -= exch[k];
+    }
     if (!exch.empty()) {
         for (const auto& cp : node_coupling_points_)
             ctx.nodes.coupling_volume[static_cast<std::size_t>(cp.node_idx)] =
@@ -1848,6 +1870,10 @@ void SurfaceRouter2D::coAdvanceStep(SimulationContext& ctx, double dt,
                                               ? ctx.options.report_step
                                               : 30.0);
     if (co_render_elapsed_ >= render_dt) refreshRenderFields();
+    if (common_stage_) {
+        static_cast<ExplicitInertialSolver*>(solver_.get())->refreshSourceResultBoundary();
+        source_boundary_ready_ = true;
+    }
 }
 
 
@@ -2482,15 +2508,53 @@ void SurfaceRouter2D::advanceROM(SimulationContext& ctx, double dt) {
 #endif // OPENSWMM_HAS_2D
 
 
+double SurfaceRouter2D::couplingSyncSpan(const SimulationContext& ctx,const SolverOptions2D& options) {
+    // OPENSWMM_2D_SYNC_SPAN (seconds): experimental override of the sync-batch
+    // span for the decoupling-viability study — bypasses the [2D_OPTIONS]
+    // COUPLING_SYNC policy and the 60 s ceiling. Unset/0 = normal policy.
+    static const double env_span = [] {
+        const char* e = std::getenv("OPENSWMM_2D_SYNC_SPAN");
+        return e ? std::atof(e) : 0.0;
+    }();
+    // Default: couple every routing step. Exchange volumes booked in a batch
+    // reach the 1D spread over the FOLLOWING span, so the exchange feedback
+    // is delayed by one batch — on fill-and-spill coupling (weir/culvert
+    // ponds) any multi-step span turns that delay into a standing overshoot-
+    // and-correct oscillation (sawtooth pond depths, incoherent velocities;
+    // road_culvert rang at TV/range ≈ 11 with the previous
+    // MAX_TIMESTEP-derived 10 s span, ≈ 3 when coupled per routing step).
+    // COUPLING_SYNC > 0 opts back into batching for large meshes where the
+    // per-step advance overhead dominates.
+    return env_span > 0.0
+        ? std::max(env_span, ctx.options.routing_step)
+        : (options.coupling_sync > 0.0
+               ? std::clamp(options.coupling_sync, ctx.options.routing_step,
+                            60.0)
+               : ctx.options.routing_step);
+}
+
 void SurfaceRouter2D::advancePostRouting(SimulationContext& ctx, double routing_dt,
                                           double t) {
     if (!active_) return;
+    if (common_stage_) {
+        const double start = sim_time_ + pending_dt_;
+        if (!source_boundary_ready_ || &ctx != source_context_ || !std::isfinite(t) ||
+            !std::isfinite(routing_dt) || routing_dt <= 0 || !std::isfinite(start + routing_dt) ||
+            start + routing_dt <= start || std::abs(t - start) > 1e-12 * std::max(1.0, start))
+            throw std::invalid_argument("Common-source router requires the next accepted routing interval.");
+        checkJointRoutingStep(ctx, routing_dt, t);
+        if (joint_hydraulic_ && !outfall_exchange_.points_.empty() &&
+            (!outfall_exchange_.prepared_ || outfall_exchange_.prepared_dt_ != routing_dt))
+            throw std::invalid_argument("Joint outfall advance requires its matching pre-routing reservation.");
+        source_boundary_ready_ = false;
+    }
     // Consume only the accepted hydraulic exchange, against reservations
     // made before the 1D solve. This also preserves every sample in a batch.
     publishNodeRows(ctx);
     outfall_state_changed_ = outfall_exchange_.apply(
         mesh_, state_, options_, ctx, routing_dt, window_outfall_accum_,
-        node_row_conc_.empty() ? nullptr : &node_row_conc_) || outfall_state_changed_;
+        node_row_conc_.empty() ? nullptr : &node_row_conc_,
+        common_stage_ ? &coupling_cum_applied_ : nullptr) || outfall_state_changed_;
 
 
     // Windowless co-advance: live in-marcher exchange, no CFL clamp on the
@@ -2547,43 +2611,36 @@ void SurfaceRouter2D::advancePostRouting(SimulationContext& ctx, double routing_
         // this step's exchange has been handed over.
         if (two_way) publishLinkCoupling(ctx);
     }
-    // OPENSWMM_2D_SYNC_SPAN (seconds): experimental override of the sync-batch
-    // span for the decoupling-viability study — bypasses the [2D_OPTIONS]
-    // COUPLING_SYNC policy and the 60 s ceiling. Unset/0 = normal policy.
-    static const double env_span = [] {
-        const char* e = std::getenv("OPENSWMM_2D_SYNC_SPAN");
-        return e ? std::atof(e) : 0.0;
-    }();
-    // Default: couple every routing step. Exchange volumes booked in a batch
-    // reach the 1D spread over the FOLLOWING span, so the exchange feedback
-    // is delayed by one batch — on fill-and-spill coupling (weir/culvert
-    // ponds) any multi-step span turns that delay into a standing overshoot-
-    // and-correct oscillation (sawtooth pond depths, incoherent velocities;
-    // road_culvert rang at TV/range ≈ 11 with the previous
-    // MAX_TIMESTEP-derived 10 s span, ≈ 3 when coupled per routing step).
-    // COUPLING_SYNC > 0 opts back into batching for large meshes where the
-    // per-step advance overhead dominates.
-    const double sync = env_span > 0.0
-        ? std::max(env_span, ctx.options.routing_step)
-        : (options_.coupling_sync > 0.0
-               ? std::clamp(options_.coupling_sync, ctx.options.routing_step,
-                            60.0)
-               : ctx.options.routing_step);
+    const double sync = couplingSyncSpan(ctx, options_);
     if (pending_dt_ + 0.5 * routing_dt >= sync) {
         const double span = pending_dt_;
         pending_dt_ = 0.0;
         coAdvanceStep(ctx, span, t);
     }
+    if (common_stage_) source_boundary_ready_ = true;
 }
 
 
 void SurfaceRouter2D::flushPendingBatch(SimulationContext& ctx) {
     if (!active_) return;
+    if (common_stage_ && (!source_boundary_ready_ || &ctx != source_context_))
+        throw std::invalid_argument("Common-source router has no completed boundary to flush.");
     if (pending_dt_ > 0.0) {
         const double span = pending_dt_;
         pending_dt_ = 0.0;
         coAdvanceStep(ctx, span, last_t_);
     }
+}
+
+bool SurfaceRouter2D::runtimeWaterCheckpointing() const noexcept {
+    return common_stage_ && common_stage_->runtimeWaterEnabled();
+}
+bool SurfaceRouter2D::runtimeBoundaryCheckpointing() const noexcept {
+    return common_stage_ && common_stage_->runtimeBoundariesEnabled();
+}
+std::string SurfaceRouter2D::validateRuntimeWater(const RuntimeSources& surface,const RuntimeSources& groundwater,
+    const RuntimeForcings& forcing,double time,const BoundaryData* boundary) const {
+    return common_stage_ ? common_stage_->validateRuntimeWater(surface,groundwater,forcing,time,boundary) : std::string{};
 }
 
 
@@ -2690,6 +2747,7 @@ void SurfaceRouter2D::applyAgingAndReactions(SimulationContext& ctx, double dt) 
 
 void SurfaceRouter2D::resetWindowAccumulators() {
     std::fill(window_outfall_accum_.begin(), window_outfall_accum_.end(), 0.0);
+    outfall_exchange_.resetWindow();
 
 }
 
@@ -2740,6 +2798,10 @@ void SurfaceRouter2D::finalize(SimulationContext& ctx) {
         ctx.warnings.push_back(buf);
     }
     active_ = false;
+    common_stage_ = nullptr;
+    source_context_ = nullptr;
+    joint_hydraulic_ = nullptr;
+    source_boundary_ready_ = false;
 }
 
 
@@ -3351,7 +3413,7 @@ void SurfaceRouter2D::accumulateMassBalance(SimulationContext& ctx, double dt) {
     // total is bit-identical to the four separate passes this replaces; only
     // the memory traffic (four full sweeps of the same arrays per routing
     // step) is gone.
-    const bool do_infil = infil_.active();
+    const bool do_infil = infil_.active() || common_stage_;
     const bool track_cum =
         do_infil && infil_cum_applied_.size() == static_cast<std::size_t>(nt);
     double rain_vol = 0.0, evap_vol = 0.0, infil_vol = 0.0, storage = 0.0;
@@ -3361,8 +3423,10 @@ void SurfaceRouter2D::accumulateMassBalance(SimulationContext& ctx, double dt) {
     for (int i = 0; i < nt; ++i) {
         const auto ui = static_cast<std::size_t>(i);
         const double area = mesh_.tri_area[ui];
-        rain_vol += state_.rainfall[ui] * area;
-        rain_cum_[ui] += state_.rainfall[ui] * area * dt;
+        const double weather_area = common_stage_ ? common_stage_->meshWeatherArea(i) : area;
+        const double rain_rate = common_stage_ ? std::max(0.0, state_.runtime_forcings.rate(1,i,state_.rainfall[ui])) : state_.rainfall[ui];
+        rain_vol += rain_rate * weather_area;
+        rain_cum_[ui] += rain_rate * weather_area * dt;
         evap_vol += evapSink(state_.evap_rate[ui], state_.depth[ui],
                              options_.dry_depth) * area;
         if (do_infil) {
@@ -3391,14 +3455,16 @@ void SurfaceRouter2D::accumulateMassBalance(SimulationContext& ctx, double dt) {
         // per-cell and signed because the domain totals are two unsigned
         // accumulators that cancel a flip-flopping point to nothing.
         if (coupling_cum_applied_.size() == static_cast<std::size_t>(nt)) {
-            coupling_cum_applied_[ui] += state_.coupling_applied[ui];
+            // Managed returns have their own aquifer ledger, not a 1D spill.
+            if (!common_stage_) coupling_cum_applied_[ui] += state_.coupling_applied[ui];
             state_.coupling_applied[ui] = 0.0;
         }
         storage += state_.volume[ui];
     }
 
     // Rainfall inflow (m³): rainfall is m/s after forcings are applied.
-    mb.rainfall_in += rain_vol * dt;
+    if (common_stage_) mb.rainfall_in = common_stage_->meshRain();
+    else mb.rainfall_in += rain_vol * dt;
 
     // The CPU marcher records the applied evaporation after sharing the
     // cell's finite water budget. Re-evaluating at the final depth misses
@@ -3461,7 +3527,7 @@ void SurfaceRouter2D::accumulateMassBalance(SimulationContext& ctx, double dt) {
         const auto& gws = subsurface_.state();
         double pending = 0.0;
         for (const double v : gws.xacc_to_surface) pending += v;
-        mb.aquifer_in = gws.led_dunne - pending;
+        mb.aquifer_in = common_stage_ ? common_stage_->meshReturn() : gws.led_dunne - pending;
     }
 
     // Coupling and outfall exchange (m³, SI-native, already capped/clamped —

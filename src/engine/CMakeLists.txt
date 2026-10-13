@@ -546,6 +546,7 @@ if(OPENSWMM_BUILD_2D)
         2d/coupling/*.cpp
         2d/input/*.cpp
         2d/SurfaceRouter2D.cpp
+        2d/SurfaceRouterCheckpoint.cpp
         2d/api/*.cpp
     )
 
@@ -553,6 +554,7 @@ if(OPENSWMM_BUILD_2D)
     # CSR layout.
     list(APPEND OPENSWMM_2D_SOURCES 2d/solver/InertialEdges.cpp)
     list(APPEND OPENSWMM_2D_SOURCES 2d/solver/ExplicitInertialSolver.cpp)
+    list(APPEND OPENSWMM_2D_SOURCES 2d/solver/ExplicitInertialCheckpoint.cpp)
 
     # Runtime backend selector (dlopen of the optional GPU plugin; serial CPU
     # fallback). Lives in the core — it owns the CPU↔plugin decision — but
@@ -565,7 +567,8 @@ if(OPENSWMM_BUILD_2D)
     # WebAssembly build does): OUTPUT_FILE is then ignored with a warning and
     # results are read through the swmm_2d_* API.
     if(OPENSWMM_2D_HDF5_OUTPUT)
-        list(APPEND OPENSWMM_2D_SOURCES 2d/output/Default2DOutputPlugin.cpp)
+        list(APPEND OPENSWMM_2D_SOURCES 2d/output/Default2DOutputPlugin.cpp
+            2d/output/Default2DOutputCheckpoint.cpp)
     endif()
     # Surface uncertainty ROM: the mesh eigenbasis it projects onto, the
     # deviation-form ensemble integrator itself, and the correlated-field

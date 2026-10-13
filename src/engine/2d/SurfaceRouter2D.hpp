@@ -57,6 +57,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <functional>
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -68,8 +70,11 @@
 #include "uncertainty/SpectralROM.hpp"
 #endif
 
+namespace openswmm::runoff { class SourceWaterDriver; }
 namespace openswmm {
 struct SimulationContext;
+class Router;
+class SWMMEngine;
 }
 
 // Forward declarations — the 2D ROM holds a non-owning pointer to the 1D ROM
@@ -83,6 +88,8 @@ enum class GridMapping : int8_t;
 }
 
 namespace openswmm::twoD {
+class CommonSourceStage;
+class SourceResultHistory;
 
 /**
  * @brief Top-level orchestrator for the 2D surface routing module.
@@ -107,6 +114,19 @@ public:
      * @param ctx Simulation context (must have mesh_2d populated from parsing).
      */
     void initialize(SimulationContext& ctx);
+    /// Internal qualification hook: externally owned stage, all cells managed,
+    /// wall boundaries, no live 1D exchanges. Does not activate authored ownership.
+    void setCommonSourceStage(SimulationContext& ctx, CommonSourceStage& stage);
+    /// Internal water-only joint DW/source checkpoint, including non-outfall
+    /// surface exchange and pending node delivery. Attach after both routers
+    /// and LID initialization; the hydraulic router must track accepted steps.
+    /// External providers, node beds and whole-engine/output state remain excluded.
+    void setJointSourceStage(SimulationContext& ctx, CommonSourceStage& stage, Router& hydraulic);
+    void setSourceResultHistory(SourceResultHistory& history);
+    void resumeSourceResultHistory(SourceResultHistory& history);
+    /// Internal router/CPU/source boundary; not a full-project hotstart.
+    std::string saveCheckpoint(const SimulationContext& ctx, const std::string& path) const;
+    std::string loadCheckpoint(SimulationContext& ctx, const std::string& path);
 
     /**
      * @brief Advance the 2D surface routing by one SWMM routing step.
@@ -272,6 +292,10 @@ public:
     /// rebuilt before it is next used.
     bool runtimeCpuAvailable() const noexcept;
     RuntimeSources& runtimeSources() noexcept { return state_.runtime_sources; }
+    bool commonSourceAttached() const noexcept { return common_stage_!=nullptr; }
+    bool runtimeWaterCheckpointing() const noexcept;
+    bool runtimeBoundaryCheckpointing() const noexcept;
+    std::string validateRuntimeWater(const RuntimeSources&,const RuntimeSources&,const RuntimeForcings&,double time,const BoundaryData* boundary=nullptr) const;
     bool runtimeActive() const noexcept {
         return state_.runtime_sources.active() || subsurface_.runtimeSources().active() ||
                !boundary_.runtime_original.empty() || state_.runtime_forcings.active();
@@ -574,6 +598,25 @@ public:
 #endif
 
 private:
+    friend class openswmm::SWMMEngine;
+    struct RestartState;
+    std::string checkpointBytes(const SimulationContext&, std::string&) const;
+    std::string loadCheckpointBytes(SimulationContext&, std::string,
+        const std::array<double,6>* engine_boundary = nullptr,
+        const std::vector<double>* engine_rainfall = nullptr,
+        const double* engine_storage = nullptr, bool engine_routed = false,
+        const std::function<void(const runoff::SourceWaterDriver&)>* validate_source = nullptr,
+        const std::function<void()>* before_install = nullptr);
+    void attachCommonSourceStage(SimulationContext&, CommonSourceStage&, Router*);
+    void checkJointRoutingStep(const SimulationContext&, double dt, double start) const;
+    Router* joint_hydraulic_ = nullptr; // externally owned, stable lifetime
+    static double couplingSyncSpan(const SimulationContext&, const SolverOptions2D&);
+    CommonSourceStage* common_stage_ = nullptr;
+    SimulationContext* source_context_ = nullptr;
+    std::string source_router_model_;
+    bool source_boundary_ready_ = false;
+    std::string sourceBoundary(const SimulationContext& ctx) const;
+    std::string sourceRouterModel(const SimulationContext& ctx) const;
     /// Drain pending [2D_BOUNDARY_CONDITIONS] / [2D_EDGE_CONVEYANCE] rows into
     /// BoundaryData / mesh edge slots and flip pending_rows_drained. Shared by
     /// initialize() and prepareForEdit(); idempotent.
