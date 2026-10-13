@@ -1151,3 +1151,31 @@ TEST(SwmmEngine1DRomLifecycle, DirectionalOperatorDisabledLeavesDiagonalPath) {
     swmm_engine_close(eng);
     swmm_engine_destroy(eng);
 }
+
+// swmm6_rel engine checkpoints (2026-10) do not carry the uncertainty
+// sidecar's ensemble state. Enabling one with the sidecar active must be
+// refused with the reason, not resume later with every band reset to zero.
+TEST(SwmmEngine1DRomLifecycle, CheckpointIsRefusedWhileTheSidecarRuns) {
+    const fs::path dir = fs::current_path() / "1d_rom_lifecycle_out";
+    fs::create_directories(dir);
+    for (const bool with_rom : {false, true}) {
+        const std::string tag = with_rom ? "ckpt_rom" : "ckpt_plain";
+        { std::ofstream f(dir / (tag + ".inp"));
+          f << buildChainModel(with_rom ? "\n[UNCERTAINTY]\n1D MANNINGS_N 0.20\n" : ""); }
+        SWMM_Engine h = swmm_engine_create();
+        ASSERT_EQ(swmm_engine_open(h, (dir / (tag + ".inp")).string().c_str(),
+                                   (dir / (tag + ".rpt")).string().c_str(), nullptr, nullptr), SWMM_OK);
+        ASSERT_EQ(swmm_engine_initialize(h), SWMM_OK);
+        ASSERT_EQ(swmm_engine_start(h, 0), SWMM_OK);
+        auto* e = static_cast<openswmm::SWMMEngine*>(h);
+        const std::string err = e->enableCheckpointing();
+        if (with_rom) {
+            EXPECT_NE(err.find("uncertainty-sidecar"), std::string::npos) << "got: " << err;
+        } else {
+            EXPECT_EQ(err.find("uncertainty-sidecar"), std::string::npos) << "got: " << err;
+        }
+        swmm_engine_end(h);
+        swmm_engine_close(h);
+        swmm_engine_destroy(h);
+    }
+}

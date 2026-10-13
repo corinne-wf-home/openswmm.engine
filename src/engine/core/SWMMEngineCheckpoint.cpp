@@ -465,6 +465,15 @@ void SWMMEngine::checkCheckpointProfile(bool attaching_surface) const {
     require(ctx_.rdii_assigns.count()==0 && !ctx_.files.has_any() &&
             !runoff_iface_file_ && ctx_.process_component_specs.empty(),
             "Engine checkpoint does not recover RDII, interface files, providers or process components.");
+    // Uncertainty sidecar (1D/2D ROMs, water-quality bands): its ensemble
+    // state is not part of the checkpoint, so a resumed run would restart
+    // every band from zero. Refuse rather than resume silently wrong.
+    require(!rom1d_ && !wq_unc_active_
+#ifdef OPENSWMM_HAS_2D
+            && !surface_router_.rom()
+#endif
+            , "Engine checkpoint does not yet recover uncertainty-sidecar state "
+              "([UNCERTAINTY], [2D_ROM], [SOFT_RAINGAGES]).");
 #ifdef OPENSWMM_HAS_2D
     require(!ctx_.runtime_coupling_used || surface_router_.runtimeWaterCheckpointing(),
             "Engine checkpoint runtime providers require their initial mesh water profile.");

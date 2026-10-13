@@ -1525,6 +1525,11 @@ xarray as a supplementary group.
     network relaxation rate is too slow where FV's steep reaches drain quickly. Use dynamic
     wave when you need calibrated bands. VALIDATION.md "H17 §12".
 
+10b. **Engine checkpoints are refused while uncertainty runs.** The engine's checkpoint/restart
+    does not yet save the sidecar's ensemble, so enabling a checkpoint with `[UNCERTAINTY]`,
+    `[2D_ROM]` or soft rainfall active returns an error, instead of resuming later with every
+    band reset to zero.
+
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from
     0.009 — effectively unrepresented — to 1.354 (1.295 after the 2026-10-04 metric correction, member coverage 0.83), comfortably within the acceptance band) but is

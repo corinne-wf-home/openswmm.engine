@@ -3229,6 +3229,15 @@ Two causes were measured:
   Projecting a non-symmetric operator on the symmetric basis is unstable
   (bands to 1e33), as the 2D similarity transform was. Removed.
 
+**Engine checkpoints.** swmm6_rel's new engine checkpoint/restart does not
+carry the sidecar's ensemble state. A resumed run would restart every band
+from zero. Following upstream's own pattern (each unsupported feature is
+refused with the reason), enabling a checkpoint while the 1D or 2D ROM or the
+water-quality bands are active is now refused: "Engine checkpoint does not yet
+recover uncertainty-sidecar state". `test_engine_checkpoint` itself passes per
+test but runs past 90 minutes in Debug, so the full suite reports it as a
+timeout. Without an `[UNCERTAINTY]` section none of the sidecar code runs.
+
 **The real fix is one rate per mode, not one per network:** build the basis
 from the generalized problem L v = λ S v, a conductance Laplacian with node
 storage. Each mode then carries its physical rate in 1/s, and the projection
