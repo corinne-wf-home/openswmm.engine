@@ -58,8 +58,13 @@ struct FlowEdge {
 
 /// Fill phi (size n) from the oriented edge list. Returns the number of
 /// Gauss-Seidel passes used (1 on a dendritic network).
+///
+/// `pinned` (optional, size n): nodes whose head cannot move -- a junction
+/// overflowing at its rim, where surplus water spills -- get phi = 0, like an
+/// outfall, and relay nothing upstream.
 inline int solveFlowResponse(int n, const std::vector<FlowEdge>& edges,
-                             std::vector<double>& phi, int max_passes = 50) {
+                             std::vector<double>& phi, int max_passes = 50,
+                             const std::vector<char>* pinned = nullptr) {
     const auto un = static_cast<std::size_t>(std::max(n, 0));
     phi.assign(un, 0.0);
     if (n <= 0) return 0;
@@ -78,6 +83,8 @@ inline int solveFlowResponse(int n, const std::vector<FlowEdge>& edges,
         }
     }
     auto update = [&](int i) -> double {
+        if (pinned && static_cast<std::size_t>(i) < pinned->size() && (*pinned)[static_cast<std::size_t>(i)])
+            return 0.0;
         double num = 0.0, den = 0.0;
         for (int p = start[static_cast<std::size_t>(i)]; p < start[static_cast<std::size_t>(i) + 1]; ++p) {
             const auto& e = edges[static_cast<std::size_t>(out[static_cast<std::size_t>(p)])];

@@ -212,7 +212,15 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     const std::string rpt_path = pfx + ".rpt";
     {
         std::ofstream f(inp_path);
-        f << inp_text;
+        // H17_ROUTING=FV runs every fixture (MC members and ROM) under the
+        // explicit finite-volume solver instead of dynamic wave.
+        std::string txt = inp_text;
+        if (const char* r = std::getenv("H17_ROUTING")) {
+            const std::string key = "FLOW_ROUTING         DYNWAVE";
+            const auto pos = txt.find(key);
+            if (pos != std::string::npos) txt.replace(pos, key.size(), std::string("FLOW_ROUTING         ") + r);
+        }
+        f << txt;
     }
 
     SWMM_Engine handle = swmm_engine_create();
@@ -237,6 +245,8 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     if (!phase_enabled) {
         static_cast<openswmm::SWMMEngine*>(handle)->rom1dPhaseConfig().enabled = false;
     }
+        if (const char* k = std::getenv("H17_ADV")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dAdvective() = std::atoi(k) != 0;
+        if (const char* k = std::getenv("H17_K1D_SCALE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dScale() = std::atof(k);
         if (const char* q = std::getenv("H17_QSR")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dQuasiStatic() = std::atoi(q) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {

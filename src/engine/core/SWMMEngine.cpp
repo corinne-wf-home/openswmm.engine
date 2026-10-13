@@ -5368,18 +5368,20 @@ void SWMMEngine::stepRouting(double dt_routing) {
     //       run, so no reseeding is ever needed and spread is never
     //       collapsed).
     if (rom1d_ && rom1d_->is_ready()) {
-        // Warm-start eigenbasis re-solve from the live DYNWAVE Jacobian.
-        if (router_.dwSolver().isHSnapshotValid()) {
-            const auto snap = router_.dwSolver().lastConvergedH();
-            const int n_edges = rom1dEdgesFromSnapshot(snap);   // PR H17: conduits + structures
+        // Warm-start eigenbasis re-solve from the live operator (dynamic-wave
+        // snapshot, or the same quantities derived from state under FV).
+        {
+            const double* fr = nullptr;
+            const std::uint8_t* surch = nullptr;
+            const int n_edges = rom1dRegime(dt_routing, &fr, &surch);   // conduits + structures
             if (n_edges > 0)
                 rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
                                     rom1d_edge_n2_.data(), n_edges, ctx_.current_time,
-                                    snap.node_surcharged);
+                                    surch);
         }
         // PR H14: Froude-gated directional operator from the same snapshot
         // (after updateBasis, which clears any operator projected on the old P).
-        refreshRom1dDirectionalOperator();
+        refreshRom1dDirectionalOperator(dt_routing);
         const double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
         rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
 
@@ -6663,7 +6665,16 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                     rom1d_active_map_[static_cast<std::size_t>(ai)]);
                 rom1d_h_buf_[static_cast<std::size_t>(ai)] = ctx_.nodes.head[ui];
             }
-            rom1d_->computeQuantiles(rom1d_h_buf_.data(), rom1d_invert_buf_.data());
+            // The member floor is the node invert, but never above the
+            // deterministic head: FLOW_ROUTING FV can publish an upstream
+            // node's head below its invert (the first cell inside a steep
+            // pipe), and clamping there would collapse the band to a point
+            // above the deterministic value. Under dynamic wave head >= invert,
+            // so this is the invert exactly.
+            rom1d_floor_buf_.resize(rom1d_invert_buf_.size());
+            for (std::size_t a = 0; a < rom1d_invert_buf_.size(); ++a)
+                rom1d_floor_buf_[a] = std::min(rom1d_invert_buf_[a], rom1d_h_buf_[a]);
+            rom1d_->computeQuantiles(rom1d_h_buf_.data(), rom1d_floor_buf_.data());
 
             // PR H3: H_skew trust diagnostic. The Picard operator carries one
             // dqdh per link applied antisymmetrically, so the assembled H is
@@ -11729,6 +11740,15 @@ void SWMMEngine::buildROM1D() noexcept {
     rom1d_->seed(h0.data());
 
     rom1d_->quasi_static_residual = rom1d_qsr_;   // H17: on by default
+    // FLOW_ROUTING FV (2026-10-13): the sidecar runs, with its regime inputs
+    // derived from the published state, but its bands have not been
+    // calibrated against Monte Carlo under FV. Say so in the report.
+    if (ctx_.options.routing_model == RoutingModel::FV) {
+        push_report_warning(
+            "WARNING: 1D uncertainty bands under FLOW_ROUTING FV are not yet "
+            "validated against Monte Carlo; read them as a ranking, not as "
+            "probability intervals (docs/uncertainty/VALIDATION.md, H17 FV).", 0);
+    }
 
     // Forward to the 2D module so per-member coupling heads can be read at
     // shared nodes (SpectralROM::applyCouplingFlux -> reconstructHead). A
@@ -11878,6 +11898,7 @@ void SWMMEngine::buildRom1dThresholds() noexcept {
 // ============================================================================
 
 double SWMMEngine::computeK1d() noexcept {
+    if (rom1d_k1d_advective_) ensureXspCache();
     // Diffusion-wave diffusivity D = PHI * h^(5/3) / (2n*sqrt(S))  [ft^2/s].
     // GraphEigenBasis eigenvalues are dimensionless (topological, not spatial):
     // the weighted Laplacian built in buildROM1D()/updateBasis() is normalized
@@ -11909,14 +11930,29 @@ double SWMMEngine::computeK1d() noexcept {
         const auto ucr = static_cast<std::size_t>(cr);
         const double n_rough = ctx_.link_subtypes.conduits.roughness[ucr];
         const double slope   = std::fabs(ctx_.link_subtypes.conduits.slope[ucr]);
-        const double h       = ctx_.nodes.depth[static_cast<std::size_t>(ctx_.links.node1[uj])];
+        double h = ctx_.nodes.depth[static_cast<std::size_t>(ctx_.links.node1[uj])];
+        // FLOW_ROUTING FV can publish an upstream node head below the node's
+        // own invert (first cell inside a steep pipe): use the conduit's
+        // published depth when the node gives none.
+        if (!(h >= 1e-6)) h = ctx_.links.depth[uj];
         const double L       = ctx_.link_subtypes.conduits.mod_length[ucr] > 0.0
                                  ? ctx_.link_subtypes.conduits.mod_length[ucr]
                                  : ctx_.link_subtypes.conduits.length[ucr];
         if (n_rough <= 0.0 || slope <= 0.0 || h < 1e-6 || L <= 0.0) continue;
         const double D = constants::PHI * std::pow(h, 5.0 / 3.0)
                           / (2.0 * n_rough * std::sqrt(slope));
-        sum_k += D / (L * L);
+        // A deviation relaxes by diffusion (D/L^2) or by being carried out of
+        // the reach at the kinematic celerity (5/3) v (L/c), whichever is
+        // faster. Diffusion alone misses the steep free-surface reaches,
+        // where advection dominates (H17, found under FLOW_ROUTING FV).
+        double adv = 0.0;
+        if (rom1d_k1d_advective_ && uj < xsp_cache_.size()) {
+            const double y = std::clamp(ctx_.links.depth[uj], 0.0, xsp_cache_[uj].y_full);
+            const double A = xsect::getAofY(xsp_cache_[uj], y);
+            const int nb = std::max(ctx_.link_subtypes.conduits.barrels[ucr], 1);
+            if (A > 1e-9) adv = (5.0 / 3.0) * std::fabs(ctx_.links.flow[uj]) / (A * nb) / L;
+        }
+        sum_k += std::max(D / (L * L), adv);
         ++cnt;
     }
     return cnt > 0 ? sum_k / cnt : 1e-4;
@@ -11985,6 +12021,11 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
         const double off = fwd ? links.offset1[uj] : links.offset2[uj];
         const double yfull = xs.y_full;
         double y = nodes.head[uup] - (nodes.invert_elev[uup] + off);
+        // A node head need not give a depth at the conduit's upstream end:
+        // FLOW_ROUTING FV publishes a piezometric head from the first cell
+        // inside the pipe, which on a steep reach lies below the node's own
+        // invert. Fall back to the conduit's published depth there.
+        if (!(y > 1.0e-3) && links.depth[uj] > 1.0e-3) y = links.depth[uj];
         y = std::clamp(y, 1.0e-3, yfull > 0.0 ? yfull : 1.0e-3);
         double kfac = 0.0;
         if (yfull > 0.0 && y < 0.999 * yfull) {
@@ -11993,12 +12034,49 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
             const double K = conveyance(xs, y);
             if (K > 0.0) kfac = std::max((conveyance(xs, yhi) - conveyance(xs, ylo)) / ((yhi - ylo) * K), 0.0);
         }
+        // Supercritical conduits do not feel their downstream head: the flow
+        // over a steep reach is set upstream, so a pool below it cannot push a
+        // response back up. Ramp the downstream relay out over the same
+        // Froude band the one-way operator (H14) uses, Froude taken at the
+        // published mid-conduit depth as the dynamic-wave solver does.
+        double relay = 1.0;
+        {
+            const double ym = std::clamp(links.depth[uj], 0.0, yfull > 0.0 ? yfull : links.depth[uj]);
+            const double Am = xsect::getAofY(xs, ym), Wm = xsect::getWofY(xs, ym);
+            const int crow = ctx_.link_subtypes.conduit_row(j);
+            const int nb = (crow >= 0) ? std::max(ctx_.link_subtypes.conduits.barrels[static_cast<std::size_t>(crow)], 1) : 1;
+            if (Am > 1.0e-9 && Wm > 1.0e-9 && ym < 0.999 * yfull) {
+                const double fr = (q / nb / Am) / std::sqrt(constants::GRAVITY * Am / Wm);
+                relay = 1.0 - uncertainty::upstreamGate(fr, rom1d_directional_cfg_);
+            }
+        }
         e.q  = q;
-        e.ju = q * (0.5 / dh + kfac);
-        e.jd = -q * 0.5 / dh;
+        // A supercritical reach's flow is set by its upstream depth alone (the
+        // kinematic limit): both head-gradient terms fade with the relay.
+        e.ju = q * (0.5 / dh * relay + kfac);
+        e.jd = -q * 0.5 / dh * relay;
+        // A pipe near capacity (conveyance no longer growing with depth) on a
+        // steep slope would read an unbounded free-surface response here.
+        // Such a pipe pressurizes instead, so it is bounded by the full-pipe
+        // form: twice its friction loss plus what lies downstream (Bellinge
+        // G70F142, 2026-10-13: 92 ft band against 0.27 ft in the Monte Carlo).
+        const double j_full = q * 0.5 / dh;
+        if (!(e.ju >= j_full)) {
+            e.ju = j_full;
+            e.jd = -j_full;
+        }
         edges.push_back(e);
     }
-    uncertainty::solveFlowResponse(na, edges, rom1d_fs_phi_);
+    // A node overflowing at its rim has its head pinned by the spill: no
+    // roughness change can raise it (2026-10-13: Bellinge G70F143 at its rim
+    // with zero Monte Carlo spread read 2x the drop below it, up to 106 ft).
+    rom1d_fs_pinned_.assign(static_cast<std::size_t>(na), 0);
+    for (int a = 0; a < na; ++a) {
+        const auto ui = static_cast<std::size_t>(rom1d_active_map_[static_cast<std::size_t>(a)]);
+        if (ui < ctx_.nodes.overflow.size() && ctx_.nodes.overflow[ui] > 0.0)
+            rom1d_fs_pinned_[static_cast<std::size_t>(a)] = 1;
+    }
+    uncertainty::solveFlowResponse(na, edges, rom1d_fs_phi_, 50, &rom1d_fs_pinned_);
     std::copy(rom1d_fs_phi_.begin(), rom1d_fs_phi_.end(), rom1d_sens_buf_.begin());
     return true;
 }
@@ -12048,6 +12126,82 @@ void SWMMEngine::refreshRom1dBandFlags() noexcept {
 }
 
 // ============================================================================
+// rom1dRegime() — solver-agnostic ROM regime inputs (H17, FV support)
+// ============================================================================
+//
+// The dynamic-wave solver publishes its Picard conductances, Froude numbers
+// and surcharge flags in a snapshot. Other routing methods (FLOW_ROUTING FV,
+// KINWAVE) do not, and the ROM then never updated its basis, lost the one-way
+// pump/supercritical operator and its surcharge trigger. Here the same three
+// quantities are derived from the published state -- link flow and depth,
+// node head -- with the dynamic-wave solver's own conduit formula
+//   dQ/dH = g dt A / (L (1 + dt g n^2 |v| / (PHI^2 R^(4/3))))  per barrel,
+// so a model gets the same kind of operator under either solver.
+int SWMMEngine::rom1dRegime(double dt, const double** link_froude,
+                            const std::uint8_t** surcharged) noexcept {
+    *link_froude = nullptr;
+    *surcharged  = nullptr;
+    if (router_.dwSolver().isHSnapshotValid()) {
+        const auto snap = router_.dwSolver().lastConvergedH();
+        *link_froude = snap.link_froude;
+        *surcharged  = snap.node_surcharged;
+        return rom1dEdgesFromSnapshot(snap);
+    }
+    if (!rom1d_ || dt <= 0.0) return 0;
+    const int ne = static_cast<int>(rom1d_conduit_link_.size());
+    if (ne <= 0) return 0;
+    ensureXspCache();
+    const auto& links = ctx_.links;
+    const auto& nodes = ctx_.nodes;
+    rom1d_edge_off_.assign(static_cast<std::size_t>(ne), 0.0);
+    rom1d_edge_n1_.assign(static_cast<std::size_t>(ne), -1);
+    rom1d_edge_n2_.assign(static_cast<std::size_t>(ne), -1);
+    rom1d_state_froude_.assign(static_cast<std::size_t>(ctx_.n_links()), 0.0);
+    for (int e = 0; e < ne; ++e) {
+        const auto ue = static_cast<std::size_t>(e);
+        const int j = rom1d_conduit_link_[ue];
+        const auto uj = static_cast<std::size_t>(j);
+        rom1d_edge_n1_[ue] = links.node1[uj];
+        rom1d_edge_n2_[ue] = links.node2[uj];
+        if (links.type[uj] != LinkType::CONDUIT) {
+            rom1d_edge_off_[ue] = 0.5 * dt * std::fabs(links.dqdh[uj]);
+            continue;
+        }
+        const int crow = ctx_.link_subtypes.conduit_row(j);
+        if (crow < 0 || uj >= xsp_cache_.size()) continue;
+        const auto ucr = static_cast<std::size_t>(crow);
+        const XSectParams& xs = xsp_cache_[uj];
+        const double y = std::clamp(links.depth[uj], 0.0, xs.y_full > 0.0 ? xs.y_full : links.depth[uj]);
+        const double A = xsect::getAofY(xs, y);
+        if (!(A > 1.0e-9)) continue;
+        const double R = xsect::getRofY(xs, y);
+        const double n = ctx_.link_subtypes.conduits.roughness[ucr];
+        double L = ctx_.link_subtypes.conduits.mod_length[ucr];
+        if (!(L > 0.0)) L = ctx_.link_subtypes.conduits.length[ucr];
+        if (!(L > 0.0) || !(R > 0.0)) continue;
+        const int nb = std::max(ctx_.link_subtypes.conduits.barrels[ucr], 1);
+        const double v = std::fabs(links.flow[uj]) / (A * nb);
+        const double g = constants::GRAVITY;
+        const double fric = dt * g * n * n * v / (constants::PHI * constants::PHI * std::pow(R, 4.0 / 3.0));
+        const double dqdh = g * dt * A * nb / (L * (1.0 + fric));
+        rom1d_edge_off_[ue] = 0.5 * dt * dqdh;
+        const double W = xsect::getWofY(xs, y);
+        if (W > 1.0e-9 && y < 0.999 * xs.y_full)
+            rom1d_state_froude_[uj] = v / std::sqrt(g * A / W);
+    }
+    rom1d_state_surch_.assign(static_cast<std::size_t>(ctx_.n_nodes()), 0);
+    for (int i = 0; i < ctx_.n_nodes(); ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        if (ui < nodes.crown_elev.size() && nodes.crown_elev[ui] > nodes.invert_elev[ui] &&
+            nodes.head[ui] > nodes.crown_elev[ui])
+            rom1d_state_surch_[ui] = 1;
+    }
+    *link_froude = rom1d_state_froude_.data();
+    *surcharged  = rom1d_state_surch_.data();
+    return ne;
+}
+
+// ============================================================================
 // rom1dEdgesFromSnapshot() — PR H17 conduit + structure edge view
 // ============================================================================
 
@@ -12079,15 +12233,15 @@ int SWMMEngine::rom1dEdgesFromSnapshot(const dynwave::HSnapshot& snap) noexcept 
 // refreshRom1dDirectionalOperator() — PR H14 Froude-gated directional operator
 // ============================================================================
 
-void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
+void SWMMEngine::refreshRom1dDirectionalOperator(double dt) noexcept {
     rom1d_dir_gated_frac_ = 0.0;
     if (!rom1d_ || !rom1d_->is_ready()) return;
     if (!rom1d_directional_cfg_.enabled) { rom1d_->clearReducedOperator(); return; }
-    if (!router_.dwSolver().isHSnapshotValid()) return;
-    const auto snap = router_.dwSolver().lastConvergedH();
-    if (snap.link_froude == nullptr) return;
-    const int nc = rom1dEdgesFromSnapshot(snap);   // PR H17: conduits + structures
-    if (nc <= 0) return;
+    const double* link_fr = nullptr;
+    const std::uint8_t* surch_unused = nullptr;
+    const int nc = rom1dRegime(dt, &link_fr, &surch_unused);   // conduits + structures
+    if (nc <= 0 || link_fr == nullptr) return;
+    const int n_fr_links = ctx_.n_links();
 
     const auto& f2a = rom1d_->full_to_active;
     rom1d_dir_a1_.resize(static_cast<std::size_t>(nc));
@@ -12126,7 +12280,7 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
         // order buildROM1D() collected conduits in (both walk links in index
         // order). If it ever does not, skip the gate rather than misattribute
         // a Froude number.
-        if (j < 0 || j >= n_links || j >= snap.n_links ||
+        if (j < 0 || j >= n_links || j >= n_fr_links ||
             ctx_.links.node1[static_cast<std::size_t>(j)] != n1) {
             rom1d_dir_sign_[uci] = 0;
             rom1d_dir_fr_[uci]   = 0.0;
@@ -12139,7 +12293,7 @@ void SWMMEngine::refreshRom1dDirectionalOperator() noexcept {
         // deviation back through it -- so it is always fully gated. Weirs,
         // orifices and outlets carry no Froude number and stay two-way.
         const LinkType lt = ctx_.links.type[static_cast<std::size_t>(j)];
-        rom1d_dir_fr_[uci]   = (lt == LinkType::CONDUIT) ? std::fabs(snap.link_froude[j])
+        rom1d_dir_fr_[uci]   = (lt == LinkType::CONDUIT) ? std::fabs(link_fr[j])
                              : (lt == LinkType::PUMP ? 1.0e3 : 0.0);
         // Drop gate input: water-surface drop across the conduit in units of
         // the UPSTREAM node's depth (oriented by flow sign). Outfall ends use

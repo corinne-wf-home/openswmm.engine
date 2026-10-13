@@ -620,6 +620,18 @@ private:
     /// Fill rom1d_edge_* from a snapshot. Returns the edge count, or 0 when
     /// the snapshot does not match the edges buildROM1D() collected.
     int rom1dEdgesFromSnapshot(const dynwave::HSnapshot& snap) noexcept;
+    /// ROM regime inputs for this step, whatever the routing method: edge
+    /// conductances into rom1d_edge_* plus per-link Froude and per-node
+    /// surcharge flags. Uses the dynamic-wave snapshot when it is valid, and
+    /// otherwise (FLOW_ROUTING FV, KINWAVE) derives the same quantities from
+    /// the published hydraulic state with the solver's own Picard formula.
+    /// Returns the edge count, 0 when nothing is available.
+    int rom1dRegime(double dt, const double** link_froude, const std::uint8_t** surcharged) noexcept;
+    std::vector<char>   rom1d_fs_pinned_;   ///< nodes overflowing at the rim (phi = 0)
+    std::vector<double> rom1d_floor_buf_;   ///< per-node member floor min(invert, h_det)
+    bool rom1d_k1d_advective_ = false;   ///< measurement hook: advective relaxation in K1d
+    std::vector<double>       rom1d_state_froude_;
+    std::vector<std::uint8_t> rom1d_state_surch_;
     bool rom1d_flow_source_ = true;
     /// PR H17 step 4: per-active-node band validity flag, refreshed at each
     /// report boundary (see refreshRom1dBandFlags()).
@@ -637,7 +649,7 @@ private:
     /// Assemble + install the directional operator from the live H snapshot
     /// (every routing step; O(E·k²)). Installs nothing — leaving the diagonal
     /// path bit-identical — when disabled or when no conduit is gated.
-    void refreshRom1dDirectionalOperator() noexcept;
+    void refreshRom1dDirectionalOperator(double dt) noexcept;
 
     // ---- SP1: gage-level soft rainfall -> 1D ROM forcing (SR-1a/1b re-port) ----
     // loc = dh/dt head-rate (so the deterministic projection is unchanged; under
@@ -751,6 +763,8 @@ public:
     int& rom1dModeCountOverride() noexcept { return rom1d_k_modes_override_; }
     /// Internal A/B hook: quasi-static residual of the Manning channel (default on). Set before initialize().
     bool& rom1dQuasiStatic() noexcept { return rom1d_qsr_; }
+    /// Measurement hook: include advective relaxation in K1d.
+    bool& rom1dK1dAdvective() noexcept { return rom1d_k1d_advective_; }
     /// Diagnostic: the last flow-response field phi per active node (H17).
     const std::vector<double>& rom1dFlowResponse() const noexcept { return rom1d_fs_phi_; }
     /// PR H17: Manning sensitivity from the steady linearized flow response

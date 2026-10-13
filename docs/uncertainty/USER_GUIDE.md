@@ -1517,6 +1517,14 @@ xarray as a supplementary group.
     a channel after a weir stops spilling (`no_flow`), where members differ by stored volume
     rather than by flow. See `docs/uncertainty/VALIDATION.md`, "H17".
 
+10a. **Under `FLOW_ROUTING FV` the 1D bands are a ranking.** The sidecar runs under the
+    finite-volume solver: its inputs are derived from the published hydraulic state
+    instead of the dynamic-wave solver's internals, and the engine warns in the report. Against
+    Monte Carlo routed the same way, the free-surface chain is calibrated (0.90), a surcharged
+    chain is conservative (0.80 coverage, 2× wide) and a front passage is about 8× wide. The ROM's single
+    network relaxation rate is too slow where FV's steep reaches drain quickly. Use dynamic
+    wave when you need calibrated bands. VALIDATION.md "H17 §12".
+
 11. **Front-passage timing is now 1D-only.** §5.10's per-member phase coordinate closes most of
     the front-arrival-timing gap (measured: median width ratio during front passage went from
     0.009 — effectively unrepresented — to 1.354 (1.295 after the 2026-10-04 metric correction, member coverage 0.83), comfortably within the acceptance band) but is

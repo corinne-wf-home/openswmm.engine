@@ -3134,3 +3134,103 @@ flagged as unvalidated was the wide half of the mixture §10 resolved.
 - **New gap: the sidecar under `FLOW_ROUTING FV` is unvalidated.** A quick
   Example 8 run produces bands up to 32 ft. The basis weights come from the
   dynamic-wave solver's snapshot, which FV does not fill. Needs its own work.
+
+## 12. Up to date with swmm6_rel 5c363861, and the sidecar under FLOW_ROUTING FV (2026-10-13)
+
+**Merge.** 38 upstream commits (engine checkpoint/restart, result continuation,
+source coupling) were merged into the stack. Seven conflicts were resolved by
+keeping both sides. The one with behaviour is the runoff kernel: upstream added
+a source-owner map as a trailing argument. The SR-6 elasticity probe now passes
+the same map, so it still runs the kernel with exactly the deterministic
+arguments. A suite run showed three extra failures, all from rebuilding the
+engine library mid-run (an ABI mismatch, not a merge defect); on a consistent
+build they pass.
+
+**Solver-agnostic regime inputs.** The ROM's edge conductances, Froude
+numbers and surcharge flags came only from the dynamic-wave snapshot. Under FV
+the basis never updated, the pump and supercritical one-way operator was lost,
+and so was the surcharge trigger. They now come from the published state
+(link flow and depth, node head) with the dynamic-wave solver's own Picard
+conductance formula whenever the snapshot is absent. Dynamic wave is
+unchanged by construction.
+
+**Supercritical relay in the flow response.** The flow-response sweep relayed
+a pool's response up through steep reaches. A supercritical conduit's flow is
+set upstream, so its downstream head terms now fade over the same Froude
+ramp the one-way operator uses. Under dynamic wave this calibrates the
+semi-implicit surcharged chain: 0.906 / 1.672 → **0.892 / 1.128**.
+
+**FV head semantics.** FV can publish an upstream node's head below the
+node's own invert: it reports the first cell inside a steep pipe. Three uses
+now cope with that:
+
+- The flow response takes the conduit's published depth when the node gives
+  none.
+- K1d does the same.
+- The quantile floor is min(invert, deterministic head). Before, members
+  were clamped above the deterministic value and the band collapsed (J1 under
+  FV: 0.000 → 0.158 ft against MC 0.173).
+
+**1D gates, final build (dynamic wave):**
+
+| Gate | Coverage / width |
+|---|---|
+| free-surface chain | 0.894 / 0.997 |
+| surcharged, `EXPLICIT` | 0.924 / 1.158 |
+| surcharged, `SEMI_IMPLICIT` | **0.892 / 1.128** |
+| front passage | 0.971 / 1.416 |
+| Example 8 | 0.814 / 1.155 |
+
+**Overflowing nodes are pinned.** A junction overflowing at its rim has its
+head pinned by the spill, so no roughness change can raise it. The flow
+response sets φ = 0 there, and the node relays nothing upstream. Without this,
+Bellinge's G70F143, at its rim with zero Monte Carlo spread, read twice the
+drop below it: a band of up to 106 ft, which broke the Bellinge lock's ceiling
+on band over head. The pin also matters under FV, where chain nodes overflow.
+
+**Pipes near capacity are bounded by the full-pipe response.** On a steep
+pipe near the top of its section, conveyance stops growing with depth, and
+with the head-gradient terms gated out the free-surface response 1/(K'/K)
+becomes unbounded. Such a pipe pressurizes instead. Wherever the free-surface
+sensitivity falls below the full-pipe one, the edge takes the full-pipe form
+(twice its friction loss plus the downstream response). That fixes Bellinge's
+G70F142: 92 ft band against 0.27 ft in the Monte Carlo. No chain or Example 8
+edge reaches the bound; their numbers are unchanged.
+
+**Under FV (same fixtures, both MC and ROM routed with FV):**
+
+| Gate | Coverage / width | Reading |
+|---|---|---|
+| free-surface chain | 0.904 / 1.204 | calibrated |
+| surcharged chain | 0.803 / 2.091 | conservative |
+| front passage | 0.925 / 7.74 | conservative |
+| Example 8 | 0.638 / 1.770 | ranking only (FV's force main, below) |
+
+No FV chain cell is ranking-only, but two are conservative (2× and 8× wide)
+and Example 8 is a ranking. FV is therefore **not validated** as a whole, and the
+engine writes a report warning whenever the 1D ROM runs under FV.
+
+Two causes were measured:
+
+- **Relaxation speed.** Under FV the surcharged chain's bottleneck carries the
+  flow without a pool. K1d, a diffusion-wave scale dominated by deep pools,
+  is 19× smaller than under dynamic wave (0.0038 against 0.073 /s). The kept
+  modes lag while the quasi-static residual is already at its steady value.
+  K1d ×100 brings J2–J4 to their targets.
+- **Example 8.** FV's own force-main solution flows backward against the pump.
+  Separately, FV leaves pump and orifice dQ/dH at zero.
+
+**Tried and rejected:**
+
+- **Advective relaxation in K1d**, max(D/L², (5/3)v/L). FV surcharged improves
+  to 0.769 / 1.18, but Example 8 under dynamic wave drops to 0.784. It is kept
+  as an internal hook only.
+- **A physical operator** M = PᵀS⁻¹AP from the flow Jacobian and node storage.
+  Projecting a non-symmetric operator on the symmetric basis is unstable
+  (bands to 1e33), as the 2D similarity transform was. Removed.
+
+**The real fix is one rate per mode, not one per network:** build the basis
+from the generalized problem L v = λ S v, a conductance Laplacian with node
+storage. Each mode then carries its physical rate in 1/s, and the projection
+stays symmetric and stable. It touches every validated cell, so it is
+scheduled as its own piece of work, not slipped in here.

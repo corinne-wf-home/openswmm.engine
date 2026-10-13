@@ -108,3 +108,20 @@ TEST(RomFlowResponse, CycleConvergesToTheNodeEquations) {
     EXPECT_NEAR(phi[0], r0, 1e-8);
     EXPECT_NEAR(phi[1], r1, 1e-8);
 }
+
+// A junction overflowing at its rim has its head pinned by the spill: its
+// response is zero and it relays nothing upstream (Bellinge G70F143,
+// 2026-10-13: at the rim with zero Monte Carlo spread, unpinned it read twice
+// the drop below it).
+TEST(RomFlowResponse, OverflowingNodeIsPinned) {
+    const std::vector<FlowEdge> e = {conduit(0, 1, 3.0, 1.0, 0.0),
+                                     conduit(1, -1, 3.0, 20.0, 0.0)};
+    std::vector<double> phi;
+    solveFlowResponse(2, e, phi);
+    EXPECT_NEAR(phi[1], 40.0, 1e-9);
+    EXPECT_NEAR(phi[0], 42.0, 1e-9);
+    const std::vector<char> pinned = {0, 1};
+    solveFlowResponse(2, e, phi, 50, &pinned);
+    EXPECT_EQ(phi[1], 0.0);
+    EXPECT_NEAR(phi[0], 2.0, 1e-9);
+}

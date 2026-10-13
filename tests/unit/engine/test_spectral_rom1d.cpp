@@ -3164,3 +3164,27 @@ TEST(QuasiStaticResidual, ZeroPerturbationStaysExact) {
         EXPECT_EQ(f.rom.q95[i], h_det[i]);
     }
 }
+
+TEST(DeviationForm, FloorAtTheDeterministicHeadKeepsTheBand) {
+    // The engine passes min(invert, h_det) as the member floor, because
+    // FLOW_ROUTING FV can publish a node head below the node's invert
+    // (2026-10-13). With that floor the band brackets h_det and keeps its
+    // spread; clamping at the invert itself would give a zero-width band
+    // above h_det. The ROM's own contract (members never below the floor it
+    // is given) is unchanged and pinned by InvertClampRespected.
+    ROM1DFixture f;
+    f.rom.runoff_pert = 0.0;
+    f.rom.initialize();
+    const auto N = static_cast<std::size_t>(f.N);
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.5), floor(N);
+    for (std::size_t i = 0; i < N; ++i) floor[i] = std::min(10.5, h_det[i]);
+    f.rom.seed(h_det.data());
+    for (int step = 0; step < 200; ++step)
+        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+    f.rom.computeQuantiles(h_det.data(), floor.data());
+    for (std::size_t i = 0; i < N; ++i) {
+        EXPECT_LE(f.rom.q05[i], h_det[i] + 1e-12) << "node " << i;
+        EXPECT_GE(f.rom.q95[i], h_det[i]) << "node " << i;
+        EXPECT_GT(f.rom.q95[i] - f.rom.q05[i], 0.05) << "node " << i;
+    }
+}

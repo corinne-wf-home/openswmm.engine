@@ -219,6 +219,8 @@ RunResult runCase(const std::string& tag, bool with_rom) {
     // H17 A-B knob: 0 restores the pre-H17 depth x surcharge-elasticity source.
     if (const char* v = std::getenv("H17_FLOW_SOURCE"))
         eng->rom1dFlowSource() = std::atoi(v) != 0;
+    if (const char* v = std::getenv("H17_ADV"))
+        eng->rom1dK1dAdvective() = std::atoi(v) != 0;
     const auto& ctx = eng->context();
     // Read the solver mode back from the parsed context so a silently
     // no-op'd option (P4's failure mode) is visible, not assumed.
@@ -484,7 +486,10 @@ TEST(RomCoverageBellinge, BandsBracketBruteForceMonteCarlo) {
     //                          p99 4.87 -> 15.07    max 24.7 -> 45.7
     //   steady-flagged only  : p90 1.98 -> 4.06    transient p90 2.09 -> 4.88
     // With the quasi-static residual (2026-10-12): p50 0.198, p90 0.835,
-    // p99 3.62, max 24.6. The first Bellinge Monte Carlo (VALIDATION.md "H17
+    // p99 3.62, max 24.6. With the Froude-gated relay, overflow pin and
+    // full-pipe bound (2026-10-13): p50 0.198, p90 0.849, p99 3.58, max 24.6;
+    // band/absolute head max 0.296 (an unbounded steep near-capacity pipe
+    // had reached 1.02 and tripped the ceiling below). The first Bellinge Monte Carlo (VALIDATION.md "H17
     // §8, §10") rates these bands calibrated: coverage 0.840, width 1.008.
     // The previous baseline (max 0.007, coverage 0.990) came from a run that
     // stopped at 20,000 steps and never reached the storm; it was ~40x too low.
