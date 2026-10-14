@@ -163,6 +163,8 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     }
 
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
+    // H18 A-B knob (read per routing step, so setting it after start() is enough).
+    if (const char* v = std::getenv("H18_PER_MODE")) eng->rom1dPerModeRates() = std::atoi(v) != 0;
     // SR-6 falsification knob: scales the K1d handed to the ROM every step
     // (K1d is recomputed per step, so setting it before the first step is
     // sufficient). 1.0 = bit-identical to the gate.

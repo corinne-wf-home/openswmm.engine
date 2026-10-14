@@ -12054,18 +12054,25 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
         // Supercritical conduits do not feel their downstream head: the flow
         // over a steep reach is set upstream, so a pool below it cannot push a
         // response back up. Ramp the downstream relay out over the same
-        // Froude band the one-way operator (H14) uses, Froude taken at the
-        // published mid-conduit depth as the dynamic-wave solver does.
+        // Froude band the one-way operator (H14) uses. The Froude number is
+        // the larger of the published mid-conduit value and the one at the
+        // conduit's upstream end: a steep reach drowned from below by a pool
+        // reads subcritical at mid length (the pool has backed into it) while
+        // its inlet is still supercritical, and the head above it is then set
+        // at the inlet (2026-10-13: chain C3, Fr 0.38 mid vs 3.57 at the
+        // inlet; J3's band read the pool's response, 2.9x the Monte Carlo).
         double relay = 1.0;
         {
-            const double ym = std::clamp(links.depth[uj], 0.0, yfull > 0.0 ? yfull : links.depth[uj]);
-            const double Am = xsect::getAofY(xs, ym), Wm = xsect::getWofY(xs, ym);
             const int crow = ctx_.link_subtypes.conduit_row(j);
             const int nb = (crow >= 0) ? std::max(ctx_.link_subtypes.conduits.barrels[static_cast<std::size_t>(crow)], 1) : 1;
-            if (Am > 1.0e-9 && Wm > 1.0e-9 && ym < 0.999 * yfull) {
-                const double fr = (q / nb / Am) / std::sqrt(constants::GRAVITY * Am / Wm);
-                relay = 1.0 - uncertainty::upstreamGate(fr, rom1d_directional_cfg_);
-            }
+            auto froudeAt = [&](double yy) -> double {
+                const double A = xsect::getAofY(xs, yy), W = xsect::getWofY(xs, yy);
+                if (!(A > 1.0e-9 && W > 1.0e-9 && yy < 0.999 * yfull)) return 0.0;
+                return (q / nb / A) / std::sqrt(constants::GRAVITY * A / W);
+            };
+            const double ym = std::clamp(links.depth[uj], 0.0, yfull > 0.0 ? yfull : links.depth[uj]);
+            const double fr = std::max(froudeAt(ym), froudeAt(y));
+            relay = 1.0 - uncertainty::upstreamGate(fr, rom1d_directional_cfg_);
         }
         rom1d_fs_relay_[uj] = relay;
         e.q  = q;

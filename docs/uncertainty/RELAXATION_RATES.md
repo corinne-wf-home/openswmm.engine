@@ -73,6 +73,17 @@ contributes a symmetric head part and a one-sided part.
   downstream. The target φ already carries the steady propagation, so only timing is
   affected.
 
+> **Correction (2026-10-13, measured).** The last sentence holds for the Manning
+> channel only, because it has a target (φ). Rain and the other additive forcings
+> have no target: their steady state comes from the operator itself. With the
+> transfer dropped, a node receives only its own extra inflow, not the extra flow
+> from every node upstream. SR-5's J5 (next to the outfall) fell to 0.3–2 % of the
+> Monte Carlo spread. Putting the kinematic term on a symmetric edge instead fixes
+> rain (SR-5 0.879 / 0.949, CL-1e 0.880 / 0.960). It breaks the Manning cells,
+> though: DW `EXPLICIT` diverges (1e216), and `SEMI_IMPLICIT` and FV surcharged turn
+> conservative. The fix is to give additive forcings a flow-response target too
+> (VALIDATION.md "H18" §10).
+
 **Structures** (pump, orifice, weir, outlet). While a structure passes flow, its
 |dQ/dH| goes on the upstream node's diagonal. This is the same "upstream only" rule
 the flow-response target uses for free structures and H14 uses for pumps. A structure

@@ -3351,13 +3351,70 @@ chain becomes calibrated.
   earlier pass was the old rate's lag hiding a wide target at J3: the old
   operator gives the same 2.33 once it is allowed to settle.
 
-By the letter of the rule H18 is **not accepted**. The default stays off
+By the letter of the rule H18 is **not accepted**. (§9 fixes the
+`SEMI_IMPLICIT` target; §10 finds the soft-rain gates fail under H18.) The default stays off
 pending the owner's decision. The options are: accept H18 with
 `SEMI_IMPLICIT` documented as conservative for the reason in §3, or first fix
 the J3 target (a drowned steep reach's relay in the flow response) and re-run
 the gate.
 
-## 8. Reproduction
+## 9. The J3 target fixed: Froude at the conduit inlet (2026-10-13)
+
+A trace of the flow response under `SEMI_IMPLICIT` showed C3 (the steep reach
+above the pool) with Froude 0.38–0.55 at mid length but **3.57 at its inlet**.
+The pool had backed into the pipe, so the mid-conduit depth read subcritical,
+while the flow entering the reach stayed supercritical. The relay stayed on,
+and φ at J3 rose from 0.296 ft (equal to J1 and J2, as in the MC) to 1.18 ft.
+The relay now uses the larger of the mid-conduit and inlet Froude numbers. When
+the flow enters a reach supercritical, or passes critical depth along it, the
+head above the reach is set at the inlet.
+
+| Cell | H18 off, before → after | H18 on, before → after |
+|---|---|---|
+| DW `SEMI_IMPLICIT` | 0.892 / 1.128 → 0.897 / 1.394 | 0.918 / 2.355 → **0.851 / 0.990** |
+| DW `EXPLICIT` | 0.924 / 1.158 → 0.922 / 1.158 | 0.925 / 1.158 → 0.829 / 0.990 |
+| DW free-surface, front | unchanged | unchanged |
+| Example 8 | 0.814 / 1.154 (unchanged) | 0.824 / 0.984 → 0.825 / 0.984 |
+| FV surcharged | 0.803 / 2.091 → 0.803 / 2.061 | 0.862 / 1.180 → 0.850 / 1.174 |
+| SR-5 / CL-1e soft rain | unchanged (0.881 / 0.976, 0.827 / 0.804) | — (§10) |
+| Bellinge (MC) | 0.840 / 1.008 → 0.839 / 1.006 | 0.858 / 1.059 → 0.857 / 1.060 |
+| Bellinge lock (H18 off) | passes; band / head max 0.279, band / depth p90 0.73 | — |
+
+With H18 off, `SEMI_IMPLICIT` widens from 1.128 to 1.394. That is the old rate's
+lag acting on a now-correct target, and the cell is still calibrated.
+
+## 10. H18 breaks the soft-rain gates: additive forcings need a target
+
+These two gates were missing from the plan's A.4 table:
+
+| Gate | H18 off | H18 on |
+|---|---|---|
+| SR-5 soft rain (FULL) | 0.881 / 0.976 | **0.735 / 0.953**, ranking only |
+| CL-1e soft rain (CORR_LEN) | 0.827 / 0.804 | **0.725 / 0.926**, ranking only |
+
+The failure is J5, next to the outfall: its band is 0.3–2 % of the MC spread at
+every report time. The other nodes are at about 0.95.
+
+The cause is design note §3. The kinematic part q·K′/K sits on the upstream
+node's diagonal, and its transfer into the downstream node is dropped. For the
+Manning channel only timing is lost, because the target φ carries the steady
+propagation. Rain has no target, so its steady state is the operator's:
+L_c⁻¹·δq. Without the transfer, J5 sees only its own extra inflow and not the
+extra flow from every node above it.
+
+**Rejected (measured):** putting the kinematic term on a symmetric edge. Soft
+rain becomes calibrated (SR-5 0.879 / 0.949, CL-1e 0.880 / 0.960), but DW
+`EXPLICIT` diverges (width 1e216: the reduced operator is unstable), and
+`SEMI_IMPLICIT` (1.58) and FV surcharged (2.26) turn conservative.
+
+**The fix is to give additive forcings a target, as Manning has.** The steady
+response to a member's extra inflow comes from the flow-response sweep, with the
+extra inflow as the source. That carries the downstream transfer exactly and
+one-way, and the per-mode rates then set only the speed. This is the 1D
+counterpart of the 2D two-channel finding (multiplicative and additive channels
+need different treatment). Until it exists, H18 cannot be the default.
+
+## 11. Reproduction
 
 ```
 H18_PER_MODE=1 test_rom_coverage   [--gtest_filter=...]     # chain cells
