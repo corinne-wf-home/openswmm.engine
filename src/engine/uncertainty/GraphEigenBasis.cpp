@@ -417,6 +417,48 @@ bool GraphEigenBasis::lanczos(const CsrGraph& L, int k_want,
 // build
 // ============================================================================
 
+bool GraphEigenBasis::buildGeneralized(const CsrGraph& Lc, const double* S,
+                                       int num_modes_req, const double* v0_block) {
+    const int n = Lc.n;
+    if (n <= 0 || S == nullptr) { last_error = 1; return false; }
+    const auto un = static_cast<std::size_t>(n);
+    std::vector<double> rs(un);   // S^{-1/2}
+    double sum_s = 0.0, sum_d = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double si = S[i];
+        if (!(si > 0.0)) { last_error = 1; return false; }
+        rs[static_cast<std::size_t>(i)] = 1.0 / std::sqrt(si);
+        sum_s += si;
+        for (int p = Lc.row_ptr[static_cast<std::size_t>(i)];
+             p < Lc.row_ptr[static_cast<std::size_t>(i) + 1]; ++p)
+            if (Lc.col_idx[static_cast<std::size_t>(p)] == i)
+                sum_d += Lc.values[static_cast<std::size_t>(p)];
+    }
+    const double rho = (sum_d > 0.0 && sum_s > 0.0) ? sum_d / sum_s : 1.0;
+    CsrGraph A = Lc;
+    for (int i = 0; i < n; ++i)
+        for (int p = A.row_ptr[static_cast<std::size_t>(i)];
+             p < A.row_ptr[static_cast<std::size_t>(i) + 1]; ++p) {
+            const auto up = static_cast<std::size_t>(p);
+            A.values[up] *= rs[static_cast<std::size_t>(i)] *
+                            rs[static_cast<std::size_t>(A.col_idx[up])] / rho;
+        }
+    std::vector<double> w0;
+    if (v0_block != nullptr && num_modes_req > 0) {
+        const auto uk = static_cast<std::size_t>(num_modes_req);
+        w0.resize(uk * un);
+        for (std::size_t j = 0; j < uk; ++j)
+            for (std::size_t i = 0; i < un; ++i)
+                w0[j * un + i] = v0_block[j * un + i] / rs[i];
+    }
+    if (!build(A, num_modes_req, w0.empty() ? nullptr : w0.data())) return false;
+    for (std::size_t j = 0; j < static_cast<std::size_t>(num_kept); ++j) {
+        for (std::size_t i = 0; i < un; ++i) P[j * un + i] *= rs[i];
+        eigenvalues[j] *= rho;
+    }
+    return true;
+}
+
 bool GraphEigenBasis::build(const CsrGraph& L, int num_modes_req,
                              const double* v0_block) {
     last_error = 0;

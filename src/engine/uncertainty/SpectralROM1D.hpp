@@ -393,7 +393,30 @@ struct SpectralROM1D {
     void updateBasis(const double* conduit_off, const int* conduit_n1,
                      const int* conduit_n2, int n_conduits,
                      double sim_time = 0.0,
-                     const uint8_t* node_surcharged = nullptr);
+                     const uint8_t* node_surcharged = nullptr,
+                     const CsrGraph* Lc = nullptr,
+                     const double* storage = nullptr);
+
+    // -------------------------------------------------------------------------
+    // PR H18 — per-mode relaxation rates (docs/uncertainty/RELAXATION_RATES.md)
+    // -------------------------------------------------------------------------
+    //
+    // updateBasis() with a conductance Laplacian Lc (ft^2/s, active-node space)
+    // and a node storage S (ft^2, length n_nodes) solves Lc v = lambda S v
+    // instead of the dimensionless weighted Laplacian: the basis becomes
+    // S-orthonormal (P^T S P = I), every projection becomes P^T S (field), and
+    // the eigenvalues are rates in 1/s. The triggers and cadence still read
+    // conduit_off. A rebuild is forced while no storage is held yet. The
+    // caller then supplies per-step rates (setModeRates) and K1d = 1.
+
+    /// Per-mode rates (1/s, length n_kept) used in place of the basis
+    /// eigenvalues by advance(). Cleared by every successful rebuild.
+    void setModeRates(const double* rates);
+    void clearModeRates() noexcept { mode_rates_.clear(); }
+
+    /// True when the basis is the generalized (S-orthonormal) one.
+    bool hasStorage() const noexcept { return !mass_.empty(); }
+    const std::vector<double>& storage() const noexcept { return mass_; }
 
     // -------------------------------------------------------------------------
     // PR H14 — reduced (non-symmetric) operator
@@ -600,6 +623,16 @@ private:
     /// Deterministic head passed to the most recent advance()/seed() call
     /// (length n_nodes). Used by reconstructHead().
     std::vector<double> h_det_last_;
+    std::vector<double> mass_;        ///< H18: storage S at the last generalized rebuild (empty = identity)
+    std::vector<double> projP_;       ///< H18: S*P column by column (projection matrix; empty = P)
+    std::vector<double> mode_rates_;  ///< H18: per-mode rates overriding the eigenvalues (empty = eigenvalues)
+    const double* projCol_(std::size_t j) const noexcept {
+        const std::size_t nn = static_cast<std::size_t>(n_nodes);
+        return projP_.empty() ? &basis->P[j * nn] : &projP_[j * nn];
+    }
+    double modeRate_(std::size_t j) const noexcept {
+        return mode_rates_.empty() ? basis->eigenvalues[j] : mode_rates_[j];
+    }
     std::vector<double> qsr_r_, qsr_mm1_;   ///< quasi-static residual field / per-member (mm - 1)
 
     std::vector<double> ensemble_runoff_;

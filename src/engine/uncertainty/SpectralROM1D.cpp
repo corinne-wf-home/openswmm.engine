@@ -203,6 +203,9 @@ void SpectralROM1D::initialize() {
 
     n_nodes = basis->n_nodes;
     n_kept  = basis->num_kept;
+    mass_.clear();          // H18: a fresh basis is the plain orthonormal one
+    projP_.clear();
+    mode_rates_.clear();
 
     a_ensemble.assign(static_cast<std::size_t>(n_ensemble) *
                       static_cast<std::size_t>(n_kept), 0.0);
@@ -336,7 +339,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     // alpha to the r_coarse/soft_r_spread_ projections below: those are the
     // forcing-sensitivity channel and must stay untouched (H5 spec).
     for (std::size_t j = 0; j < nk; ++j) {
-        const double* Pj = &basis->P[j * nn];
+        const double* Pj = projCol_(j);
         double dot_b = 0.0;
         for (std::size_t i = 0; i < nn; ++i) {
             const double a = alpha ? alpha[i] : 1.0;
@@ -371,7 +374,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     const double* loc_field = soft_loc_field_ ? soft_loc_field_ : runoff_per_node;
     if (loc_field) {
         for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = &basis->P[j * nn];
+            const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
                 dot += Pj[i] * loc_field[i];
@@ -382,7 +385,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     }
     if (soft_spread_field_) {
         for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = &basis->P[j * nn];
+            const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
                 dot += Pj[i] * soft_spread_field_[i];
@@ -398,7 +401,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     // keeps its own family's coefficient.
     if (soft_spread_field_b_) {
         for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = &basis->P[j * nn];
+            const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
                 dot += Pj[i] * soft_spread_field_b_[i];
@@ -435,7 +438,7 @@ void SpectralROM1D::advance(double dt, double K1d,
             double* Ri = &soft_r_spread_spatial_[
                 static_cast<std::size_t>(i) * nk];
             for (std::size_t j = 0; j < nk; ++j) {
-                const double* Pj = &basis->P[j * nn];
+                const double* Pj = projCol_(j);
                 double dot = 0.0;
                 for (std::size_t t = 0; t < nn; ++t)
                     dot += Pj[t] * soft_spread_field_[t] * Wi[t];
@@ -456,7 +459,7 @@ void SpectralROM1D::advance(double dt, double K1d,
             const double* psim = soft_reduced_psi_ + m * nn;
             double* Rm = &soft_reduced_rm_[m * nk];
             for (std::size_t j = 0; j < nk; ++j) {
-                const double* Pj = &basis->P[j * nn];
+                const double* Pj = projCol_(j);
                 double dot = 0.0;
                 for (std::size_t t = 0; t < nn; ++t)
                     dot += Pj[t] * soft_spread_field_[t] * psim[t];
@@ -487,7 +490,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     for (auto& ep : extra_params_) {
         if (ep.entry != ParamEntry::FORCING_VECTOR) continue;
         for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = &basis->P[j * nn];
+            const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
                 dot += Pj[i] * ep.field[i];
@@ -559,7 +562,7 @@ void SpectralROM1D::advance(double dt, double K1d,
 
     n_modes_active = 0;
     for (std::size_t j = 0; j < nk; ++j) {
-        const double lam = basis->eigenvalues[j];
+        const double lam = modeRate_(j);
         bool by_energy  = mode_energy_[j] >= mode_drop_threshold;
         bool by_rain    = rain_scale > 0.0 &&
                           std::abs(r_coarse[j]) * rain_scale >= mode_drop_threshold;
@@ -671,7 +674,7 @@ void SpectralROM1D::advance(double dt, double K1d,
         for (std::size_t j = 0; j < nk; ++j) {
             if (!mode_active[j]) continue;
 
-            const double lam  = basis->eigenvalues[j];
+            const double lam  = modeRate_(j);
             const double rate = lam * K1d / mm;
             double g          = -lam * K1d * inv_mm_1 * b_coarse[j]
                                 + scale_1 * r_coarse[j];
@@ -888,8 +891,15 @@ void SpectralROM1D::commitBasisUpdateSuccess_(const double* conduit_off, int n_c
 void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1,
                                  const int* conduit_n2, int n_conduits,
                                  double sim_time,
-                                 const uint8_t* node_surcharged) {
+                                 const uint8_t* node_surcharged,
+                                 const CsrGraph* Lc,
+                                 const double* storage) {
     if (!is_ready() || n_full_nodes < 4 || n_conduits <= 0) return;
+    // PR H18: generalized (conductance/storage) rebuild. Forced while the
+    // basis is still the dimensionless one, so P^T S P = I holds before any
+    // S-weighted projection is used.
+    const bool generalized = (Lc != nullptr) && (storage != nullptr) && (Lc->n == n_nodes);
+    const bool force_generalized = generalized && mass_.empty();
 
     // --- Time-interval guard --------------------------------------------
     if (sim_time - last_basis_update_attempt_time_ < basis_update_interval) return;
@@ -941,7 +951,7 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     // A forced-cold condition must never be silently skipped here: surcharge
     // onset / large dqdh jumps are exactly the events this tolerance guard
     // would otherwise misclassify as "nothing changed enough to bother".
-    if (!force_cold && !conduit_off_prev_.empty() &&
+    if (!force_cold && !force_generalized && !conduit_off_prev_.empty() &&
         static_cast<int>(conduit_off_prev_.size()) == n_conduits) {
         double max_prev  = 0.0;
         double max_delta = 0.0;
@@ -995,17 +1005,20 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
             is_outfall[static_cast<std::size_t>(i)] = 1;
     }
 
-    std::vector<int> active_map_new, full_to_active_new;
-    CsrGraph L_new = NetworkLaplacian1D::buildWeighted(
-        n_full_nodes, n_conduits,
-        conduit_n1, conduit_n2, is_outfall.data(), weights.data(),
-        active_map_new, full_to_active_new);
+    CsrGraph L_new;
+    if (!generalized) {
+        std::vector<int> active_map_new, full_to_active_new;
+        L_new = NetworkLaplacian1D::buildWeighted(
+            n_full_nodes, n_conduits,
+            conduit_n1, conduit_n2, is_outfall.data(), weights.data(),
+            active_map_new, full_to_active_new);
 
-    // Guard: active node count must match (topology must be stable).
-    if (static_cast<int>(active_map_new.size()) != n_nodes ||
-        static_cast<int>(active_map_new.size()) < 4) {
-        ++basis_updates_failed_;
-        return;
+        // Guard: active node count must match (topology must be stable).
+        if (static_cast<int>(active_map_new.size()) != n_nodes ||
+            static_cast<int>(active_map_new.size()) < 4) {
+            ++basis_updates_failed_;
+            return;
+        }
     }
 
     // --- Warm-start re-solve (or cold, if PR H1's triggers fired) --------
@@ -1015,7 +1028,11 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
         basis_owned_ = std::make_unique<GraphEigenBasis>();
         basis_owned_->null_tol = basis->null_tol;
     }
-    if (!basis_owned_->build(L_new, n_kept, force_cold ? nullptr : P_old.data())) {
+    const double* v0 = force_cold ? nullptr : P_old.data();
+    const bool built = generalized
+        ? basis_owned_->buildGeneralized(*Lc, storage, n_kept, v0)
+        : basis_owned_->build(L_new, n_kept, v0);
+    if (!built) {
         ++basis_updates_failed_;
         return;
     }
@@ -1033,13 +1050,25 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     reduced_M_.clear();          // PR H14: M was projected on the old P; caller re-assembles
 
     // --- Re-project ensemble coefficients: a_new = R * a_old  ----------
-    // R[j_new, j_old] = P_new[:,j_new]^T · P_old[:,j_old]
+    // R[j_new, j_old] = P_new[:,j_new]^T · S · P_old[:,j_old]  (S = I unless
+    // the basis is the generalized one: the S-projection of P_old·a_old).
     auto nn = static_cast<std::size_t>(n_nodes);
     auto nk = static_cast<std::size_t>(n_kept);
+    if (generalized) {
+        mass_.assign(storage, storage + nn);
+        projP_.resize(nk * nn);
+        for (std::size_t j = 0; j < nk; ++j)
+            for (std::size_t i = 0; i < nn; ++i)
+                projP_[j * nn + i] = mass_[i] * basis->P[j * nn + i];
+    } else {
+        mass_.clear();
+        projP_.clear();
+    }
+    mode_rates_.clear();
 
     work_R_.resize(nk * nk);
     for (std::size_t jn = 0; jn < nk; ++jn) {
-        const double* Pn = &basis->P[jn * nn];
+        const double* Pn = projCol_(jn);
         for (std::size_t jo = 0; jo < nk; ++jo) {
             const double* Po = &P_old[jo * nn];
             double dot = 0.0;
@@ -1064,6 +1093,11 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     }
 
     commitBasisUpdateSuccess_(conduit_off, n_conduits, node_surcharged, sim_time);
+}
+
+void SpectralROM1D::setModeRates(const double* rates) {
+    if (rates == nullptr) { mode_rates_.clear(); return; }
+    mode_rates_.assign(rates, rates + n_kept);
 }
 
 // ============================================================================

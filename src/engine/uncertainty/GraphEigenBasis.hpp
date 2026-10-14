@@ -137,6 +137,24 @@ struct GraphEigenBasis {
     bool build(const CsrGraph& L, int num_modes_req,
                const double* v0_block = nullptr);
 
+    /**
+     * @brief PR H18: generalized eigenbasis of Lc v = lambda S v.
+     *
+     * Solves the symmetric form S^{-1/2} Lc S^{-1/2} w = lambda w with build()
+     * and returns v = S^{-1/2} w, so P is S-orthonormal (P^T S P = I) and the
+     * eigenvalues carry Lc's units divided by S's (1/s for a conductance in
+     * ft^2/s over a storage in ft^2). The scaled matrix is divided by
+     * rho = mean(diag Lc) / mean(S) before the solve and the eigenvalues
+     * multiplied back, so null_tol keeps the meaning it has for a mean-1
+     * weighted Laplacian.
+     *
+     * @param S         Node storage, length Lc.n, every entry > 0.
+     * @param v0_block  Optional warm start in v-coordinates (previous P);
+     *                  transformed to S^{1/2} v0 internally.
+     */
+    bool buildGeneralized(const CsrGraph& Lc, const double* S, int num_modes_req,
+                          const double* v0_block = nullptr);
+
     /// true if build() succeeded and num_kept > 0.
     bool is_ready() const noexcept { return num_kept > 0 && !P.empty(); }
 

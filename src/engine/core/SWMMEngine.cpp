@@ -5370,20 +5370,21 @@ void SWMMEngine::stepRouting(double dt_routing) {
     if (rom1d_ && rom1d_->is_ready()) {
         // Warm-start eigenbasis re-solve from the live operator (dynamic-wave
         // snapshot, or the same quantities derived from state under FV).
-        {
-            const double* fr = nullptr;
-            const std::uint8_t* surch = nullptr;
-            const int n_edges = rom1dRegime(dt_routing, &fr, &surch);   // conduits + structures
-            if (n_edges > 0)
+        // PR H18: with per-mode rates the rebuild and the one-way operator
+        // need this step's conductances (flow response), so they move below.
+        const double* regime_fr = nullptr;
+        const std::uint8_t* regime_surch = nullptr;
+        const int n_regime_edges = rom1dRegime(dt_routing, &regime_fr, &regime_surch);   // conduits + structures
+        if (!rom1d_per_mode_) {
+            if (n_regime_edges > 0)
                 rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
-                                    rom1d_edge_n2_.data(), n_edges, ctx_.current_time,
-                                    surch);
+                                    rom1d_edge_n2_.data(), n_regime_edges, ctx_.current_time,
+                                    regime_surch);
+            // PR H14: Froude-gated directional operator from the same snapshot
+            // (after updateBasis, which clears any operator projected on the old P).
+            refreshRom1dDirectionalOperator(dt_routing);
         }
-        // PR H14: Froude-gated directional operator from the same snapshot
-        // (after updateBasis, which clears any operator projected on the old P).
-        refreshRom1dDirectionalOperator(dt_routing);
-        const double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
-        rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
+        double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
 
         const int n_active = static_cast<int>(rom1d_active_map_.size());
 
@@ -5540,6 +5541,21 @@ void SWMMEngine::stepRouting(double dt_routing) {
 
         // PR H17: the steady linearized flow response replaces depth x alpha.
         const bool flow_src = rom1d_flow_source_ && computeRom1dFlowSource();
+        if (rom1d_per_mode_) {
+            rom1d_h18_rates_.clear();
+            if (n_regime_edges > 0 && assembleRom1dConductance(dt_routing))
+                rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
+                                    rom1d_edge_n2_.data(), n_regime_edges, ctx_.current_time,
+                                    regime_surch, &rom1d_h18_Lc_, rom1d_h18_S_.data());
+            if (rom1d_->hasStorage()) {
+                refreshRom1dModeRates();
+                K1d = 1.0;   // the rates carry the units (1/s)
+            } else {
+                rom1d_->clearModeRates();   // no generalized basis yet: one network K1d
+            }
+            refreshRom1dDirectionalOperator(dt_routing);
+        }
+        rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
         rom1d_->advance(dt_routing, K1d, rom1d_h_buf_.data(),
                         rom1d_dh_buf_.empty() ? nullptr : rom1d_dh_buf_.data(),
                         rom1d_sens_buf_.data(),
@@ -11996,6 +12012,7 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
     };
     const auto& nodes = ctx_.nodes;
     const auto& links = ctx_.links;
+    rom1d_fs_relay_.assign(static_cast<std::size_t>(ctx_.n_links()), 1.0);
     for (int j = 0; j < ctx_.n_links(); ++j) {
         const auto uj = static_cast<std::size_t>(j);
         const double qs = links.flow[uj];
@@ -12050,6 +12067,7 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
                 relay = 1.0 - uncertainty::upstreamGate(fr, rom1d_directional_cfg_);
             }
         }
+        rom1d_fs_relay_[uj] = relay;
         e.q  = q;
         // A supercritical reach's flow is set by its upstream depth alone (the
         // kinematic limit): both head-gradient terms fade with the relay.
@@ -12079,6 +12097,126 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
     uncertainty::solveFlowResponse(na, edges, rom1d_fs_phi_, 50, &rom1d_fs_pinned_);
     std::copy(rom1d_fs_phi_.begin(), rom1d_fs_phi_.end(), rom1d_sens_buf_.begin());
     return true;
+}
+
+// ============================================================================
+// assembleRom1dConductance() — PR H18 conductance Laplacian and node storage
+// ============================================================================
+//
+// docs/uncertainty/RELAXATION_RATES.md §3-4. Per basis edge (the rom1dRegime()
+// edge list, conduits then structures):
+//   conduit   symmetric head part relay * dQ/dH_Picard / 2  (= off/dt), the
+//             Manning tangent q/(2|dh|) in the friction limit, finite at zero
+//             flow; floored at 1e-6 of the mean so dry pipes stay connected;
+//   flowing   one-sided part on the UPSTREAM node's diagonal: the kinematic
+//   edges     q*K'/K of a conduit (ju + jd of the flow response) or a
+//             structure's |dQ/dH| -- the same upstream-only rule the target uses.
+// Storage S_i = storage-curve area + sum of half the top-width area of every
+// attached conduit, floored at MIN_SURFAREA (the dynamic-wave findSurfArea rule,
+// evaluated from published state so every routing method gets it).
+bool SWMMEngine::assembleRom1dConductance(double dt) noexcept {
+    if (!rom1d_ || !rom1d_->is_ready() || dt <= 0.0) return false;
+    const int na = static_cast<int>(rom1d_active_map_.size());
+    const int ne = static_cast<int>(rom1d_conduit_link_.size());
+    if (na <= 0 || ne <= 0 || static_cast<int>(rom1d_edge_off_.size()) != ne) return false;
+    const auto& f2a = rom1d_->full_to_active;
+    const auto& links = ctx_.links;
+    const auto& nodes = ctx_.nodes;
+    ensureXspCache();
+
+    rom1d_h18_wsym_.assign(static_cast<std::size_t>(ne), 0.0);
+    double sum_c = 0.0;
+    int n_c = 0;
+    for (int e = 0; e < ne; ++e) {
+        const auto ue = static_cast<std::size_t>(e);
+        const auto uj = static_cast<std::size_t>(rom1d_conduit_link_[ue]);
+        if (links.type[uj] != LinkType::CONDUIT) continue;
+        const double relay = (uj < rom1d_fs_relay_.size()) ? rom1d_fs_relay_[uj] : 1.0;
+        const double c = relay * std::max(rom1d_edge_off_[ue], 0.0) / dt;
+        rom1d_h18_wsym_[ue] = c;
+        sum_c += c;
+        ++n_c;
+    }
+    if (n_c == 0 || !(sum_c > 0.0)) return false;
+    const double c_floor = 1.0e-6 * sum_c / n_c;
+    for (int e = 0; e < ne; ++e) {
+        const auto ue = static_cast<std::size_t>(e);
+        const auto uj = static_cast<std::size_t>(rom1d_conduit_link_[ue]);
+        if (links.type[uj] == LinkType::CONDUIT)
+            rom1d_h18_wsym_[ue] = std::max(rom1d_h18_wsym_[ue], c_floor);
+    }
+
+    rom1d_h18_diag_.assign(static_cast<std::size_t>(na), 0.0);
+    for (const auto& fe : rom1d_fs_edges_) {
+        if (fe.up < 0 || fe.up >= na) continue;
+        const double c = fe.conduit ? std::max(fe.ju + fe.jd, 0.0) : fe.d;
+        rom1d_h18_diag_[static_cast<std::size_t>(fe.up)] += c;
+    }
+
+    const int unit_sys = ucf::getUnitSystem(static_cast<int>(ctx_.options.flow_units));
+    const double s_min = (ctx_.options.min_surf_area > 0.0) ? ctx_.options.min_surf_area
+                                                            : constants::MIN_SURFAREA;
+    rom1d_h18_S_.assign(static_cast<std::size_t>(na), 0.0);
+    for (int a = 0; a < na; ++a) {
+        const int i = rom1d_active_map_[static_cast<std::size_t>(a)];
+        const double ar = node::getSurfArea(nodes, i, nodes.depth[static_cast<std::size_t>(i)],
+                                            &ctx_.tables, unit_sys, &ctx_.node_subtypes);
+        rom1d_h18_S_[static_cast<std::size_t>(a)] = std::max(ar, 0.0);
+    }
+    for (int e = 0; e < ne; ++e) {
+        const int j = rom1d_conduit_link_[static_cast<std::size_t>(e)];
+        const auto uj = static_cast<std::size_t>(j);
+        if (links.type[uj] != LinkType::CONDUIT || uj >= xsp_cache_.size()) continue;
+        const int crow = ctx_.link_subtypes.conduit_row(j);
+        if (crow < 0) continue;
+        const auto ucr = static_cast<std::size_t>(crow);
+        const XSectParams& xs = xsp_cache_[uj];
+        const double y = std::clamp(links.depth[uj], 0.0, xs.y_full > 0.0 ? xs.y_full : links.depth[uj]);
+        double L = ctx_.link_subtypes.conduits.mod_length[ucr];
+        if (!(L > 0.0)) L = ctx_.link_subtypes.conduits.length[ucr];
+        const int nb = std::max(ctx_.link_subtypes.conduits.barrels[ucr], 1);
+        const double half = 0.5 * xsect::getWofY(xs, y) * L * nb;
+        if (!(half > 0.0)) continue;
+        for (int end : {links.node1[uj], links.node2[uj]}) {
+            const int a = (end >= 0 && end < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(end)] : -1;
+            if (a >= 0) rom1d_h18_S_[static_cast<std::size_t>(a)] += half;
+        }
+    }
+    for (double& v : rom1d_h18_S_) v = std::max(v, s_min);
+
+    rom1d_h18_Lc_ = uncertainty::NetworkLaplacian1D::buildConductance(
+        na, f2a, ne, rom1d_edge_n1_.data(), rom1d_edge_n2_.data(),
+        rom1d_h18_wsym_.data(), rom1d_h18_diag_.data());
+    return true;
+}
+
+// ============================================================================
+// refreshRom1dModeRates() — PR H18 per-step generalized Rayleigh rates
+// ============================================================================
+//
+// The basis is rebuilt at most every basis_update_interval; between rebuilds
+// each mode's rate follows the live operator through
+//   lambda_j(t) = P_j^T Lc(t) P_j / P_j^T S(t) P_j,
+// which equals the eigenvalue right after a rebuild (RELAXATION_RATES.md §6).
+void SWMMEngine::refreshRom1dModeRates() noexcept {
+    rom1d_h18_rates_.clear();
+    if (!rom1d_ || !rom1d_->hasStorage() || rom1d_h18_Lc_.n != rom1d_->n_nodes) return;
+    const int k = rom1d_->n_kept;
+    const auto nn = static_cast<std::size_t>(rom1d_->n_nodes);
+    rom1d_h18_rates_.assign(static_cast<std::size_t>(k), 0.0);
+    rom1d_h18_tmp_.resize(nn);
+    for (int j = 0; j < k; ++j) {
+        const double* Pj = &rom1d_->basis->P[static_cast<std::size_t>(j) * nn];
+        std::fill(rom1d_h18_tmp_.begin(), rom1d_h18_tmp_.end(), 0.0);
+        uncertainty::csr_matvec(rom1d_h18_Lc_, Pj, rom1d_h18_tmp_.data());
+        double num = 0.0, den = 0.0;
+        for (std::size_t i = 0; i < nn; ++i) {
+            num += Pj[i] * rom1d_h18_tmp_[i];
+            den += Pj[i] * Pj[i] * rom1d_h18_S_[i];
+        }
+        rom1d_h18_rates_[static_cast<std::size_t>(j)] = (den > 0.0) ? std::max(num / den, 0.0) : 0.0;
+    }
+    rom1d_->setModeRates(rom1d_h18_rates_.data());
 }
 
 // ============================================================================
@@ -12268,10 +12406,15 @@ void SWMMEngine::refreshRom1dDirectionalOperator(double dt) noexcept {
     if (!any_wet || sum_w <= 0.0) return;
     const double scale = static_cast<double>(nc) / sum_w;
 
+    // PR H18: on the generalized basis M is P^T Lc,dir P in 1/s -- the
+    // physical symmetric conductances here, the one-sided diagonal added below.
+    const bool h18 = rom1d_per_mode_ && rom1d_->hasStorage() &&
+                     static_cast<int>(rom1d_h18_wsym_.size()) == nc &&
+                     static_cast<int>(rom1d_h18_diag_.size()) == rom1d_->n_nodes;
     int n_links = ctx_.n_links();
     for (int ci = 0; ci < nc; ++ci) {
         const auto uci = static_cast<std::size_t>(ci);
-        rom1d_dir_w_[uci] *= scale;
+        rom1d_dir_w_[uci] = h18 ? rom1d_h18_wsym_[uci] : rom1d_dir_w_[uci] * scale;
         const int n1 = rom1d_edge_n1_[uci], n2 = rom1d_edge_n2_[uci];
         rom1d_dir_a1_[uci] = (n1 >= 0 && n1 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n1)] : -1;
         rom1d_dir_a2_[uci] = (n2 >= 0 && n2 < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(n2)] : -1;
@@ -12319,6 +12462,20 @@ void SWMMEngine::refreshRom1dDirectionalOperator(double dt) noexcept {
         rom1d_dir_sign_.data(), rom1d_dir_fr_.data(), rom1d_directional_cfg_,
         rom1d_dir_M_, &n_gated, rom1d_dir_drop_.data());
     if (!ok) return;
+    if (h18) {
+        const auto uk = static_cast<std::size_t>(k);
+        const auto un = static_cast<std::size_t>(rom1d_->n_nodes);
+        const double* P = rom1d_->basis->P.data();
+        for (std::size_t i = 0; i < un; ++i) {
+            const double d = rom1d_h18_diag_[i];
+            if (!(d > 0.0)) continue;
+            for (std::size_t p = 0; p < uk; ++p) {
+                const double dp = d * P[p * un + i];
+                for (std::size_t q = 0; q < uk; ++q)
+                    rom1d_dir_M_[p * uk + q] += dp * P[q * un + i];
+            }
+        }
+    }
     rom1d_dir_gated_frac_ = static_cast<double>(n_gated) / static_cast<double>(nc);
     // No supercritical reach anywhere: do not install. The diagonal path is
     // then bit-identical to pre-H14 (an ungated M would still differ from

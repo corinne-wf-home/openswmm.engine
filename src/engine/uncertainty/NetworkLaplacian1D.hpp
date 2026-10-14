@@ -145,6 +145,54 @@ struct NetworkLaplacian1D {
 
         return coo_to_csr(coo, n_active);
     }
+
+    /**
+     * @brief PR H18: conductance Laplacian in physical units, active space.
+     *
+     * Each edge (full-node endpoints n1/n2) adds the symmetric conductance
+     * w_sym[e] between its active ends, or grounds the active end when the
+     * other is an outfall (full_to_active < 0). diag_active (optional,
+     * length n_active) adds one-sided conductances on the diagonal: the
+     * kinematic and structure terms that act on the upstream node only
+     * (docs/uncertainty/RELAXATION_RATES.md §3). Edges with w_sym <= 0 add
+     * nothing; the caller applies any floor.
+     */
+    static CsrGraph buildConductance(
+        int n_active, const std::vector<int>& full_to_active,
+        int n_edges, const int* n1, const int* n2,
+        const double* w_sym, const double* diag_active)
+    {
+        std::vector<std::vector<std::pair<int,double>>> coo(
+            static_cast<std::size_t>(n_active));
+        const int nf = static_cast<int>(full_to_active.size());
+        auto act = [&](int f) {
+            return (f >= 0 && f < nf) ? full_to_active[static_cast<std::size_t>(f)] : -1;
+        };
+        for (int e = 0; e < n_edges; ++e) {
+            const double w = w_sym[static_cast<std::size_t>(e)];
+            if (!(w > 0.0)) continue;
+            const int a1 = act(n1[e]), a2 = act(n2[e]);
+            if (a1 >= 0 && a2 >= 0) {
+                if (a1 == a2) continue;
+                coo[static_cast<std::size_t>(a1)].emplace_back(a1,  w);
+                coo[static_cast<std::size_t>(a2)].emplace_back(a2,  w);
+                coo[static_cast<std::size_t>(a1)].emplace_back(a2, -w);
+                coo[static_cast<std::size_t>(a2)].emplace_back(a1, -w);
+            } else if (a1 >= 0) {
+                coo[static_cast<std::size_t>(a1)].emplace_back(a1, w);
+            } else if (a2 >= 0) {
+                coo[static_cast<std::size_t>(a2)].emplace_back(a2, w);
+            }
+        }
+        if (diag_active)
+            for (int a = 0; a < n_active; ++a)
+                if (diag_active[a] > 0.0)
+                    coo[static_cast<std::size_t>(a)].emplace_back(a, diag_active[a]);
+        // Every row needs a diagonal entry for the solver's sparsity pattern.
+        for (int a = 0; a < n_active; ++a)
+            coo[static_cast<std::size_t>(a)].emplace_back(a, 0.0);
+        return coo_to_csr(coo, n_active);
+    }
 };
 
 } // namespace openswmm::uncertainty

@@ -3188,3 +3188,204 @@ TEST(DeviationForm, FloorAtTheDeterministicHeadKeepsTheBand) {
         EXPECT_GT(f.rom.q95[i] - f.rom.q05[i], 0.05) << "node " << i;
     }
 }
+
+// ============================================================================
+// PR H18 — per-mode relaxation rates (generalized conductance/storage basis)
+// docs/uncertainty/RELAXATION_RATES.md
+// ============================================================================
+
+namespace {
+// Chain of n_act active nodes 0..n_act-1 draining to outfall n_act; edge e
+// joins e and e+1 (the last one grounds node n_act-1). Conductance c[e],
+// storage S[i].
+struct H18Chain {
+    int n_act;
+    std::vector<int> n1, n2, f2a;
+    std::vector<double> c, S, diag;
+    explicit H18Chain(int n) : n_act(n) {
+        for (int e = 0; e < n; ++e) { n1.push_back(e); n2.push_back(e + 1); }
+        for (int i = 0; i < n; ++i) f2a.push_back(i);
+        f2a.push_back(-1);   // outfall
+        c.assign(static_cast<std::size_t>(n), 1.0);
+        S.assign(static_cast<std::size_t>(n), 1.0);
+        diag.assign(static_cast<std::size_t>(n), 0.0);
+    }
+    CsrGraph Lc() const {
+        return NetworkLaplacian1D::buildConductance(n_act, f2a, n_act, n1.data(),
+                                                    n2.data(), c.data(), diag.data());
+    }
+};
+
+// A ROM on the dimensionless chain basis, then switched to the generalized
+// basis of `ch` through updateBasis(..., Lc, S) as the engine does.
+std::unique_ptr<GraphEigenBasis> makeH18Rom(const H18Chain& ch, int k, SpectralROM1D& rom,
+                                            double pert) {
+    const int nf = ch.n_act + 1;
+    std::vector<int> is_out(static_cast<std::size_t>(nf), 0);
+    is_out.back() = 1;
+    std::vector<double> w(static_cast<std::size_t>(ch.n_act), 1.0);
+    std::vector<int> am, f2a;
+    CsrGraph L = NetworkLaplacian1D::buildWeighted(nf, ch.n_act, ch.n1.data(), ch.n2.data(),
+                                                   is_out.data(), w.data(), am, f2a);
+    auto b = std::make_unique<GraphEigenBasis>();
+    EXPECT_TRUE(b->build(L, k));
+    rom.basis = b.get();
+    rom.full_to_active = f2a;
+    rom.n_full_nodes = nf;
+    rom.n_ensemble = 20;
+    rom.mannings_pert = pert;
+    rom.runoff_pert = 0.0;
+    rom.basis_update_interval = 0.0;
+    rom.initialize();
+    const CsrGraph Lc = ch.Lc();
+    rom.updateBasis(w.data(), ch.n1.data(), ch.n2.data(), ch.n_act, 0.0, nullptr,
+                    &Lc, ch.S.data());
+    return b;
+}
+}  // namespace
+
+TEST(PerModeRates, UniformChainMatchesAnalyticRates) {
+    // c on every edge, storage s at every node, grounded at the far end:
+    // lambda_k = (c/s) * (2 - 2 cos((2k+1) pi / (2n+1))).
+    const int n = 10;
+    H18Chain ch(n);
+    const double c = 2.0, s = 5.0;
+    std::fill(ch.c.begin(), ch.c.end(), c);
+    std::fill(ch.S.begin(), ch.S.end(), s);
+    GraphEigenBasis b;
+    ASSERT_TRUE(b.buildGeneralized(ch.Lc(), ch.S.data(), 3));
+    ASSERT_EQ(b.num_kept, 3);
+    for (int k = 0; k < 3; ++k) {
+        const double expect = (c / s) * (2.0 - 2.0 * std::cos((2 * k + 1) * M_PI / (2 * n + 1)));
+        EXPECT_NEAR(b.eigenvalues[static_cast<std::size_t>(k)], expect, 1.0e-9 * expect) << "mode " << k;
+    }
+}
+
+TEST(PerModeRates, BasisIsStorageOrthonormalWithPositiveRates) {
+    // Storage over three decades and conductance over one: P^T S P = I and
+    // every rate positive on a grounded network.
+    const int n = 10;
+    H18Chain ch(n);
+    for (int i = 0; i < n; ++i) {
+        ch.S[static_cast<std::size_t>(i)] = 12.566 * std::pow(10.0, 3.0 * i / (n - 1));
+        ch.c[static_cast<std::size_t>(i)] = 2.0 + 18.0 * ((i * 7) % n) / n;
+    }
+    GraphEigenBasis b;
+    ASSERT_TRUE(b.buildGeneralized(ch.Lc(), ch.S.data(), 4));
+    const auto un = static_cast<std::size_t>(n);
+    for (int p = 0; p < b.num_kept; ++p) {
+        EXPECT_GT(b.eigenvalues[static_cast<std::size_t>(p)], 0.0);
+        for (int q = 0; q < b.num_kept; ++q) {
+            double g = 0.0;
+            for (std::size_t i = 0; i < un; ++i)
+                g += b.P[static_cast<std::size_t>(p) * un + i] * ch.S[i] *
+                     b.P[static_cast<std::size_t>(q) * un + i];
+            EXPECT_NEAR(g, p == q ? 1.0 : 0.0, 1.0e-10) << p << "," << q;
+        }
+    }
+}
+
+TEST(PerModeRates, SteadyBandIsStillTheFullResponse) {
+    // On the generalized basis the fixed point is still (mm - 1) * phi at
+    // every node with the quasi-static residual on: the rates set the speed,
+    // not the target.
+    const int n = 11;
+    H18Chain ch(n);
+    for (int i = 0; i < n; ++i) {
+        ch.S[static_cast<std::size_t>(i)] = 12.566 * std::pow(10.0, 2.0 * i / (n - 1));
+        ch.c[static_cast<std::size_t>(i)] = 2.0 + i;
+    }
+    SpectralROM1D rom;
+    auto keep = makeH18Rom(ch, 4, rom, 0.2);
+    ASSERT_TRUE(rom.hasStorage());
+    const auto N = static_cast<std::size_t>(n);
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.2);
+    phi[7] = 1.0;
+    rom.seed(h_det.data());
+    for (int step = 0; step < 400; ++step)
+        rom.advance(1000.0, 1.0, h_det.data(), runoff.data(), phi.data());
+    double worst = 0.0;
+    for (int m = 0; m < rom.n_ensemble; ++m)
+        for (std::size_t i = 0; i < N; ++i)
+            worst = std::max(worst, std::fabs(rom.reconstructHead(m, static_cast<int>(i)) - h_det[i] -
+                (rom.mannings_mult[static_cast<std::size_t>(m)] - 1.0) * phi[i]));
+    EXPECT_LT(worst, 1.0e-9);
+}
+
+TEST(PerModeRates, ZeroPerturbationStaysExact) {
+    const int n = 11;
+    H18Chain ch(n);
+    for (int i = 0; i < n; ++i) ch.S[static_cast<std::size_t>(i)] = 12.566 + 100.0 * i;
+    SpectralROM1D rom;
+    auto keep = makeH18Rom(ch, 4, rom, 0.0);
+    ASSERT_TRUE(rom.hasStorage());
+    const auto N = static_cast<std::size_t>(n);
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.3);
+    rom.seed(h_det.data());
+    for (int step = 0; step < 50; ++step)
+        rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+    rom.computeQuantiles(h_det.data(), nullptr);
+    for (std::size_t i = 0; i < N; ++i) {
+        EXPECT_EQ(rom.q05[i], h_det[i]);
+        EXPECT_EQ(rom.q95[i], h_det[i]);
+    }
+}
+
+TEST(PerModeRates, SteepLateralAndPondGetRatesOrdersApart) {
+    // Two branches to one outfall: a steep lateral (manhole storage, strong
+    // conductance) and a pond (1e4 ft^2, weak outlet). The pond's mode is
+    // over 10^3 times slower than the lateral's -- one network dial applied
+    // to one geometric spectrum cannot give both.
+    // Full nodes: 0-1 lateral, 2-3 pond, 4 outfall.
+    std::vector<int> n1 = {0, 1, 2, 3}, n2 = {1, 4, 3, 4}, f2a = {0, 1, 2, 3, -1};
+    std::vector<double> c = {5.0, 5.0, 50.0, 0.5}, diag = {5.0, 0.0, 0.0, 0.0};
+    std::vector<double> S = {12.566, 12.566, 1.0e4, 1.0e4};
+    const CsrGraph Lc = NetworkLaplacian1D::buildConductance(4, f2a, 4, n1.data(), n2.data(),
+                                                             c.data(), diag.data());
+    GraphEigenBasis b;
+    ASSERT_TRUE(b.buildGeneralized(Lc, S.data(), 3));
+    ASSERT_EQ(b.num_kept, 3);
+    const double slow = b.eigenvalues[0], fast = b.eigenvalues[2];
+    EXPECT_LT(slow * 1.0e3, fast) << "slow " << slow << " fast " << fast;
+    double pond = 0.0, tot = 0.0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const double m = S[i] * b.P[i] * b.P[i];
+        tot += m;
+        if (i >= 2) pond += m;
+    }
+    EXPECT_GT(pond / tot, 0.99) << "slowest mode should be the pond";
+}
+
+TEST(PerModeRates, TransientOfAGeneralizedModeIsExact) {
+    // phi = the slowest generalized mode v0. The full-order deviation is then
+    // exactly (mm - 1)(1 - exp(-lambda0 t / mm)) v0. Only an S-weighted
+    // projection (b = P^T S phi = e0) reproduces it: the steady band above is
+    // exact for ANY projection once the quasi-static residual is on, so this
+    // is the test that pins the weighting.
+    const int n = 11;
+    H18Chain ch(n);
+    for (int i = 0; i < n; ++i) {
+        ch.S[static_cast<std::size_t>(i)] = 12.566 * std::pow(10.0, 2.0 * i / (n - 1));
+        ch.c[static_cast<std::size_t>(i)] = 2.0 + i;
+    }
+    SpectralROM1D rom;
+    auto keep = makeH18Rom(ch, 4, rom, 0.2);
+    ASSERT_TRUE(rom.hasStorage());
+    const auto N = static_cast<std::size_t>(n);
+    const double lam0 = rom.basis->eigenvalues[0];
+    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N);
+    for (std::size_t i = 0; i < N; ++i) phi[i] = rom.basis->P[i];
+    rom.seed(h_det.data());
+    const double t = 0.7 / lam0;
+    rom.advance(t, 1.0, h_det.data(), runoff.data(), phi.data());
+    double worst = 0.0, scale = 0.0;
+    for (int m = 0; m < rom.n_ensemble; ++m) {
+        const double mm = rom.mannings_mult[static_cast<std::size_t>(m)];
+        const double f = (mm - 1.0) * (1.0 - std::exp(-lam0 * t / mm));
+        for (std::size_t i = 0; i < N; ++i) {
+            worst = std::max(worst, std::fabs(rom.reconstructHead(m, static_cast<int>(i)) - h_det[i] - f * phi[i]));
+            scale = std::max(scale, std::fabs(f * phi[i]));
+        }
+    }
+    EXPECT_LT(worst, 1.0e-9 * std::max(scale, 1.0)) << "scale " << scale;
+}

@@ -1179,3 +1179,40 @@ TEST(SwmmEngine1DRomLifecycle, CheckpointIsRefusedWhileTheSidecarRuns) {
         swmm_engine_destroy(h);
     }
 }
+
+// PR H18: the per-mode-rates hook builds the generalized (conductance /
+// storage) basis on the live network and drives the band with per-mode rates
+// in 1/s. Plumbing only; calibration is the MC gates' job.
+TEST(SwmmEngine1DRomLifecycle, PerModeRatesBuildStorageBasisAndBand) {
+    const fs::path dir = fs::current_path() / "1d_rom_lifecycle_out";
+    fs::create_directories(dir);
+    { std::ofstream f(dir / "h18_rates.inp");
+      f << buildChainModel("\n[UNCERTAINTY]\n1D MANNINGS_N 0.20\n"); }
+    SWMM_Engine h = swmm_engine_create();
+    ASSERT_EQ(swmm_engine_open(h, (dir / "h18_rates.inp").string().c_str(),
+                               (dir / "h18_rates.rpt").string().c_str(), nullptr, nullptr), SWMM_OK);
+    auto* e = static_cast<openswmm::SWMMEngine*>(h);
+    e->rom1dPerModeRates() = true;
+    ASSERT_EQ(swmm_engine_initialize(h), SWMM_OK);
+    ASSERT_EQ(swmm_engine_start(h, 0), SWMM_OK);
+    double elapsed = 0.0;
+    int n_steps = 0;
+    while (swmm_engine_step(h, &elapsed) == SWMM_OK && elapsed > 0.0)
+        if (++n_steps > 2000) break;
+    const auto* rom = e->rom1d();
+    ASSERT_NE(rom, nullptr);
+    EXPECT_TRUE(rom->hasStorage()) << "no generalized rebuild happened";
+    EXPECT_DOUBLE_EQ(e->rom1dLastK1d(), 1.0);
+    ASSERT_EQ(static_cast<int>(e->rom1dModeRates().size()), rom->n_kept);
+    for (double r : e->rom1dModeRates()) EXPECT_GT(r, 0.0);
+    for (double s : e->rom1dStorage()) EXPECT_GE(s, openswmm::constants::MIN_SURFAREA);
+    double max_spread = 0.0;
+    for (std::size_t i = 0; i < rom->q05.size(); ++i) {
+        EXPECT_LE(rom->q05[i], rom->q95[i]) << "node " << i;
+        max_spread = std::max(max_spread, rom->q95[i] - rom->q05[i]);
+    }
+    EXPECT_GT(max_spread, 0.0);
+    swmm_engine_end(h);
+    swmm_engine_close(h);
+    swmm_engine_destroy(h);
+}

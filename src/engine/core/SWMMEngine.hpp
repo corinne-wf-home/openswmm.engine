@@ -765,6 +765,14 @@ public:
     bool& rom1dQuasiStatic() noexcept { return rom1d_qsr_; }
     /// Measurement hook: include advective relaxation in K1d.
     bool& rom1dK1dAdvective() noexcept { return rom1d_k1d_advective_; }
+    /// PR H18 internal hook: per-mode relaxation rates from a conductance /
+    /// storage generalized eigenbasis instead of one network K1d (default off
+    /// until validated; docs/uncertainty/RELAXATION_RATES.md). Set before the first step.
+    bool& rom1dPerModeRates() noexcept { return rom1d_per_mode_; }
+    /// Diagnostic: the per-mode rates (1/s) used on the last step (H18; empty when off).
+    const std::vector<double>& rom1dModeRates() const noexcept { return rom1d_h18_rates_; }
+    /// Diagnostic: node storage S (ft^2) of the last H18 assembly, active space.
+    const std::vector<double>& rom1dStorage() const noexcept { return rom1d_h18_S_; }
     /// Diagnostic: the last flow-response field phi per active node (H17).
     const std::vector<double>& rom1dFlowResponse() const noexcept { return rom1d_fs_phi_; }
     /// PR H17: Manning sensitivity from the steady linearized flow response
@@ -789,6 +797,14 @@ private:
     double rom1d_k1d_scale_ = 1.0;
     int rom1d_k_modes_override_ = 0;
     bool rom1d_qsr_ = true;   ///< H17 quasi-static residual (internal A/B hook)
+    bool rom1d_per_mode_ = false;   ///< H18 per-mode rates (internal hook)
+    std::vector<double> rom1d_fs_relay_;   ///< H18: per-link head relay (1 - Froude gate) from the flow response
+    std::vector<double> rom1d_h18_wsym_, rom1d_h18_diag_, rom1d_h18_S_, rom1d_h18_rates_, rom1d_h18_tmp_;
+    uncertainty::CsrGraph rom1d_h18_Lc_;
+    /** @brief H18: conductance Laplacian and storage from the current state (needs rom1dRegime() and the flow response of this step). */
+    bool assembleRom1dConductance(double dt) noexcept;
+    /** @brief H18: per-mode generalized Rayleigh rates on the current basis into rom1d_h18_rates_. */
+    void refreshRom1dModeRates() noexcept;
     double rom1d_last_k1d_ = 0.0;
 
     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
