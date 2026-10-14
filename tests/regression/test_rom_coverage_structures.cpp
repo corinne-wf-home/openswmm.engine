@@ -171,6 +171,7 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
         if (const char* v = std::getenv("H17_K1D_SCALE")) e0->rom1dK1dScale() = std::atof(v);
         if (const char* v = std::getenv("H17_ADV")) e0->rom1dK1dAdvective() = std::atoi(v) != 0;
         if (const char* q = std::getenv("H17_QSR")) e0->rom1dQuasiStatic() = std::atoi(q) != 0;
+        if (const char* q = std::getenv("H18_PER_MODE")) e0->rom1dPerModeRates() = std::atoi(q) != 0;
     }
     if (!opened || swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {
         std::printf("[H17] %s failed to start: %s\n", tag.c_str(), swmm_get_last_error_msg(h));
@@ -270,6 +271,55 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
         }
         t_prev = t_now;
         if (t_now >= end_time_s) break;
+    }
+    // H18 (A.4 risks, RELAXATION_RATES.md §8): rebuild counts, and on the
+    // generalized basis the Ritz residual |Lc v - lambda S v| / |lambda S v|,
+    // the largest normalized off-diagonal of P^T Lc P, and how many kept modes
+    // carry more than 90 % of their S-mass on nodes with zero response.
+    if (rom) {
+        std::printf("[H18-diag] %s attempts=%d failed=%d cold=%d storage_basis=%d k=%d\n", tag.c_str(),
+                    rom->basis_updates_attempted_, rom->basis_updates_failed_,
+                    rom->basis_rebuilds_cold_forced_, rom->hasStorage() ? 1 : 0, rom->n_kept);
+        const auto& Lc = eng->rom1dConductance();
+        const auto& S = eng->rom1dStorage();
+        const auto& rates = eng->rom1dModeRates();
+        const auto& phi = eng->rom1dFlowResponse();
+        const std::size_t nn = static_cast<std::size_t>(rom->n_nodes);
+        const std::size_t nk = static_cast<std::size_t>(rom->n_kept);
+        if (rom->hasStorage() && Lc.n == rom->n_nodes && S.size() == nn && rates.size() == nk) {
+            const auto& P = rom->basis->P;
+            std::vector<double> LP(nk * nn, 0.0);
+            for (std::size_t j = 0; j < nk; ++j)
+                openswmm::uncertainty::csr_matvec(Lc, &P[j * nn], &LP[j * nn]);
+            double res_max = 0.0, off_max = 0.0, rmin = 1e300, rmax = 0.0;
+            int wasted = 0;
+            for (std::size_t j = 0; j < nk; ++j) {
+                double num = 0.0, den = 0.0, mz = 0.0, mt = 0.0;
+                for (std::size_t i = 0; i < nn; ++i) {
+                    const double sv = rates[j] * S[i] * P[j * nn + i];
+                    num += (LP[j * nn + i] - sv) * (LP[j * nn + i] - sv);
+                    den += sv * sv;
+                    const double m = S[i] * P[j * nn + i] * P[j * nn + i];
+                    mt += m;
+                    if (phi.size() == nn && phi[i] == 0.0) mz += m;
+                }
+                if (den > 0.0) res_max = std::max(res_max, std::sqrt(num / den));
+                if (mt > 0.0 && mz / mt > 0.9) ++wasted;
+                rmin = std::min(rmin, rates[j]);
+                rmax = std::max(rmax, rates[j]);
+                for (std::size_t q = 0; q < nk; ++q) {
+                    if (q == j) continue;
+                    double o = 0.0;
+                    for (std::size_t i = 0; i < nn; ++i) o += P[q * nn + i] * LP[j * nn + i];
+                    off_max = std::max(off_max, std::fabs(o) / std::sqrt(std::max(rates[j] * rates[q], 1e-300)));
+                }
+            }
+            double smin = 1e300, smax = 0.0;
+            for (double v : S) { smin = std::min(smin, v); smax = std::max(smax, v); }
+            std::printf("[H18-diag] %s rates %.3e..%.3e 1/s  storage %.1f..%.1f ft2  ritz_residual_max=%.3e"
+                        "  offdiag_max=%.3e  modes_on_zero_response=%d/%zu\n", tag.c_str(), rmin, rmax,
+                        smin, smax, res_max, off_max, wasted, nk);
+        }
     }
     out.ok = !out.times.empty();
     cleanup();

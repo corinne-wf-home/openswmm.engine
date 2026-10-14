@@ -3243,3 +3243,128 @@ from the generalized problem L v = λ S v, a conductance Laplacian with node
 storage. Each mode then carries its physical rate in 1/s, and the projection
 stays symmetric and stable. It touches every validated cell, so it is
 scheduled as its own piece of work, not slipped in here.
+
+---
+
+# H18 — Per-mode relaxation rates (2026-10-13)
+
+Design: `docs/uncertainty/RELAXATION_RATES.md`. Implemented behind the internal
+hook `SWMMEngine::rom1dPerModeRates()` (default off); harness knob
+`H18_PER_MODE=1`.
+
+## 1. What changed
+
+One network-wide relaxation scale (K1d × dimensionless eigenvalues) is replaced
+by per-mode rates in 1/s. These come from the generalized eigenproblem
+L_c v = λ S v:
+- **L_c (conductance):** the Picard head conductance with the Froude relay,
+  plus the kinematic and flowing-structure terms on the upstream node.
+- **S (storage):** storage-curve area plus half the top width of attached
+  conduits.
+
+Every projection is S-weighted. Between rebuilds the rates follow the live
+operator as generalized Rayleigh quotients. The target (mm − 1)·φ is
+untouched.
+
+## 2. Gates, same build, hook off → on (coverage / width)
+
+| Cell | Off | On | Verdict on |
+|---|---|---|---|
+| DW free-surface chain | 0.894 / 0.997 | 0.894 / 0.997 | calibrated |
+| DW surcharged `EXPLICIT` | 0.924 / 1.158 | 0.925 / 1.158 | calibrated |
+| DW surcharged `SEMI_IMPLICIT` | 0.892 / 1.128 | 0.918 / **2.355** | **conservative** (§3) |
+| DW front passage | 0.971 / 1.416 | 0.961 / 1.181 | calibrated |
+| DW Example 8 | 0.814 / 1.154 | 0.824 / 0.984 | calibrated |
+| DW Example 8, steady flag | 0.948 / 1.489 | 0.852 / 0.989 | calibrated |
+| DW Bellinge (MC, 21 members) | 0.840 / 1.008 | 0.858 / 1.059 | calibrated |
+| FV free-surface chain | 0.904 / 1.204 | 0.904 / 1.204 | calibrated |
+| FV surcharged chain | 0.803 / 2.091 | **0.862 / 1.180** | **calibrated** |
+| FV front passage | 0.925 / 7.74 | 0.925 / 7.83 | conservative (§4) |
+
+Bellinge by flag, off → on:
+- steady: 0.855 / 1.009 → 0.867 / 1.048;
+- transient: 0.769 / 0.998 → 0.819 / 1.362;
+- no-flow: 0.531 / 0.333 → 0.678 / 0.961.
+
+## 3. `SEMI_IMPLICIT`: the earlier pass was a lag
+
+The cell's median of five nodes sits at J3. In both runs J1 and J2 read 0.99
+and J4 and J5 read about 3× (the known transient pool filling). J3 moves from
+1.128 to 2.893.
+
+Under the **old** operator with K1d × 10 (`H17_K1D_SCALE=10`, so the modes
+settle within the window), J3 reads **2.972** and the cell **0.918 / 2.330**,
+the same as H18. The old 1.128 came from a rate too slow to reach the target
+in the window: mode 0 had τ = 1,054 s and was 82 % saturated at the window
+start.
+
+The target itself is wide at J3: 0.27 ft against an MC width of 0.108 ft,
+which equals J1's. This is the H14-era limitation. A Froude number taken at mid
+conduit cannot see a steep reach discharging into a drowned pool, so the relay
+stays on and φ at J3 carries part of the pool. A fix belongs to the target
+(flow response), not to the rates.
+
+## 4. FV front passage is the phase channel
+
+The FV front reads 7.7–7.9 with H18 off, H18 on, H18 on with H14 off, and the
+old K1d × 10. Rates do not move it. The amplitude-only baseline under FV reads
+0.147, narrow. The over-width comes from the phase coordinate (H11): the travel
+time from conduit velocities under FV. This is a separate item.
+
+## 5. Risks measured (RELAXATION_RATES.md §8)
+
+- **Lanczos convergence (Example 8, end of run).** Ritz residual 2.5e-10,
+  largest normalized off-diagonal of PᵀL_cP 4.3e-11. Rates 1.7e-8–6.9e-3 /s,
+  storage 12.6–1,366 ft².
+- **Mode waste.** 10 of 20 kept modes carry more than 90 % of their storage
+  mass on nodes with zero response at the end of Example 8's 12 h window. The
+  cell is still calibrated.
+- **Rebuild churn.** Example 8: 97 attempts, 7 cold, identical with the hook
+  on and off.
+- **Inertial cap depends on dt.** DW chain with the routing step halved
+  (30 → 15 s): every verdict is unchanged (`EXPLICIT` 1.158 → 1.151, front
+  1.181 → 1.220, `SEMI_IMPLICIT` 2.355 → 2.298).
+
+## 6. Bellinge lock and runtime (Debug, run alone, same build)
+
+| | Off | On |
+|---|---|---|
+| wall time | 1,186 s | 1,421 s (+19.8 %, inside the +25 % gate) |
+| lock | passes | passes |
+| band / head max | 0.279 | 0.440 |
+| band / depth p50 / p90 / max | 0.197 / 0.74 / 24.6 | 0.207 / 1.21 / 50.3 |
+| band / depth p90, no-flow flag | 0.55 | 5.36 |
+
+The tails are wider with H18. Against the 21-member Monte Carlo the network
+is still calibrated (§2), and the no-flow samples moved from 0.531 / 0.333
+toward the MC (0.678 / 0.961).
+
+## 7. Verdict against the plan's acceptance rule
+
+The rule was: no dynamic-wave cell loses calibration, and the FV surcharged
+chain becomes calibrated.
+
+- FV surcharged becomes calibrated (0.862 / 1.180).
+- Bellinge, Example 8, the front and the free-surface and `EXPLICIT` chains
+  stay calibrated. The front, Example 8 and Bellinge coverage improve.
+- `SEMI_IMPLICIT` goes from calibrated to conservative (2.355). §3 shows the
+  earlier pass was the old rate's lag hiding a wide target at J3: the old
+  operator gives the same 2.33 once it is allowed to settle.
+
+By the letter of the rule H18 is **not accepted**. The default stays off
+pending the owner's decision. The options are: accept H18 with
+`SEMI_IMPLICIT` documented as conservative for the reason in §3, or first fix
+the J3 target (a drowned steep reach's relay in the flow response) and re-run
+the gate.
+
+## 8. Reproduction
+
+```
+H18_PER_MODE=1 test_rom_coverage   [--gtest_filter=...]     # chain cells
+H18_PER_MODE=1 H17_ROUTING=FV test_rom_coverage             # FV chain
+H18_PER_MODE=1 H18_ROUTING_STEP=0:00:15 test_rom_coverage   # dt check
+H18_PER_MODE=1 H5B_TRACE=1 test_rom_coverage --gtest_filter=RomCoverageSurcharged.SemiImplicitContinuity
+H18_PER_MODE=1 test_rom_coverage_structures --gtest_filter='*Example8*'   # prints [H18-diag]
+H18_PER_MODE=1 H17_ONE_INP=... H17_ONE_ROM=1 H17_ONE_OUT=rom_h18.txt test_rom_coverage_structures --gtest_filter='*OneMember*'
+python3 tests/regression/score_h17_mc.py <dump dir> rom_cap rom_h18
+```

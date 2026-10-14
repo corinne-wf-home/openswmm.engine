@@ -220,6 +220,13 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
             const auto pos = txt.find(key);
             if (pos != std::string::npos) txt.replace(pos, key.size(), std::string("FLOW_ROUTING         ") + r);
         }
+        // H18 risk 4: H18_ROUTING_STEP=h:mm:ss reruns a fixture at another
+        // routing step (the inertial cap of the conductance depends on dt).
+        if (const char* r = std::getenv("H18_ROUTING_STEP")) {
+            const std::string key = "ROUTING_STEP         0:00:30";
+            const auto pos = txt.find(key);
+            if (pos != std::string::npos) txt.replace(pos, key.size(), std::string("ROUTING_STEP         ") + r);
+        }
         f << txt;
     }
 
@@ -248,6 +255,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
         if (const char* k = std::getenv("H17_ADV")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dAdvective() = std::atoi(k) != 0;
         if (const char* k = std::getenv("H17_K1D_SCALE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dScale() = std::atof(k);
         if (const char* q = std::getenv("H17_QSR")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dQuasiStatic() = std::atoi(q) != 0;
+        if (const char* q = std::getenv("H18_PER_MODE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dPerModeRates() = std::atoi(q) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();

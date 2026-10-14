@@ -773,6 +773,8 @@ public:
     const std::vector<double>& rom1dModeRates() const noexcept { return rom1d_h18_rates_; }
     /// Diagnostic: node storage S (ft^2) of the last H18 assembly, active space.
     const std::vector<double>& rom1dStorage() const noexcept { return rom1d_h18_S_; }
+    /// Diagnostic: conductance Laplacian Lc (ft^2/s) of the last H18 assembly, active space.
+    const uncertainty::CsrGraph& rom1dConductance() const noexcept { return rom1d_h18_Lc_; }
     /// Diagnostic: the last flow-response field phi per active node (H17).
     const std::vector<double>& rom1dFlowResponse() const noexcept { return rom1d_fs_phi_; }
     /// PR H17: Manning sensitivity from the steady linearized flow response
