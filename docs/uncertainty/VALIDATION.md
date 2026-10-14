@@ -3414,6 +3414,40 @@ one-way, and the per-mode rates then set only the speed. This is the 1D
 counterpart of the 2D two-channel finding (multiplicative and additive channels
 need different treatment). Until it exists, H18 cannot be the default.
 
+### 10b. The target attempt (A.4b, 2026-10-14): measured, not adopted
+
+The patch is saved as `docs/uncertainty/prototypes/h18_additive_target.patch`.
+
+**What it did.** Every additive field f (runoff, both soft-rain planes, spatial
+rain, FORCING_VECTOR) became its steady head response ψ, computed by the
+flow-response sweep with the accumulated extra throughflow as its source
+(`accumulateThroughflow` + a source argument to `solveFlowResponse`). Each mode
+relaxed toward κ·Qᵀψ at its own rate, and the part of ψ the kept modes miss
+was added as a residual.
+
+**Results, in order:**
+
+| Variant | SR-5 | CL-1e | SR-5 per node at 1 h (J1…J5) |
+|---|---|---|---|
+| target, instant residual | 0.894 / 2.37 | 0.960 / 1.55 | 0.96, 1.89, 2.49, 2.49, **25.5** |
+| + head conductance −Jd (capped by Picard) | 0.970 / 2.38 | 0.975 / 1.54 | same |
+| + residual relaxed at diag(L_c)/S | 0.968 / 2.52 | 0.967 / 1.72 | 0.97, 1.90, 2.49, 2.97, 3.39 |
+
+**Why it fails.** The fixture is storage-dominated: about 20,000 ft² of
+storage per node, rates about 1.9e-5 /s (a 14 h time constant) against a 1 h
+window. Relaxing toward the steady target makes the early forcing at a node
+equal to rate × target ≈ (extra inflow accumulated from everything upstream) /
+that node's own storage. The upstream extra water arrives at once, whereas in
+reality it raises each node in turn. The steady target is right only once
+flows have equilibrated; rate forcing through the symmetric operator is right
+only before. Only dynamics that include the one-way transfer get both right.
+
+**Second finding.** The soft-rain source is the deterministic head rate dh/dt
+times the relative spread. In steady flow under steady rain dh/dt = 0, so no
+band forms although rain uncertainty changes the flow. A correct additive
+channel needs the extra inflow itself (runoff × relative spread × elasticity)
+as its source.
+
 ## 11. Reproduction
 
 ```

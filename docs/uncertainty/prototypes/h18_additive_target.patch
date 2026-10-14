@@ -1,0 +1,647 @@
+diff --git a/src/engine/core/SWMMEngine.cpp b/src/engine/core/SWMMEngine.cpp
+index 076367df..0a1c6953 100644
+--- a/src/engine/core/SWMMEngine.cpp
++++ b/src/engine/core/SWMMEngine.cpp
+@@ -5553,6 +5553,12 @@ void SWMMEngine::stepRouting(double dt_routing) {
+             } else {
+                 rom1d_->clearModeRates();   // no generalized basis yet: one network K1d
+             }
++            // Additive forcings relax toward their steady flow response
++            // (RELAXATION_RATES.md §10); needs this step's flow-response edges.
++            if (flow_src && rom1d_->hasStorage())
++                rom1d_->additive_response = [this](const double* f, double* psi) { rom1dAdditiveResponse(f, psi); };
++            else
++                rom1d_->additive_response = nullptr;
+             refreshRom1dDirectionalOperator(dt_routing);
+         }
+         rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
+@@ -12012,7 +12018,6 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
+     };
+     const auto& nodes = ctx_.nodes;
+     const auto& links = ctx_.links;
+-    rom1d_fs_relay_.assign(static_cast<std::size_t>(ctx_.n_links()), 1.0);
+     for (int j = 0; j < ctx_.n_links(); ++j) {
+         const auto uj = static_cast<std::size_t>(j);
+         const double qs = links.flow[uj];
+@@ -12022,11 +12027,13 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
+         const int up = fwd ? links.node1[uj] : links.node2[uj];
+         const int dn = fwd ? links.node2[uj] : links.node1[uj];
+         uncertainty::FlowEdge e;
++        e.link = j;
+         e.up = act(up);
+         e.dn = act(dn);
+         if (e.up < 0) continue;   // flow leaves an outfall: nothing to solve
+         if (links.type[uj] != LinkType::CONDUIT) {
+             e.conduit = false;
++            e.q = q;   // flow share for H18's throughflow accumulation; the sweep ignores it here
+             e.d = std::fabs(links.dqdh[uj]);
+             edges.push_back(e);
+             continue;
+@@ -12074,7 +12081,6 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
+             const double fr = std::max(froudeAt(ym), froudeAt(y));
+             relay = 1.0 - uncertainty::upstreamGate(fr, rom1d_directional_cfg_);
+         }
+-        rom1d_fs_relay_[uj] = relay;
+         e.q  = q;
+         // A supercritical reach's flow is set by its upstream depth alone (the
+         // kinematic limit): both head-gradient terms fade with the relay.
+@@ -12112,9 +12118,15 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
+ //
+ // docs/uncertainty/RELAXATION_RATES.md §3-4. Per basis edge (the rom1dRegime()
+ // edge list, conduits then structures):
+-//   conduit   symmetric head part relay * dQ/dH_Picard / 2  (= off/dt), the
+-//             Manning tangent q/(2|dh|) in the friction limit, finite at zero
+-//             flow; floored at 1e-6 of the mean so dry pipes stay connected;
++//   conduit   symmetric head part: the flow response's own head-gradient
++//             conductance -Jd = relay * |Q| / (2 |dh|), the same one the steady
++//             targets use, capped at half the Picard conductance (off/dt) where
++//             a vanishing head drop would make it unbounded. A conduit with no
++//             flow gets the floor (1e-6 of the mean): still water carries no
++//             response and relaxes nothing. (Half the Picard conductance alone,
++//             the first choice, equals the tangent only in the friction limit;
++//             at low velocity it is inertial and far larger, so slow storage
++//             modes relaxed toward their targets far too fast: SR-5 J5 25x.)
+ //   flowing   one-sided part on the UPSTREAM node's diagonal: the kinematic
+ //   edges     q*K'/K of a conduit (ju + jd of the flow response) or a
+ //             structure's |dQ/dH| -- the same upstream-only rule the target uses.
+@@ -12132,14 +12144,16 @@ bool SWMMEngine::assembleRom1dConductance(double dt) noexcept {
+     ensureXspCache();
+ 
+     rom1d_h18_wsym_.assign(static_cast<std::size_t>(ne), 0.0);
++    std::vector<double> head_c(static_cast<std::size_t>(ctx_.n_links()), 0.0);
++    for (const auto& fe : rom1d_fs_edges_)
++        if (fe.conduit && fe.link >= 0) head_c[static_cast<std::size_t>(fe.link)] = -fe.jd;
+     double sum_c = 0.0;
+     int n_c = 0;
+     for (int e = 0; e < ne; ++e) {
+         const auto ue = static_cast<std::size_t>(e);
+         const auto uj = static_cast<std::size_t>(rom1d_conduit_link_[ue]);
+         if (links.type[uj] != LinkType::CONDUIT) continue;
+-        const double relay = (uj < rom1d_fs_relay_.size()) ? rom1d_fs_relay_[uj] : 1.0;
+-        const double c = relay * std::max(rom1d_edge_off_[ue], 0.0) / dt;
++        const double c = std::min(head_c[uj], std::max(rom1d_edge_off_[ue], 0.0) / dt);
+         rom1d_h18_wsym_[ue] = c;
+         sum_c += c;
+         ++n_c;
+@@ -12224,6 +12238,35 @@ void SWMMEngine::refreshRom1dModeRates() noexcept {
+         rom1d_h18_rates_[static_cast<std::size_t>(j)] = (den > 0.0) ? std::max(num / den, 0.0) : 0.0;
+     }
+     rom1d_->setModeRates(rom1d_h18_rates_.data());
++    // Complement (truncated-mode) rate per node: diag(Lc) / S.
++    rom1d_h18_comp_.assign(nn, 0.0);
++    for (std::size_t i = 0; i < nn; ++i) {
++        for (int p = rom1d_h18_Lc_.row_ptr[i]; p < rom1d_h18_Lc_.row_ptr[i + 1]; ++p)
++            if (static_cast<std::size_t>(rom1d_h18_Lc_.col_idx[static_cast<std::size_t>(p)]) == i)
++                rom1d_h18_comp_[i] += rom1d_h18_Lc_.values[static_cast<std::size_t>(p)];
++        rom1d_h18_comp_[i] /= rom1d_h18_S_[i];
++    }
++    rom1d_->setComplementRates(rom1d_h18_comp_.data());
++}
++
++// ============================================================================
++// rom1dAdditiveResponse() — PR H18 steady response to an extra inflow
++// ============================================================================
++//
++// An additive forcing f (head rate per node) is an extra inflow dq = S*f. At
++// steady state every conduit carries the extra flow accumulated from upstream
++// (accumulateThroughflow), and the heads shift so each node passes it on: the
++// flow-response sweep with that throughflow as its source. Exact on trees and
++// one-way, like the Manning target (RELAXATION_RATES.md §10).
++void SWMMEngine::rom1dAdditiveResponse(const double* f, double* psi) noexcept {
++    const int na = static_cast<int>(rom1d_active_map_.size());
++    const auto un = static_cast<std::size_t>(na);
++    if (na <= 0 || rom1d_h18_S_.size() != un) { std::fill(psi, psi + na, 0.0); return; }
++    rom1d_add_dq_.resize(un);
++    for (std::size_t a = 0; a < un; ++a) rom1d_add_dq_[a] = rom1d_h18_S_[a] * f[a];
++    uncertainty::accumulateThroughflow(na, rom1d_fs_edges_, rom1d_add_dq_.data(), rom1d_add_T_, &rom1d_fs_pinned_);
++    uncertainty::solveFlowResponse(na, rom1d_fs_edges_, rom1d_add_psi_, 50, &rom1d_fs_pinned_, &rom1d_add_T_);
++    std::copy(rom1d_add_psi_.begin(), rom1d_add_psi_.end(), psi);
+ }
+ 
+ // ============================================================================
+diff --git a/src/engine/core/SWMMEngine.hpp b/src/engine/core/SWMMEngine.hpp
+index 5bc98bfb..cae16143 100644
+--- a/src/engine/core/SWMMEngine.hpp
++++ b/src/engine/core/SWMMEngine.hpp
+@@ -800,13 +800,16 @@ private:
+     int rom1d_k_modes_override_ = 0;
+     bool rom1d_qsr_ = true;   ///< H17 quasi-static residual (internal A/B hook)
+     bool rom1d_per_mode_ = false;   ///< H18 per-mode rates (internal hook)
+-    std::vector<double> rom1d_fs_relay_;   ///< H18: per-link head relay (1 - Froude gate) from the flow response
+     std::vector<double> rom1d_h18_wsym_, rom1d_h18_diag_, rom1d_h18_S_, rom1d_h18_rates_, rom1d_h18_tmp_;
+     uncertainty::CsrGraph rom1d_h18_Lc_;
+     /** @brief H18: conductance Laplacian and storage from the current state (needs rom1dRegime() and the flow response of this step). */
+     bool assembleRom1dConductance(double dt) noexcept;
+     /** @brief H18: per-mode generalized Rayleigh rates on the current basis into rom1d_h18_rates_. */
+     void refreshRom1dModeRates() noexcept;
++    /** @brief H18: steady head response psi to an additive head-rate field f (extra inflow S*f), active space. */
++    void rom1dAdditiveResponse(const double* f, double* psi) noexcept;
++    std::vector<double> rom1d_add_dq_, rom1d_add_T_, rom1d_add_psi_;
++    std::vector<double> rom1d_h18_comp_;   ///< H18 per-node complement rate diag(Lc)/S
+     double rom1d_last_k1d_ = 0.0;
+ 
+     /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
+diff --git a/src/engine/uncertainty/RomFlowResponse.hpp b/src/engine/uncertainty/RomFlowResponse.hpp
+index 37c9e7ab..837d606e 100644
+--- a/src/engine/uncertainty/RomFlowResponse.hpp
++++ b/src/engine/uncertainty/RomFlowResponse.hpp
+@@ -54,6 +54,7 @@ struct FlowEdge {
+     double ju = 0.0;   ///< conduit dQ/dh_up
+     double jd = 0.0;   ///< conduit dQ/dh_dn (<= 0)
+     double d  = 0.0;   ///< structure |dQ/dH| on the upstream head
++    int link = -1;     ///< engine link index (H18 conductance assembly)
+ };
+ 
+ /// Fill phi (size n) from the oriented edge list. Returns the number of
+@@ -62,9 +63,15 @@ struct FlowEdge {
+ /// `pinned` (optional, size n): nodes whose head cannot move -- a junction
+ /// overflowing at its rim, where surplus water spills -- get phi = 0, like an
+ /// outfall, and relay nothing upstream.
++///
++/// `source` (optional, size n, PR H18): the flow change each node must pass
++/// to its outgoing edges, in place of the Manning source sum_out q. With the
++/// throughflow change from accumulateThroughflow() this gives the steady head
++/// response to an extra inflow (docs/uncertainty/RELAXATION_RATES.md §10).
+ inline int solveFlowResponse(int n, const std::vector<FlowEdge>& edges,
+                              std::vector<double>& phi, int max_passes = 50,
+-                             const std::vector<char>* pinned = nullptr) {
++                             const std::vector<char>* pinned = nullptr,
++                             const std::vector<double>* source = nullptr) {
+     const auto un = static_cast<std::size_t>(std::max(n, 0));
+     phi.assign(un, 0.0);
+     if (n <= 0) return 0;
+@@ -85,12 +92,12 @@ inline int solveFlowResponse(int n, const std::vector<FlowEdge>& edges,
+     auto update = [&](int i) -> double {
+         if (pinned && static_cast<std::size_t>(i) < pinned->size() && (*pinned)[static_cast<std::size_t>(i)])
+             return 0.0;
+-        double num = 0.0, den = 0.0;
++        double num = source ? (*source)[static_cast<std::size_t>(i)] : 0.0, den = 0.0;
+         for (int p = start[static_cast<std::size_t>(i)]; p < start[static_cast<std::size_t>(i) + 1]; ++p) {
+             const auto& e = edges[static_cast<std::size_t>(out[static_cast<std::size_t>(p)])];
+             if (e.conduit) {
+                 const double pd = (e.dn >= 0 && e.dn < n) ? phi[static_cast<std::size_t>(e.dn)] : 0.0;
+-                num += e.q - e.jd * pd;
++                num += (source ? 0.0 : e.q) - e.jd * pd;
+                 den += e.ju;
+             } else {
+                 den += e.d;
+@@ -138,4 +145,66 @@ inline int solveFlowResponse(int n, const std::vector<FlowEdge>& edges,
+     return passes;
+ }
+ 
++/// PR H18: steady change of each node's throughflow when node i receives an
++/// extra inflow dq[i]. T_i = dq_i + sum over incoming edges of the upstream
++/// node's T times the edge's share of that node's outflow (|q| over all its
++/// outgoing edges, structures included). A node with no outgoing edge keeps
++/// what it receives; a pinned node (spilling at its rim) passes nothing on.
++/// Upstream-first Kahn order; Gauss-Seidel on flow cycles.
++inline void accumulateThroughflow(int n, const std::vector<FlowEdge>& edges,
++                                  const double* dq, std::vector<double>& T,
++                                  const std::vector<char>* pinned = nullptr,
++                                  int max_passes = 50) {
++    const auto un = static_cast<std::size_t>(std::max(n, 0));
++    T.assign(un, 0.0);
++    if (n <= 0) return;
++    std::vector<double> qout(un, 0.0);
++    for (const auto& e : edges)
++        if (e.up >= 0 && e.up < n) qout[static_cast<std::size_t>(e.up)] += std::fabs(e.q);
++    std::vector<std::vector<std::pair<int, double>>> in(un);   // (upstream node, share)
++    std::vector<int> pending(un, 0);
++    std::vector<std::vector<int>> next(un);
++    for (const auto& e : edges) {
++        if (e.up < 0 || e.up >= n || e.dn < 0 || e.dn >= n) continue;
++        const auto uu = static_cast<std::size_t>(e.up);
++        const double share = (qout[uu] > 0.0) ? std::fabs(e.q) / qout[uu] : 0.0;
++        in[static_cast<std::size_t>(e.dn)].emplace_back(e.up, share);
++        ++pending[static_cast<std::size_t>(e.dn)];
++        next[uu].push_back(e.dn);
++    }
++    auto passOn = [&](int u) {
++        return (pinned && static_cast<std::size_t>(u) < pinned->size() && (*pinned)[static_cast<std::size_t>(u)])
++               ? 0.0 : T[static_cast<std::size_t>(u)];
++    };
++    auto update = [&](int i) {
++        double t = dq[i];
++        for (const auto& [u, share] : in[static_cast<std::size_t>(i)]) t += share * passOn(u);
++        return t;
++    };
++    std::vector<int> queue;
++    queue.reserve(un);
++    for (int i = 0; i < n; ++i) if (pending[static_cast<std::size_t>(i)] == 0) queue.push_back(i);
++    std::vector<char> done(un, 0);
++    for (std::size_t h = 0; h < queue.size(); ++h) {
++        const int i = queue[h];
++        T[static_cast<std::size_t>(i)] = update(i);
++        done[static_cast<std::size_t>(i)] = 1;
++        for (int d : next[static_cast<std::size_t>(i)])
++            if (--pending[static_cast<std::size_t>(d)] == 0) queue.push_back(d);
++    }
++    if (queue.size() == un) return;
++    for (int pass = 0; pass < max_passes; ++pass) {
++        double change = 0.0, scale = 0.0;
++        for (int i = 0; i < n; ++i) {
++            if (done[static_cast<std::size_t>(i)]) continue;
++            const double v = update(i);
++            change = std::max(change, std::fabs(v - T[static_cast<std::size_t>(i)]));
++            scale = std::max(scale, std::fabs(v));
++            T[static_cast<std::size_t>(i)] = v;
++        }
++        if (change <= 1.0e-10 * (scale + 1.0e-12)) break;
++    }
++    for (double& v : T) if (!std::isfinite(v)) v = 0.0;
++}
++
+ }  // namespace openswmm::uncertainty
+diff --git a/src/engine/uncertainty/SpectralROM1D.cpp b/src/engine/uncertainty/SpectralROM1D.cpp
+index 11037171..63703f57 100644
+--- a/src/engine/uncertainty/SpectralROM1D.cpp
++++ b/src/engine/uncertainty/SpectralROM1D.cpp
+@@ -277,6 +277,8 @@ void SpectralROM1D::seed(const double* h_nodes) {
+     // until the first advance() supplies a fresh deterministic reference.
+     std::fill(a_ensemble.begin(), a_ensemble.end(), 0.0);
+     qsr_r_.clear();
++    add_res_.clear();
++    add_res_state_.clear();
+     h_det_last_.assign(h_nodes, h_nodes + static_cast<std::size_t>(n_nodes));
+ 
+     // PR H11: reset the ROM's own clock and phase-coordinate history so a
+@@ -372,6 +374,24 @@ void SpectralROM1D::advance(double dt, double K1d,
+         qsr_r_.clear();
+     }
+     const double* loc_field = soft_loc_field_ ? soft_loc_field_ : runoff_per_node;
++    // PR H18 (RELAXATION_RATES.md §10): on the storage basis, every additive
++    // field (head rate) is replaced by its steady head response psi from the
++    // flow-response sweep. Each mode then relaxes toward kappa * (Q^T psi) at its
++    // own rate instead of integrating the rate through the symmetric operator,
++    // which drops the downstream transfer of extra flow.
++    const bool add_target = static_cast<bool>(additive_response) && hasStorage();
++    auto respond = [&](const double* f, std::vector<double>& out) -> const double* {
++        out.assign(nn, 0.0);
++        additive_response(f, out.data());
++        return out.data();
++    };
++    const double* spread_a = soft_spread_field_;
++    const double* spread_b = soft_spread_field_b_;
++    if (add_target) {
++        if (loc_field) loc_field = respond(loc_field, psi_loc_);
++        if (spread_a)  spread_a  = respond(spread_a, psi_a_);
++        if (spread_b)  spread_b  = respond(spread_b, psi_b_);
++    }
+     if (loc_field) {
+         for (std::size_t j = 0; j < nk; ++j) {
+             const double* Pj = projCol_(j);
+@@ -388,7 +408,7 @@ void SpectralROM1D::advance(double dt, double K1d,
+             const double* Pj = projCol_(j);
+             double dot = 0.0;
+             for (std::size_t i = 0; i < nn; ++i)
+-                dot += Pj[i] * soft_spread_field_[i];
++                dot += Pj[i] * spread_a[i];
+             soft_r_spread_[j] = dot;
+         }
+     } else {
+@@ -404,7 +424,7 @@ void SpectralROM1D::advance(double dt, double K1d,
+             const double* Pj = projCol_(j);
+             double dot = 0.0;
+             for (std::size_t i = 0; i < nn; ++i)
+-                dot += Pj[i] * soft_spread_field_b_[i];
++                dot += Pj[i] * spread_b[i];
+             soft_r_spread_b_[j] = dot;
+         }
+     } else {
+@@ -432,16 +452,28 @@ void SpectralROM1D::advance(double dt, double K1d,
+         soft_r_spread_spatial_.assign(
+             static_cast<std::size_t>(n_ensemble) * nk, 0.0);
+         std::fill(soft_spatial_absmax_.begin(), soft_spatial_absmax_.end(), 0.0);
++        if (add_target) psi_sp_.assign(static_cast<std::size_t>(n_ensemble) * nn, 0.0);
+         for (int i = 0; i < n_ensemble; ++i) {
+             const double* Wi = &soft_field_->values[
+                 static_cast<std::size_t>(i) * nn];
+             double* Ri = &soft_r_spread_spatial_[
+                 static_cast<std::size_t>(i) * nk];
++            const double* psi_i = nullptr;
++            if (add_target) {
++                psi_tmp_.resize(nn);
++                for (std::size_t t = 0; t < nn; ++t) psi_tmp_[t] = soft_spread_field_[t] * Wi[t];
++                double* dst = &psi_sp_[static_cast<std::size_t>(i) * nn];
++                additive_response(psi_tmp_.data(), dst);
++                psi_i = dst;
++            }
+             for (std::size_t j = 0; j < nk; ++j) {
+                 const double* Pj = projCol_(j);
+                 double dot = 0.0;
+-                for (std::size_t t = 0; t < nn; ++t)
+-                    dot += Pj[t] * soft_spread_field_[t] * Wi[t];
++                if (psi_i)
++                    for (std::size_t t = 0; t < nn; ++t) dot += Pj[t] * psi_i[t];
++                else
++                    for (std::size_t t = 0; t < nn; ++t)
++                        dot += Pj[t] * soft_spread_field_[t] * Wi[t];
+                 Ri[j] = dot;
+                 const double ad = std::abs(dot);
+                 if (ad > soft_spatial_absmax_[j]) soft_spatial_absmax_[j] = ad;
+@@ -455,14 +487,25 @@ void SpectralROM1D::advance(double dt, double K1d,
+         const auto Ks = static_cast<std::size_t>(soft_reduced_ks_);
+         // R_m[j] = Σ_t P_j[t]·spread[t]·ψ_m(t)  (K_s·k projections).
+         soft_reduced_rm_.assign(Ks * nk, 0.0);
++        if (add_target) psi_red_.assign(Ks * nn, 0.0);
+         for (std::size_t m = 0; m < Ks; ++m) {
+             const double* psim = soft_reduced_psi_ + m * nn;
+             double* Rm = &soft_reduced_rm_[m * nk];
++            const double* resp_m = nullptr;
++            if (add_target) {
++                psi_tmp_.resize(nn);
++                for (std::size_t t = 0; t < nn; ++t) psi_tmp_[t] = soft_spread_field_[t] * psim[t];
++                additive_response(psi_tmp_.data(), &psi_red_[m * nn]);
++                resp_m = &psi_red_[m * nn];
++            }
+             for (std::size_t j = 0; j < nk; ++j) {
+                 const double* Pj = projCol_(j);
+                 double dot = 0.0;
+-                for (std::size_t t = 0; t < nn; ++t)
+-                    dot += Pj[t] * soft_spread_field_[t] * psim[t];
++                if (resp_m)
++                    for (std::size_t t = 0; t < nn; ++t) dot += Pj[t] * resp_m[t];
++                else
++                    for (std::size_t t = 0; t < nn; ++t)
++                        dot += Pj[t] * soft_spread_field_[t] * psim[t];
+                 Rm[j] = dot;
+             }
+         }
+@@ -487,13 +530,16 @@ void SpectralROM1D::advance(double dt, double K1d,
+     }
+     // Registered FORCING_VECTOR fields (PR 9b): re-project each per call
+     // (the fields are live engine buffers that change every routing step).
+-    for (auto& ep : extra_params_) {
++    if (add_target) psi_ep_.resize(extra_params_.size());
++    for (std::size_t e = 0; e < extra_params_.size(); ++e) {
++        auto& ep = extra_params_[e];
+         if (ep.entry != ParamEntry::FORCING_VECTOR) continue;
++        const double* fld = add_target ? respond(ep.field, psi_ep_[e]) : ep.field;
+         for (std::size_t j = 0; j < nk; ++j) {
+             const double* Pj = projCol_(j);
+             double dot = 0.0;
+             for (std::size_t i = 0; i < nn; ++i)
+-                dot += Pj[i] * ep.field[i];
++                dot += Pj[i] * fld[i];
+             ep.rv[j] = dot;
+         }
+     }
+@@ -560,12 +606,90 @@ void SpectralROM1D::advance(double dt, double K1d,
+                                ? std::abs(dt) * soft_max_abs_coeff_b_
+                                : 0.0;
+ 
++    // PR H18: quasi-static residual of the additive targets, per member: the
++    // part of kappa * psi the kept modes miss, added at reconstruction exactly
++    // as the Manning residual is.
++    if (add_target) {
++        const double* P = basis->P.data();
++        auto residual = [&](const double* psi, const double* b, std::vector<double>& r) {
++            r.assign(psi, psi + nn);
++            for (std::size_t j = 0; j < nk; ++j)
++                for (std::size_t t = 0; t < nn; ++t) r[t] -= P[j * nn + t] * b[j];
++        };
++        if (loc_field) residual(loc_field, r_coarse.data(), res_loc_); else res_loc_.clear();
++        if (spread_a && !soft_use_rij) residual(spread_a, soft_r_spread_.data(), res_a_); else res_a_.clear();
++        if (spread_b) residual(spread_b, soft_r_spread_b_.data(), res_b_); else res_b_.clear();
++        res_ep_.resize(extra_params_.size());
++        for (std::size_t e = 0; e < extra_params_.size(); ++e) {
++            if (extra_params_[e].entry == ParamEntry::FORCING_VECTOR)
++                residual(psi_ep_[e].data(), extra_params_[e].rv.data(), res_ep_[e]);
++            else res_ep_[e].clear();
++        }
++        const bool spatial_psi = soft_use_rij && spread_a != nullptr;
++        add_res_.assign(static_cast<std::size_t>(n_ensemble) * nn, 0.0);
++        for (int i = 0; i < n_ensemble; ++i) {
++            const auto ui = static_cast<std::size_t>(i);
++            double* ri = &add_res_[ui * nn];
++            const double base = has_ensemble_runoff
++                ? (ensemble_runoff_[ui] / mean_ensemble_runoff_) : runoff_mult[ui];
++            const double scale_1 = base * forcing_mult_prod(ui) - 1.0;
++            if (!res_loc_.empty() && scale_1 != 0.0)
++                for (std::size_t t = 0; t < nn; ++t) ri[t] += scale_1 * res_loc_[t];
++            if (!res_a_.empty())
++                for (std::size_t t = 0; t < nn; ++t) ri[t] += soft_coeff_[ui] * res_a_[t];
++            if (!res_b_.empty())
++                for (std::size_t t = 0; t < nn; ++t) ri[t] += soft_coeff_b_[ui] * res_b_[t];
++            for (std::size_t e = 0; e < extra_params_.size(); ++e) {
++                if (res_ep_[e].empty()) continue;
++                const double k = extra_params_[e].column[ui] - 1.0;
++                for (std::size_t t = 0; t < nn; ++t) ri[t] += k * res_ep_[e][t];
++            }
++            if (spatial_psi) {
++                // psi_i (materialized) or sum_m a_im psi_m (reduced), minus P R_i.
++                const double* Ri = &soft_r_spread_spatial_[ui * nk];
++                if (soft_spatial) {
++                    const double* psi_i = &psi_sp_[ui * nn];
++                    for (std::size_t t = 0; t < nn; ++t) ri[t] += psi_i[t];
++                } else {
++                    const auto Ks = static_cast<std::size_t>(soft_reduced_ks_);
++                    const double* ai = soft_reduced_a_ + ui * Ks;
++                    for (std::size_t m = 0; m < Ks; ++m)
++                        for (std::size_t t = 0; t < nn; ++t) ri[t] += ai[m] * psi_red_[m * nn + t];
++                }
++                for (std::size_t j = 0; j < nk; ++j)
++                    for (std::size_t t = 0; t < nn; ++t) ri[t] -= P[j * nn + t] * Ri[j];
++            }
++        }
++        // Relax each member's residual toward add_res_ at the complement rate
++        // (scaled 1/mm like the modes); no rates = quasi-static (instant).
++        if (comp_rate_.size() == nn) {
++            if (add_res_state_.size() != add_res_.size()) add_res_state_.assign(add_res_.size(), 0.0);
++            for (int i = 0; i < n_ensemble; ++i) {
++                const auto ui = static_cast<std::size_t>(i);
++                const double mm = mannings_mult[ui] * rate_mult_prod(ui);
++                for (std::size_t t = 0; t < nn; ++t) {
++                    const double e = std::exp(-comp_rate_[t] * dt / mm);
++                    double& st = add_res_state_[ui * nn + t];
++                    const double tg = add_res_[ui * nn + t];
++                    st = (st - tg) * e + tg;
++                }
++            }
++            add_res_.swap(add_res_state_);
++            add_res_state_ = add_res_;   // state carried in both buffers
++        }
++    } else {
++        add_res_.clear();
++        add_res_state_.clear();
++    }
++
+     n_modes_active = 0;
+     for (std::size_t j = 0; j < nk; ++j) {
+         const double lam = modeRate_(j);
++        // PR H18: target-form forcing enters at the mode's rate.
++        const double tf = add_target ? lam * K1d : 1.0;
+         bool by_energy  = mode_energy_[j] >= mode_drop_threshold;
+         bool by_rain    = rain_scale > 0.0 &&
+-                          std::abs(r_coarse[j]) * rain_scale >= mode_drop_threshold;
++                          tf * std::abs(r_coarse[j]) * rain_scale >= mode_drop_threshold;
+         bool by_manning = mann_scale > 0.0 &&
+                           lam * std::abs(b_coarse[j]) * mann_scale >= mode_drop_threshold;
+         // PR H7: sum the two channels' first-order magnitudes rather than
+@@ -578,11 +702,11 @@ void SpectralROM1D::advance(double dt, double K1d,
+                           : std::abs(soft_r_spread_[j])) * soft_scale
+             + std::abs(soft_r_spread_b_[j]) * soft_scale_b;
+         bool by_soft    = (soft_scale > 0.0 || soft_scale_b > 0.0) &&
+-                          soft_metric >= mode_drop_threshold;
++                          tf * soft_metric >= mode_drop_threshold;
+         bool by_vector  = false;
+         for (const auto& ep : extra_params_) {
+             if (ep.entry == ParamEntry::FORCING_VECTOR &&
+-                ep.max_dev * std::abs(dt) * std::abs(ep.rv[j]) >= mode_drop_threshold) {
++                tf * ep.max_dev * std::abs(dt) * std::abs(ep.rv[j]) >= mode_drop_threshold) {
+                 by_vector = true;
+                 break;
+             }
+@@ -630,21 +754,32 @@ void SpectralROM1D::advance(double dt, double K1d,
+                 ? (ensemble_runoff_[ui] / mean_ensemble_runoff_)
+                 : runoff_mult[ui];
+             const double scale_1  = base * forcing_mult_prod(ui) - 1.0;
++            reduced_ga_.assign(nk, 0.0);
+             for (std::size_t j = 0; j < nk; ++j) {
+-                double g = -K1d * (s - 1.0) * reduced_Mb_[j] + scale_1 * r_coarse[j];
++                double ga = scale_1 * r_coarse[j];
+                 if (soft_spread_field_) {
+                     if (soft_use_rij)
+-                        g += soft_r_spread_spatial_[ui * nk + j];
++                        ga += soft_r_spread_spatial_[ui * nk + j];
+                     else
+-                        g += soft_coeff_[ui] * soft_r_spread_[j];
++                        ga += soft_coeff_[ui] * soft_r_spread_[j];
+                 }
+                 if (soft_spread_field_b_)
+-                    g += soft_coeff_b_[ui] * soft_r_spread_b_[j];
++                    ga += soft_coeff_b_[ui] * soft_r_spread_b_[j];
+                 if (has_extra) {
+                     for (const auto& ep : extra_params_)
+                         if (ep.entry == ParamEntry::FORCING_VECTOR)
+-                            g += (ep.column[ui] - 1.0) * ep.rv[j];
++                            ga += (ep.column[ui] - 1.0) * ep.rv[j];
+                 }
++                reduced_ga_[j] = ga;
++            }
++            for (std::size_t j = 0; j < nk; ++j) {
++                double ga = reduced_ga_[j];
++                if (add_target) {   // target form: steady deviation = ga, so g = (K1d M / mm) ga
++                    double mg = 0.0;
++                    for (std::size_t q = 0; q < nk; ++q) mg += reduced_M_[j * nk + q] * reduced_ga_[q];
++                    ga = K1d * s * mg;
++                }
++                const double g = -K1d * (s - 1.0) * reduced_Mb_[j] + ga;
+                 reduced_g_[j] = g * dt;   // forcing integral column c = dt·g
+             }
+             reduced_batch_.apply(s, reduced_g_.data(), ai);
+@@ -676,25 +811,27 @@ void SpectralROM1D::advance(double dt, double K1d,
+ 
+             const double lam  = modeRate_(j);
+             const double rate = lam * K1d / mm;
+-            double g          = -lam * K1d * inv_mm_1 * b_coarse[j]
+-                                + scale_1 * r_coarse[j];
++            double ga         = scale_1 * r_coarse[j];
+             if (soft_spread_field_) {
+                 if (soft_use_rij)
+-                    g += soft_r_spread_spatial_[ui * nk + j];
++                    ga += soft_r_spread_spatial_[ui * nk + j];
+                 else
+-                    g += soft_coeff_[ui] * soft_r_spread_[j];
++                    ga += soft_coeff_[ui] * soft_r_spread_[j];
+             }
+             // PR H7: second family plane, its own coefficient. Both c_i and
+             // c_i^B come from the same u_i, so member i sits at the same rank
+             // in both families -- comonotone coherence, and a zero-coefficient
+             // (nominal) member contributes exactly zero to both.
+             if (soft_spread_field_b_)
+-                g += soft_coeff_b_[ui] * soft_r_spread_b_[j];
++                ga += soft_coeff_b_[ui] * soft_r_spread_b_[j];
+             if (has_extra) {
+                 for (const auto& ep : extra_params_)
+                     if (ep.entry == ParamEntry::FORCING_VECTOR)
+-                        g += (ep.column[ui] - 1.0) * ep.rv[j];
++                        ga += (ep.column[ui] - 1.0) * ep.rv[j];
+             }
++            // PR H18 target form: the additive steady deviation is ga itself.
++            const double g = -lam * K1d * inv_mm_1 * b_coarse[j]
++                             + (add_target ? rate * ga : ga);
+ 
+             if (rate > rate_floor) {
+                 const double steady = g / rate;
+@@ -816,6 +953,13 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
+             for (std::size_t i = 0; i < M; ++i) row[i] += qsr_mm1_[i] * r;
+         }
+     }
++    // PR H18: quasi-static residual of the additive targets (member-major).
++    if (add_res_.size() == M * nn) {
++        for (std::size_t t = 0; t < nn; ++t) {
++            double* row = &recon_buf_[t * M];
++            for (std::size_t i = 0; i < M; ++i) row[i] += add_res_[i * nn + t];
++        }
++    }
+ 
+     const bool phase_active = phase_cfg.enabled && !tbar_.empty() && !hist_.empty();
+ 
+@@ -1095,6 +1239,11 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
+     commitBasisUpdateSuccess_(conduit_off, n_conduits, node_surcharged, sim_time);
+ }
+ 
++void SpectralROM1D::setComplementRates(const double* rates) {
++    if (rates == nullptr) { comp_rate_.clear(); return; }
++    comp_rate_.assign(rates, rates + n_nodes);
++}
++
+ void SpectralROM1D::setModeRates(const double* rates) {
+     if (rates == nullptr) { mode_rates_.clear(); return; }
+     mode_rates_.assign(rates, rates + n_kept);
+@@ -1116,6 +1265,7 @@ double SpectralROM1D::reconstructHead(int member, int active_node) const noexcep
+         h += basis->P[j * nn + uk] * ai[j];
+     }
+     if (qsr_r_.size() == nn && ui < qsr_mm1_.size()) h += qsr_mm1_[ui] * qsr_r_[uk];
++    if (add_res_.size() == static_cast<std::size_t>(n_ensemble) * nn) h += add_res_[ui * nn + uk];
+     return std::max(h, 0.0);
+ }
+ 
+diff --git a/src/engine/uncertainty/SpectralROM1D.hpp b/src/engine/uncertainty/SpectralROM1D.hpp
+index 578da1dc..4e155dbb 100644
+--- a/src/engine/uncertainty/SpectralROM1D.hpp
++++ b/src/engine/uncertainty/SpectralROM1D.hpp
+@@ -41,6 +41,7 @@
+ #include "SoftSpatialField.hpp"
+ #include "RomPhaseCoordinate.hpp"
+ #include "RomQuantileGemm.hpp"
++#include <functional>
+ #include <vector>
+ #include <cstddef>
+ #include <cstdint>
+@@ -409,6 +410,21 @@ struct SpectralROM1D {
+     // conduit_off. A rebuild is forced while no storage is held yet. The
+     // caller then supplies per-step rates (setModeRates) and K1d = 1.
+ 
++    /// PR H18 (RELAXATION_RATES.md §10): steady head response to an additive
++    /// field. Given a head-rate field f (length n_nodes), writes psi, the steady
++    /// head change the extra inflow S*f produces. When set on the storage basis,
++    /// every additive forcing (runoff, soft rain, FORCING_VECTOR) relaxes toward
++    /// its response at each mode's rate instead of being integrated through
++    /// the symmetric operator. Empty = rate forcing (the pre-H18 behaviour).
++    std::function<void(const double*, double*)> additive_response;
++
++    /// PR H18: per-node relaxation rate of the part of a target the kept modes
++    /// miss (1/s, length n_nodes; the engine passes diag(Lc)/S). With it the
++    /// additive residual relaxes toward its steady value like a mode instead of
++    /// appearing at once -- mode acceleration assumes the dropped modes are
++    /// fast, which a storage-dominated network contradicts. Null = instant.
++    void setComplementRates(const double* rates);
++
+     /// Per-mode rates (1/s, length n_kept) used in place of the basis
+     /// eigenvalues by advance(). Cleared by every successful rebuild.
+     void setModeRates(const double* rates);
+@@ -633,7 +649,11 @@ private:
+     double modeRate_(std::size_t j) const noexcept {
+         return mode_rates_.empty() ? basis->eigenvalues[j] : mode_rates_[j];
+     }
+-    std::vector<double> qsr_r_, qsr_mm1_;   ///< quasi-static residual field / per-member (mm - 1)
++    std::vector<double> qsr_r_, qsr_mm1_;
++    std::vector<double> psi_loc_, psi_a_, psi_b_, psi_tmp_, psi_sp_, psi_red_;   ///< H18 additive responses
++    std::vector<std::vector<double>> psi_ep_, res_ep_;
++    std::vector<double> res_loc_, res_a_, res_b_, add_res_, reduced_ga_;
++    std::vector<double> comp_rate_, add_res_state_;   ///< H18 complement rates (n) / lagged residual (M x n)            ///< H18 residuals (add_res_: M x n)   ///< quasi-static residual field / per-member (mm - 1)
+ 
+     std::vector<double> ensemble_runoff_;
+     double mean_ensemble_runoff_ = 0.0;
