@@ -3448,6 +3448,23 @@ band forms although rain uncertainty changes the flow. A correct additive
 channel needs the extra inflow itself (runoff × relative spread × elasticity)
 as its source.
 
+### 10c. Today's rain channel under FV (2026-10-16)
+
+The soft-rain gates had never been run under `FLOW_ROUTING FV`. Their harnesses
+now take `H17_ROUTING=FV`, which applies to the MC members and the ROM alike.
+Rain channel as shipped (H18 off), coverage / width:
+
+| Gate | Dynamic wave | FV |
+|---|---|---|
+| SR-5 soft rain (FULL) | 0.881 / 0.976 | **0.900 / 0.968**, calibrated |
+| CL-1e soft rain (CORR_LEN) | 0.827 / 0.804 | **0.846 / 0.815**, calibrated |
+
+K1d is about 19× smaller under FV, but these fixtures are storage-dominated:
+the rain channel there acts as an accumulator of the level rise, and its decay
+rate barely matters. So option 1 (H18 for roughness, today's rain channel) loses
+nothing for FV rain on these fixtures. The steady-flow blind spot (§10b) applies
+under both solvers.
+
 ## 11. Reproduction
 
 ```

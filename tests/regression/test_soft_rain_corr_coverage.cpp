@@ -186,7 +186,16 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     const std::string pfx = "/tmp/cl1e_" + std::to_string(getpid()) + "_" + tag;
     const std::string inp_path = pfx + ".inp";
     const std::string rpt_path = pfx + ".rpt";
-    { std::ofstream f(inp_path); f << inp_text; }
+    {
+        // H17_ROUTING=FV runs MC members and ROM under the finite-volume solver.
+        std::string txt = inp_text;
+        if (const char* r = std::getenv("H17_ROUTING")) {
+            const std::string key = "FLOW_ROUTING DYNWAVE";
+            const auto pos = txt.find(key);
+            if (pos != std::string::npos) txt.replace(pos, key.size(), std::string("FLOW_ROUTING ") + r);
+        }
+        std::ofstream f(inp_path); f << txt;
+    }
 
     SWMM_Engine handle = swmm_engine_create();
     if (!handle) return out;
