@@ -3389,3 +3389,31 @@ TEST(PerModeRates, TransientOfAGeneralizedModeIsExact) {
     }
     EXPECT_LT(worst, 1.0e-9 * std::max(scale, 1.0)) << "scale " << scale;
 }
+
+TEST(PerModeRates, FailedRebuildLeavesTheLiveBasisUntouched) {
+    // A rebuild that fails must not touch the
+    // basis the ROM is reconstructing with. Building in place once overwrote it,
+    // leaving coefficients sized for another basis (2026-10-16: out-of-bounds
+    // reads, run-to-run differences and divergence under H18).
+    const int n = 11;
+    H18Chain ch(n);
+    for (int i = 0; i < n; ++i) ch.S[static_cast<std::size_t>(i)] = 12.566 + 50.0 * i;
+    SpectralROM1D rom;
+    auto keep = makeH18Rom(ch, 4, rom, 0.2);
+    ASSERT_TRUE(rom.hasStorage());
+    const GraphEigenBasis* before = rom.basis;
+    const std::vector<double> P_before = rom.basis->P;
+    const int kept_before = rom.basis->num_kept;
+    // No conductance anywhere: every mode is null, so the solve itself fails
+    // (after it has run, which is when the in-place build did its damage).
+    std::vector<double> bad_S = ch.S;
+    for (double& c : ch.c) c = 0.0;
+    const CsrGraph Lc = ch.Lc();
+    std::vector<double> w(static_cast<std::size_t>(n), 3.0);
+    const int failed_before = rom.basis_updates_failed_;
+    rom.updateBasis(w.data(), ch.n1.data(), ch.n2.data(), n, 1.0, nullptr, &Lc, bad_S.data());
+    EXPECT_EQ(rom.basis_updates_failed_, failed_before + 1);
+    EXPECT_EQ(rom.basis, before);
+    EXPECT_EQ(rom.basis->num_kept, kept_before);
+    EXPECT_EQ(rom.basis->P, P_before);
+}

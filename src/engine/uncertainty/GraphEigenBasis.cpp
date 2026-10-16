@@ -451,7 +451,14 @@ bool GraphEigenBasis::buildGeneralized(const CsrGraph& Lc, const double* S,
             for (std::size_t i = 0; i < un; ++i)
                 w0[j * un + i] = v0_block[j * un + i] / rs[i];
     }
-    if (!build(A, num_modes_req, w0.empty() ? nullptr : w0.data())) return false;
+    // A slow storage mode (a pond with little outflow) has a tiny but real
+    // rate; with the mean-scaled threshold it read as null and was dropped,
+    // failing the rebuild. Only exact (round-off) zeros are null here.
+    const double saved_tol = null_tol;
+    null_tol = std::min(null_tol, 1.0e-14);
+    const bool ok = build(A, num_modes_req, w0.empty() ? nullptr : w0.data());
+    null_tol = saved_tol;
+    if (!ok) return false;
     for (std::size_t j = 0; j < static_cast<std::size_t>(num_kept); ++j) {
         for (std::size_t i = 0; i < un; ++i) P[j * un + i] *= rs[i];
         eigenvalues[j] *= rho;

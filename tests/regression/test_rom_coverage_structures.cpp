@@ -173,6 +173,7 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
         if (const char* q = std::getenv("H17_QSR")) e0->rom1dQuasiStatic() = std::atoi(q) != 0;
         if (const char* q = std::getenv("H18_PER_MODE")) e0->rom1dPerModeRates() = std::atoi(q) != 0;
         if (const char* q = std::getenv("H19_FULL_ORDER")) e0->rom1dAdditiveFullOrder() = std::atoi(q) != 0;
+        if (const char* q = std::getenv("H14_DIRECTIONAL")) e0->rom1dDirectionalConfig().enabled = std::atoi(q) != 0;
     }
     if (!opened || swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {
         std::printf("[H17] %s failed to start: %s\n", tag.c_str(), swmm_get_last_error_msg(h));

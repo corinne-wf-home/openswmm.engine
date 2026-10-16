@@ -1042,25 +1042,25 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     // --- Warm-start re-solve (or cold, if PR H1's triggers fired) --------
     std::vector<double> P_old = basis->P;  // column-major n_nodes × n_kept copy
 
-    if (!basis_owned_) {
-        basis_owned_ = std::make_unique<GraphEigenBasis>();
-        basis_owned_->null_tol = basis->null_tol;
-    }
+    // Build into a fresh basis and swap it in only on success. Building in
+    // place overwrote the LIVE basis when `basis` already pointed at
+    // basis_owned_, so a failed rebuild left the ROM reconstructing with a
+    // basis of a different size than its coefficients: out-of-bounds reads,
+    // run-to-run differences and divergence (found 2026-10-16 under H18).
+    auto fresh = std::make_unique<GraphEigenBasis>();
+    fresh->null_tol = basis->null_tol;
     const double* v0 = force_cold ? nullptr : P_old.data();
     const bool built = generalized
-        ? basis_owned_->buildGeneralized(*Lc, storage, n_kept, v0)
-        : basis_owned_->build(L_new, n_kept, v0);
-    if (!built) {
-        ++basis_updates_failed_;
-        return;
-    }
+        ? fresh->buildGeneralized(*Lc, storage, n_kept, v0)
+        : fresh->build(L_new, n_kept, v0);
     // Sanity check: basis must have exactly n_kept modes (Lanczos must not have
     // broken down prematurely — the combo v0 starting vector prevents this for
     // normal networks, but guard against degenerate geometry).
-    if (basis_owned_->num_kept != n_kept) {
+    if (!built || fresh->num_kept != n_kept) {
         ++basis_updates_failed_;
         return;
     }
+    basis_owned_ = std::move(fresh);
 
     if (force_cold) ++basis_rebuilds_cold_forced_;
 
