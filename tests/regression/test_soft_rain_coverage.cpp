@@ -70,6 +70,9 @@ static const double kPipeDiam  = envDouble("SR5_PIPE_DIAM", 0.5);  // SR-6: surc
 static const double kSubWidth  = envDouble("SR5_SUBCATCH_WIDTH", 5.0); // SR-6: runoff-elasticity probe (ft)
 static const double kSubArea   = envDouble("SR5_SUBCATCH_AREA", 5.0);  // SR-6: equilibrium probe (acres)
 static const int    kElasOn    = envInt("SR5_RUNOFF_ELASTICITY", 1);    // SR-6 A/B: 0 = pre-SR-6 mapping
+static const double kStorArea  = envDouble("SR5_STORAGE_AREA", 20000.0); // H19: small = steady flow (ft^2)
+// Cell label for the C1/C2 line, so one binary serves SR-5 and SR-7 (steady flow).
+static const char*  kCellName  = std::getenv("SR5_CELL") ? std::getenv("SR5_CELL") : "SR-5 soft rain, FULL";
 constexpr int    kMcRuns       = 21;
 constexpr double kReportStep   = 300.0;   // s (5 min)
 constexpr double kEndTime      = 3600.0;  // s (1 h sampling window)
@@ -111,7 +114,7 @@ std::string fixtureInp(double rain_mult, bool with_soft) {
     // Large-area storage nodes → heads rise gradually (transient dh/dt).
     f << "\n[STORAGE]\n";
     for (int i = 1; i <= 5; ++i)
-        f << "J" << i << " " << (100 - i) << " 60 0 FUNCTIONAL 0 0 20000\n";
+        f << "J" << i << " " << (100 - i) << " 60 0 FUNCTIONAL 0 0 " << kStorArea << "\n";
     f << "\n[OUTFALLS]\nO1 90 FREE NO\n\n";
     f << "[CONDUITS]\n";
     for (int i = 1; i <= 4; ++i)
@@ -164,8 +167,14 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
         std::remove((rpt_path.substr(0, rpt_path.size() - 4) + ".uncertainty.csv").c_str());
     };
 
-    if (swmm_engine_open(handle, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0 ||
-        swmm_engine_initialize(handle) != 0 ||
+    if (swmm_engine_open(handle, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0) {
+        cleanup();
+        return out;
+    }
+    // H19 A-B knob: the full-order additive channel is chosen when the ROM is built.
+    if (const char* v = std::getenv("H19_FULL_ORDER"))
+        static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(v) != 0;
+    if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
         return out;
@@ -403,7 +412,7 @@ TEST(SoftRainCoverage, BandsBracketBruteForceMonteCarlo) {
     // SR-6 (2026-10-05) raised this cell from 0.761 to 0.881 by propagating the
     // gage spread through the rain->runoff elasticity; it is now a validated
     // cell and asserts the floor (SR5_RUNOFF_ELASTICITY=0 reproduces 0.761).
-    EXPECT_TRUE(mcq::reportCalibration("SR-5 soft rain, FULL", member_cov, ratio_med, "SR-6"))
+    EXPECT_TRUE(mcq::reportCalibration(kCellName, member_cov, ratio_med, "SR-6 / H19"))
         << "SR-5 is a validated cell since SR-6: member coverage must stay >= 0.80 (measured 0.881)";
     EXPECT_GE(coverage, 0.90)
         << "ROM [q05,q95] must contain the MC median at >=90% of samples";

@@ -89,6 +89,7 @@
 #include "../uncertainty/RomPhaseCoordinate.hpp"
 #include "../uncertainty/RomDirectionalOperator.hpp"
 #include "../uncertainty/RomFlowResponse.hpp"
+#include "../uncertainty/RomAdditiveChannel.hpp"
 #include "../uncertainty/UncertaintyEnsemble.hpp"
 #include "../uncertainty/SoftSpatialField.hpp"
 #include "../uncertainty/SpdeSpatialBasis.hpp"
@@ -769,6 +770,12 @@ public:
     /// storage generalized eigenbasis instead of one network K1d (default off
     /// until validated; docs/uncertainty/RELAXATION_RATES.md). Set before the first step.
     bool& rom1dPerModeRates() noexcept { return rom1d_per_mode_; }
+    /// PR H19 internal hook: full-order additive channel (soft rain, runoff
+    /// multiplier, FORCING_VECTOR) instead of modal additive forcing
+    /// (docs/uncertainty/ADDITIVE_CHANNEL.md). Set before initialize().
+    bool& rom1dAdditiveFullOrder() noexcept { return rom1d_add_full_; }
+    /// Diagnostic: Gauss-Seidel sweeps of the last additive-channel step (max over planes).
+    int rom1dAdditiveSweeps() const noexcept { return rom1d_add_sweeps_; }
     /// Diagnostic: the per-mode rates (1/s) used on the last step (H18; empty when off).
     const std::vector<double>& rom1dModeRates() const noexcept { return rom1d_h18_rates_; }
     /// Diagnostic: node storage S (ft^2) of the last H18 assembly, active space.
@@ -800,6 +807,17 @@ private:
     int rom1d_k_modes_override_ = 0;
     bool rom1d_qsr_ = true;   ///< H17 quasi-static residual (internal A/B hook)
     bool rom1d_per_mode_ = false;   ///< H18 per-mode rates (internal hook)
+    bool rom1d_add_full_ = false;   ///< H19 full-order additive channel (internal hook)
+    int rom1d_add_sweeps_ = 0;
+    int rom1d_add_np_ = 0;
+    uncertainty::AdditiveSystem rom1d_add_sys_;
+    std::vector<double> rom1d_add_qa_, rom1d_add_qb_;           ///< soft-rain extra inflow per unit coefficient (cfs)
+    std::vector<double> rom1d_add_state_, rom1d_add_kappa_, rom1d_add_q_;
+    std::vector<std::vector<double>> rom1d_vec_cols_;          ///< FORCING_VECTOR columns (theta) under H19
+    /** @brief Node storage S (ft^2, active space) into rom1d_h18_S_. */
+    void computeRom1dStorage() noexcept;
+    /** @brief H19: advance every additive plane one backward-Euler step and hand them to the ROM. */
+    void stepRom1dAdditiveChannel(double dt) noexcept;
     std::vector<double> rom1d_fs_relay_;   ///< H18: per-link head relay (1 - Froude gate) from the flow response
     std::vector<double> rom1d_h18_wsym_, rom1d_h18_diag_, rom1d_h18_S_, rom1d_h18_rates_, rom1d_h18_tmp_;
     uncertainty::CsrGraph rom1d_h18_Lc_;

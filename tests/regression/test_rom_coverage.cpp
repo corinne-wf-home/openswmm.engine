@@ -256,6 +256,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
         if (const char* k = std::getenv("H17_K1D_SCALE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dScale() = std::atof(k);
         if (const char* q = std::getenv("H17_QSR")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dQuasiStatic() = std::atoi(q) != 0;
         if (const char* q = std::getenv("H18_PER_MODE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dPerModeRates() = std::atoi(q) != 0;
+        if (const char* q = std::getenv("H19_FULL_ORDER")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(q) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();

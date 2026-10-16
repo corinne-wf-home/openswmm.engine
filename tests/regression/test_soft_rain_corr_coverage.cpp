@@ -208,8 +208,14 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
         std::remove((rpt_path.substr(0, rpt_path.size() - 4) + ".uncertainty.csv").c_str());
     };
 
-    if (swmm_engine_open(handle, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0 ||
-        swmm_engine_initialize(handle) != 0 ||
+    if (swmm_engine_open(handle, inp_path.c_str(), rpt_path.c_str(), nullptr, nullptr) != 0) {
+        cleanup();
+        return out;
+    }
+    // H19 A-B knob: the full-order additive channel is chosen when the ROM is built.
+    if (const char* v = std::getenv("H19_FULL_ORDER"))
+        static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(v) != 0;
+    if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
         return out;

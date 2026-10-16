@@ -258,6 +258,11 @@ if(OPENSWMM_BUILD_2D)
         CXX_STANDARD_REQUIRED ON
     )
     add_test(NAME regression_soft_rain_coverage COMMAND $<TARGET_FILE:test_soft_rain_coverage>)
+    # SR-7 (H19): steady rain on steady flow, the regime where the old dh/dt-driven
+    # rain channel loses its band (docs/uncertainty/ADDITIVE_CHANNEL.md §6).
+    add_test(NAME regression_soft_rain_steady_coverage COMMAND $<TARGET_FILE:test_soft_rain_coverage>)
+    set_tests_properties(regression_soft_rain_steady_coverage PROPERTIES LABELS "regression"
+        ENVIRONMENT "SR5_STORAGE_AREA=50;SR5_SUBCATCH_AREA=0.5;SR5_SUBCATCH_WIDTH=500;SR5_PIPE_DIAM=3;SR5_CELL=SR-7 soft rain, steady flow;H19_FULL_ORDER=1")
     set_tests_properties(regression_soft_rain_coverage PROPERTIES LABELS "regression")
     openswmm_stage_test_runtime_deps(test_soft_rain_coverage)
 

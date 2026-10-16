@@ -517,7 +517,8 @@ TEST(ROMQuality, ZeroPerturbationGivesNearZeroSpread) {
 //
 static double runAndGetMaxSpread(const char* inp_body,
                                   const char* inp_path,
-                                  const char* rpt_path) {
+                                  const char* rpt_path,
+                                  bool full_order_additive = false) {
     std::ofstream f(inp_path);
     f << inp_body;
     f.close();
@@ -534,6 +535,7 @@ static double runAndGetMaxSpread(const char* inp_body,
     };
 
     if (swmm_engine_open(handle, inp_path, rpt_path, nullptr, nullptr) != 0) { cleanup(); return -1.0; }
+    static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = full_order_additive;
     if (swmm_engine_initialize(handle) != 0) { cleanup(); return -1.0; }
     if (swmm_engine_start(handle, 0) != 0) { cleanup(); return -1.0; }
 
@@ -605,6 +607,25 @@ TEST(ROMQuality, RegisteredInflowParamProducesSpread) {
     ASSERT_GE(spread, 0.0) << "INFLOW run failed";
     EXPECT_GT(spread, 1.0e-9)
         << "a registered 1D INFLOW FORCING_VECTOR param must produce spread";
+}
+
+// PR H19: the same source through the full-order additive channel. The plane's
+// source is the node lateral inflow (theta_i - 1 times it), carried downstream by
+// the flow-response Jacobian, so the DWF at J1 gives a band without relying on
+// dh/dt.
+TEST(ROMQuality, RegisteredInflowParamProducesSpreadFullOrder) {
+    std::string inp = k_inp_1d;
+    const std::string old_line = "1D  MANNINGS_N  0.20";
+    const std::string new_line = "1D  INFLOW  0.30  LOGNORMAL  FORCING_VECTOR";
+    auto pos = inp.find(old_line);
+    ASSERT_NE(pos, std::string::npos);
+    inp.replace(pos, old_line.size(), new_line);
+
+    const double spread = runAndGetMaxSpread(
+        inp.c_str(), "/tmp/rom1d_inflow_h19.inp", "/tmp/rom1d_inflow_h19.rpt", true);
+    ASSERT_GE(spread, 0.0) << "INFLOW run failed";
+    EXPECT_GT(spread, 1.0e-6)
+        << "a registered 1D INFLOW FORCING_VECTOR param must produce spread through the full-order channel";
 }
 
 // Review fix #1: a line like `1D MY_KNOB 0.10 RATE_MULT` (new order, DIST

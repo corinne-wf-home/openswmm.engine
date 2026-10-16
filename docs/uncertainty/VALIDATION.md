@@ -3476,3 +3476,59 @@ H18_PER_MODE=1 test_rom_coverage_structures --gtest_filter='*Example8*'   # prin
 H18_PER_MODE=1 H17_ONE_INP=... H17_ONE_ROM=1 H17_ONE_OUT=rom_h18.txt test_rom_coverage_structures --gtest_filter='*OneMember*'
 python3 tests/regression/score_h17_mc.py <dump dir> rom_cap rom_h18
 ```
+
+---
+
+# H19 — Full-order additive channel (2026-10-16)
+
+Design: `docs/uncertainty/ADDITIVE_CHANNEL.md`. Every additive uncertainty (soft
+rain, the runoff multiplier, registered `FORCING_VECTOR` sources) is carried by
+one full-order linearized head-deviation field per source, S dΨ/dt = −JΨ + δq.
+J is the flow-response Jacobian, including the one-way transfer. The fields are
+advanced by backward Euler and Gauss–Seidel, shared by all members, and driven
+by the extra inflow itself (runoff × relative spread × elasticity, or the
+lateral inflow), not by dh/dt. The Manning channel is unchanged. Internal
+hook: `rom1dAdditiveFullOrder()`; harness knob: `H19_FULL_ORDER=1`.
+
+## Gates (coverage / width)
+
+| Gate | Old modal rain channel | H19 |
+|---|---|---|
+| SR-5 soft rain, DW | 0.881 / 0.976 | **0.921 / 1.029** |
+| SR-5 soft rain, FV | 0.900 / 0.968 | **0.917 / 1.006** |
+| CL-1e soft rain CORR_LEN, DW | 0.827 / 0.804 | **0.941 / 1.026** |
+| CL-1e soft rain CORR_LEN, FV | 0.846 / 0.815 | **0.938 / 1.018** |
+| **SR-7 steady rain on steady flow** (new) | 0.973 / 1.370 (J1 2.5×, J5 0.73×, shrinking) | **0.922 / 0.969** (every node 0.96–0.97) |
+| surcharged filling variant (0.5 ft pipes) | 0.262 / 0.011 | 0.990 / 1.455 |
+| Manning gates (chains, Example 8) | — | identical with the hook on or off (no additive source) |
+
+- **Per node.** SR-5 under H19 has every node within 2–5 % of the MC at every
+  report time, J5 included (1.017). Under H18's modal operator J5 had read
+  0.3–2 %.
+- **H18 makes no difference here.** The additive channel does not use the modes.
+- **Cost.** At most 2 planes for gage soft rain, K_s or M planes for CORR_LEN.
+  Gauss–Seidel converges in a few sweeps on these fixtures; the count is exposed
+  as `rom1dAdditiveSweeps()`.
+
+**SR-7** is registered as `regression_soft_rain_steady_coverage`: the SR-5
+fixture with 50 ft² storage, 0.5 acre / 500 ft subcatchments and 3 ft pipes.
+The MC widths are constant from 30 to 60 minutes. The old channel's band at
+J1 shrinks from 3.45× to 2.54× over that half hour, because the dh/dt it is
+driven by dies away. Its pooled median looks calibrated only because J1 is too
+wide and J5 too narrow.
+
+**Not covered:**
+- The roughness × rain interaction: members do not scale J by 1/mm.
+- `FORCING_MULT` extra parameters do not multiply the full-order planes.
+- The surcharged filling variant is conservative at 1.455, probably because
+  pressurized head goes as Q², which the linearization treats as linear (not
+  investigated).
+
+## Tests
+
+- `test_engine_rom_additive_channel` (6): steady state carries the accumulated
+  extra flow; the early response stays local; volume is conserved each step;
+  Gauss–Seidel equals a dense solve with a structure edge; a pinned node stays
+  at zero and passes nothing on; a zero source stays exactly zero.
+- `ROMQuality.RegisteredInflowParamProducesSpreadFullOrder`.
+- SR-7 gate.

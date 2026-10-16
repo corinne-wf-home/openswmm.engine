@@ -371,7 +371,12 @@ void SpectralROM1D::advance(double dt, double K1d,
     } else {
         qsr_r_.clear();
     }
-    const double* loc_field = soft_loc_field_ ? soft_loc_field_ : runoff_per_node;
+    // PR H19: with the full-order additive channel the engine carries every
+    // additive deviation itself (setAdditivePlanes); no modal additive forcing.
+    const double* loc_field = external_additive ? nullptr
+                            : (soft_loc_field_ ? soft_loc_field_ : runoff_per_node);
+    const double* spread_a = external_additive ? nullptr : soft_spread_field_;
+    const double* spread_b = external_additive ? nullptr : soft_spread_field_b_;
     if (loc_field) {
         for (std::size_t j = 0; j < nk; ++j) {
             const double* Pj = projCol_(j);
@@ -383,12 +388,12 @@ void SpectralROM1D::advance(double dt, double K1d,
     } else {
         std::fill(r_coarse.begin(), r_coarse.end(), 0.0);
     }
-    if (soft_spread_field_) {
+    if (spread_a) {
         for (std::size_t j = 0; j < nk; ++j) {
             const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * soft_spread_field_[i];
+                dot += Pj[i] * spread_a[i];
             soft_r_spread_[j] = dot;
         }
     } else {
@@ -399,12 +404,12 @@ void SpectralROM1D::advance(double dt, double K1d,
     // planes are disjoint by construction (each cell/gage contributes to
     // exactly one), so their sum reconstructs the full spread field while each
     // keeps its own family's coefficient.
-    if (soft_spread_field_b_) {
+    if (spread_b) {
         for (std::size_t j = 0; j < nk; ++j) {
             const double* Pj = projCol_(j);
             double dot = 0.0;
             for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * soft_spread_field_b_[i];
+                dot += Pj[i] * spread_b[i];
             soft_r_spread_b_[j] = dot;
         }
     } else {
@@ -418,11 +423,11 @@ void SpectralROM1D::advance(double dt, double K1d,
     const bool soft_reduced = (soft_reduced_psi_ != nullptr) &&
                               (soft_reduced_a_ != nullptr) &&
                               (soft_reduced_ks_ > 0) &&
-                              (soft_spread_field_ != nullptr);
+                              (spread_a != nullptr);
     const bool soft_spatial = !soft_reduced &&
                               (soft_field_ != nullptr) &&
                               soft_field_->is_spatial() &&
-                              (soft_spread_field_ != nullptr);
+                              (spread_a != nullptr);
     // Either spatial path fills soft_r_spread_spatial_ / soft_spatial_absmax_;
     // downstream mode-activation and forcing use this combined flag.
     const bool soft_use_rij = soft_spatial || soft_reduced;
@@ -489,6 +494,7 @@ void SpectralROM1D::advance(double dt, double K1d,
     // (the fields are live engine buffers that change every routing step).
     for (auto& ep : extra_params_) {
         if (ep.entry != ParamEntry::FORCING_VECTOR) continue;
+        if (external_additive) { std::fill(ep.rv.begin(), ep.rv.end(), 0.0); continue; }
         for (std::size_t j = 0; j < nk; ++j) {
             const double* Pj = projCol_(j);
             double dot = 0.0;
@@ -550,13 +556,13 @@ void SpectralROM1D::advance(double dt, double K1d,
     // |soft_r_spread_[j]|. Spatial (CL-1b/CL-2c): the coefficient is already
     // folded into R_{ij}, so the scale is |dt| times max_i|R_{ij}| =
     // soft_spatial_absmax_[j].
-    const double soft_scale = (soft_spread_field_ != nullptr)
+    const double soft_scale = (spread_a != nullptr)
                                ? (soft_use_rij ? std::abs(dt)
                                                : std::abs(dt) * soft_max_abs_coeff_)
                                : 0.0;
     // PR H7: channel B's own activation scale. Zero when no second plane is
     // configured, so every expression below reduces to the pre-H7 one exactly.
-    const double soft_scale_b = (soft_spread_field_b_ != nullptr)
+    const double soft_scale_b = (spread_b != nullptr)
                                ? std::abs(dt) * soft_max_abs_coeff_b_
                                : 0.0;
 
@@ -814,6 +820,18 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
             if (r == 0.0) continue;
             double* row = &recon_buf_[t * M];
             for (std::size_t i = 0; i < M; ++i) row[i] += qsr_mm1_[i] * r;
+        }
+    }
+    // PR H19: full-order additive deviations, sum_p kappa_ip * Psi_p.
+    if (external_additive && add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
+        add_kappa_.size() == M * add_np_) {
+        for (std::size_t t = 0; t < nn; ++t) {
+            double* row = &recon_buf_[t * M];
+            for (std::size_t i = 0; i < M; ++i) {
+                double v = 0.0;
+                for (std::size_t p = 0; p < add_np_; ++p) v += add_kappa_[i * add_np_ + p] * add_psi_[p * nn + t];
+                row[i] += v;
+            }
         }
     }
 
@@ -1095,6 +1113,14 @@ void SpectralROM1D::updateBasis(const double* conduit_off, const int* conduit_n1
     commitBasisUpdateSuccess_(conduit_off, n_conduits, node_surcharged, sim_time);
 }
 
+void SpectralROM1D::setAdditivePlanes(int n_planes, const double* psi, const double* kappa) {
+    add_np_ = (n_planes > 0 && psi && kappa) ? static_cast<std::size_t>(n_planes) : 0;
+    const auto nn = static_cast<std::size_t>(n_nodes);
+    const auto M = static_cast<std::size_t>(n_ensemble);
+    add_psi_.assign(psi, psi + add_np_ * nn);
+    add_kappa_.assign(kappa, kappa + M * add_np_);
+}
+
 void SpectralROM1D::setModeRates(const double* rates) {
     if (rates == nullptr) { mode_rates_.clear(); return; }
     mode_rates_.assign(rates, rates + n_kept);
@@ -1116,6 +1142,9 @@ double SpectralROM1D::reconstructHead(int member, int active_node) const noexcep
         h += basis->P[j * nn + uk] * ai[j];
     }
     if (qsr_r_.size() == nn && ui < qsr_mm1_.size()) h += qsr_mm1_[ui] * qsr_r_[uk];
+    if (external_additive && add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
+        add_kappa_.size() == static_cast<std::size_t>(n_ensemble) * add_np_)
+        for (std::size_t p = 0; p < add_np_; ++p) h += add_kappa_[ui * add_np_ + p] * add_psi_[p * nn + uk];
     return std::max(h, 0.0);
 }
 
