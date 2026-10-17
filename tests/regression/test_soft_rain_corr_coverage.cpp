@@ -212,9 +212,6 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
         cleanup();
         return out;
     }
-    // H19 A-B knob: the full-order additive channel is chosen when the ROM is built.
-    if (const char* v = std::getenv("H19_FULL_ORDER"))
-        static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(v) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
@@ -222,8 +219,6 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     }
 
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
-    // H18 A-B knob (read per routing step, so setting it after start() is enough).
-    if (const char* v = std::getenv("H18_PER_MODE")) eng->rom1dPerModeRates() = std::atoi(v) != 0;
     const auto& ctx = eng->context();
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());
 

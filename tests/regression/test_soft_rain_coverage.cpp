@@ -65,7 +65,6 @@ inline int envInt(const char* name, int dflt) {
 }
 static const double kCV        = envDouble("SR5_CV", 0.20);    // NORMAL coefficient of variation
 static const int    kMembers   = envInt("SR5_MEMBERS", 0);      // 0 = engine default (50)
-static const double kK1dScale  = envDouble("SR5_K1D_SCALE", 1.0); // SR-6 falsification knob
 static const double kPipeDiam  = envDouble("SR5_PIPE_DIAM", 0.5);  // SR-6: surcharge-elasticity probe (ft)
 static const double kSubWidth  = envDouble("SR5_SUBCATCH_WIDTH", 5.0); // SR-6: runoff-elasticity probe (ft)
 static const double kSubArea   = envDouble("SR5_SUBCATCH_AREA", 5.0);  // SR-6: equilibrium probe (acres)
@@ -171,9 +170,6 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
         cleanup();
         return out;
     }
-    // H19 A-B knob: the full-order additive channel is chosen when the ROM is built.
-    if (const char* v = std::getenv("H19_FULL_ORDER"))
-        static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(v) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
@@ -181,12 +177,9 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_soft) 
     }
 
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
-    // H18 A-B knob (read per routing step, so setting it after start() is enough).
-    if (const char* v = std::getenv("H18_PER_MODE")) eng->rom1dPerModeRates() = std::atoi(v) != 0;
     // SR-6 falsification knob: scales the K1d handed to the ROM every step
     // (K1d is recomputed per step, so setting it before the first step is
     // sufficient). 1.0 = bit-identical to the gate.
-    if (with_soft) eng->rom1dK1dScale() = kK1dScale;
     if (with_soft) eng->rom1dRunoffElasticityEnabled() = (kElasOn != 0);
     const auto& ctx = eng->context();
     const int n_nodes = static_cast<int>(ctx.nodes.head.size());

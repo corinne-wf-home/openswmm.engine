@@ -219,10 +219,6 @@ RunResult runCase(const std::string& tag, bool with_rom) {
     // H17 A-B knob: 0 restores the pre-H17 depth x surcharge-elasticity source.
     if (const char* v = std::getenv("H17_FLOW_SOURCE"))
         eng->rom1dFlowSource() = std::atoi(v) != 0;
-    if (const char* v = std::getenv("H17_ADV"))
-        eng->rom1dK1dAdvective() = std::atoi(v) != 0;
-    if (const char* v = std::getenv("H18_PER_MODE"))
-        eng->rom1dPerModeRates() = std::atoi(v) != 0;
     const auto& ctx = eng->context();
     // Read the solver mode back from the parsed context so a silently
     // no-op'd option (P4's failure mode) is visible, not assumed.

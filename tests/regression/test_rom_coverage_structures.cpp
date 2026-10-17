@@ -168,11 +168,7 @@ RunResult runCase(const std::string& inp_text, const std::string& tag, bool with
     if (opened) {
         auto* e0 = static_cast<openswmm::SWMMEngine*>(h);
         if (const char* v = std::getenv("H17_K_MODES")) e0->rom1dModeCountOverride() = std::atoi(v);
-        if (const char* v = std::getenv("H17_K1D_SCALE")) e0->rom1dK1dScale() = std::atof(v);
-        if (const char* v = std::getenv("H17_ADV")) e0->rom1dK1dAdvective() = std::atoi(v) != 0;
         if (const char* q = std::getenv("H17_QSR")) e0->rom1dQuasiStatic() = std::atoi(q) != 0;
-        if (const char* q = std::getenv("H18_PER_MODE")) e0->rom1dPerModeRates() = std::atoi(q) != 0;
-        if (const char* q = std::getenv("H19_FULL_ORDER")) e0->rom1dAdditiveFullOrder() = std::atoi(q) != 0;
         if (const char* q = std::getenv("H14_DIRECTIONAL")) e0->rom1dDirectionalConfig().enabled = std::atoi(q) != 0;
     }
     if (!opened || swmm_engine_initialize(h) != 0 || swmm_engine_start(h, 0) != 0) {

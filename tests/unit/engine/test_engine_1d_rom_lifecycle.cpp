@@ -1192,7 +1192,6 @@ TEST(SwmmEngine1DRomLifecycle, PerModeRatesBuildStorageBasisAndBand) {
     ASSERT_EQ(swmm_engine_open(h, (dir / "h18_rates.inp").string().c_str(),
                                (dir / "h18_rates.rpt").string().c_str(), nullptr, nullptr), SWMM_OK);
     auto* e = static_cast<openswmm::SWMMEngine*>(h);
-    e->rom1dPerModeRates() = true;
     ASSERT_EQ(swmm_engine_initialize(h), SWMM_OK);
     ASSERT_EQ(swmm_engine_start(h, 0), SWMM_OK);
     double elapsed = 0.0;
@@ -1202,7 +1201,6 @@ TEST(SwmmEngine1DRomLifecycle, PerModeRatesBuildStorageBasisAndBand) {
     const auto* rom = e->rom1d();
     ASSERT_NE(rom, nullptr);
     EXPECT_TRUE(rom->hasStorage()) << "no generalized rebuild happened";
-    EXPECT_DOUBLE_EQ(e->rom1dLastK1d(), 1.0);
     ASSERT_EQ(static_cast<int>(e->rom1dModeRates().size()), rom->n_kept);
     for (double r : e->rom1dModeRates()) EXPECT_GT(r, 0.0);
     for (double s : e->rom1dStorage()) EXPECT_GE(s, openswmm::constants::MIN_SURFAREA);

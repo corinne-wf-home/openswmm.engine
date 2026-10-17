@@ -1,7 +1,8 @@
 # Full-order additive channel (H19) — design note
 
 Status: design fixed 2026-10-16 (owner chose option 2 after H18 A.4b,
-VALIDATION.md "H18" §10–§10c). It replaces the modal forcing of every additive
+VALIDATION.md "H18" §10–§10c); the default (and only) additive path since A.5,
+2026-10-16. It replaces the modal forcing of every additive
 uncertainty: soft rain (gage planes and CORR_LEN fields), the built-in runoff
 multiplier, and registered `FORCING_VECTOR` sources such as `INFLOW`. The
 Manning channel (modal, H17 target + H18 rates) is unchanged.
@@ -83,7 +84,7 @@ One Gauss–Seidel solve per plane per routing step, at O(edges) per sweep.
 
 ## 5. What the ROM does
 
-With the channel active, `SpectralROM1D` still generates the per-member
+`SpectralROM1D` still generates the per-member
 coefficients (`setSoftForcing` arms c_i and c_i^B). With `external_additive`
 set, it no longer applies any additive modal forcing, and its reconstruction
 (`computeQuantiles`, `reconstructHead`) adds Σ_p κ_ip Ψ_p from

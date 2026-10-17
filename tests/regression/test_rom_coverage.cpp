@@ -252,11 +252,7 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     if (!phase_enabled) {
         static_cast<openswmm::SWMMEngine*>(handle)->rom1dPhaseConfig().enabled = false;
     }
-        if (const char* k = std::getenv("H17_ADV")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dAdvective() = std::atoi(k) != 0;
-        if (const char* k = std::getenv("H17_K1D_SCALE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dK1dScale() = std::atof(k);
         if (const char* q = std::getenv("H17_QSR")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dQuasiStatic() = std::atoi(q) != 0;
-        if (const char* q = std::getenv("H18_PER_MODE")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dPerModeRates() = std::atoi(q) != 0;
-        if (const char* q = std::getenv("H19_FULL_ORDER")) static_cast<openswmm::SWMMEngine*>(handle)->rom1dAdditiveFullOrder() = std::atoi(q) != 0;
     if (swmm_engine_initialize(handle) != 0 ||
         swmm_engine_start(handle, 0) != 0) {
         cleanup();
@@ -352,8 +348,10 @@ RunResult runCase(const std::string& inp_text, const char* tag, bool with_rom,
     // tau_0 = 1/(lambda_0 * K1d) must fit the sampling window, else the test
     // measures spin-up, not the band (the P4 root cause).
     if (rom && rom->basis && !rom->basis->eigenvalues.empty()) {
-        out.lambda0 = rom->basis->eigenvalues[0];
-        out.k1d     = eng->rom1dLastK1d();
+        // H18: rates are per mode (1/s); report the slowest as lambda0 with K1d = 1.
+        const auto& rates = eng->rom1dModeRates();
+        out.lambda0 = rates.empty() ? 0.0 : *std::min_element(rates.begin(), rates.end());
+        out.k1d     = 1.0;
         if (std::getenv("H5B_TRACE")) {
             const auto& a = eng->rom1dAlphaBuffer();
             std::printf("[H5b-alpha] end-of-run alpha per active node:");
@@ -507,8 +505,13 @@ TEST(RomCoverage, BandsBracketBruteForceMonteCarlo) {
 }
 
 // ---------------------------------------------------------------------------
-// P8: the old geometry, kept as an executable demonstration of the P4 lesson.
-// Ungated: it prints tau_0 and the saturation reached at the old 1 h window.
+// P8 / H18: the old geometry (100 m conduits, 1 h window). Under the single
+// network rate K1d its slowest mode took 10 h (tau0 = 1/(lambda0*K1d)), so a
+// 1 h window could not measure the band (the P4 lesson). With per-mode rates
+// from conductance over storage (H18) the same mode settles in ~27 s, and the
+// old fixture is calibrated against MC within its original window
+// (P8_LEN=100 P8_WINDOW_H=1: 0.914 / 1.005, VALIDATION.md "A.5"). This test
+// pins that: the slowest mode must settle well inside the window.
 // ---------------------------------------------------------------------------
 TEST(RomCoverage, SpinUpDemonstrationOldGeometry) {
     const double len0 = kP8Len, win0 = kP8Win;
@@ -517,10 +520,13 @@ TEST(RomCoverage, SpinUpDemonstrationOldGeometry) {
     kP8Len = len0; kP8Win = win0;
     ASSERT_TRUE(rom.ok);
     const double tau0 = (rom.lambda0 > 0.0 && rom.k1d > 0.0) ? 1.0 / (rom.lambda0 * rom.k1d) : 0.0;
-    std::printf("[RomCoverage-spinup-demo] old geometry (100 m): tau0=%.0f s (%.1f h); "
-                "saturation at 1 h = %.3f -- a 1 h window cannot measure this band\n",
-                tau0, tau0 / 3600.0, 1.0 - std::exp(-3600.0 / tau0));
-    EXPECT_GT(tau0, 4.0 * 3600.0) << "the demonstration only makes sense if tau0 >> window";
+    std::printf("[RomCoverage-spinup-demo] old geometry (100 m): tau0=%.0f s (%.2f h); "
+                "saturation at 1 h = %.3f\n",
+                tau0, tau0 / 3600.0, tau0 > 0.0 ? 1.0 - std::exp(-3600.0 / tau0) : 0.0);
+    EXPECT_GT(tau0, 0.0) << "no per-mode rate: the conductance/storage basis was never built";
+    EXPECT_LT(tau0, 0.1 * 3600.0)
+        << "with per-mode rates the slowest mode must settle well inside the 1 h window "
+           "(it took 10 h under the old network-wide K1d)";
 }
 
 

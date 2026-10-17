@@ -3532,3 +3532,84 @@ wide and J5 too narrow.
   at zero and passes nothing on; a zero source stays exactly zero.
 - `ROMQuality.RegisteredInflowParamProducesSpreadFullOrder`.
 - SR-7 gate.
+
+---
+
+# A.5 — Per-mode rates and the full-order additive channel become the default (2026-10-16)
+
+**What changed.**
+- The 1D ROM always uses the conductance/storage basis and per-mode rates (H18)
+  and carries every additive uncertainty in the full-order channel (H19).
+- Deleted: K1d (`computeK1d()`), its scale knob (`rom1dK1dScale()`), the
+  advective hook (`rom1dK1dAdvective()`), the H18/H19 switches, the dh/dt
+  forcing buffer and the area-weighted dh/dt soft-rain spread.
+- Until the first storage-weighted basis exists (no flow yet), deviations are
+  held (rate 0), not relaxed by a network constant.
+- The one-way operator (H14) stays. Measured under H18 + H19, turning it off
+  drops the DW free-surface chain to 0.738 (ranking only); other cells barely
+  move.
+
+**Two defects found while gating, both fixed:**
+- **A failed basis rebuild overwrote the live basis** (`402a8996`).
+  `updateBasis()` built in place, so a failed rebuild left coefficients sized
+  for another basis. The result was out-of-bounds reads, run-to-run
+  differences and divergence (one cell read 1e62 wide). It now builds into a
+  fresh basis and swaps it in on success. On the storage-weighted basis, only
+  round-off zeros count as null modes. Mutation-checked unit test.
+- **A fully supercritical network got no basis.** The relay removes every
+  head-gradient conductance there, and the assembly gave up when the symmetric
+  part summed to zero, although the one-sided kinematic terms were present.
+  The band was held at zero for the whole run. The floor is now taken against
+  all conductance. Caught by `DirectionalOperatorInstalledOnSupercriticalChain`.
+
+**Build note.** The `darwin-v2` build tree still carried
+`OPENSWMM_FAST_MANNING_POW=ON` and `OPENSWMM_FAST_XSECT_LOOKUP=ON` from before
+these options defaulted to OFF (`de1c7ea7`). Cached options survive a change of
+default. The parity suite (`regression_suite`) failed on it, against identical
+sources that pass on a bit-exact tree. All A.5 numbers below come from the
+bit-exact engine.
+
+## Gates on the default engine (coverage / width)
+
+| Gate | Result | Verdict |
+|---|---|---|
+| DW free-surface chain | 0.905 / 0.997 | calibrated |
+| DW surcharged `EXPLICIT` / `SEMI_IMPLICIT` | 0.825 / 0.990, 0.843 / 0.990 | calibrated |
+| DW front passage | 0.959 / 1.181 | calibrated |
+| Example 8 (steady flag) | 0.825 / 0.985 (0.851 / 0.990) | calibrated |
+| FV free-surface / surcharged | 0.905 / 1.204, 0.850 / 1.174 | calibrated |
+| FV front passage | 0.925 / 7.83 | conservative (H11 timing under FV) |
+| SR-5 soft rain, DW / FV | 0.921 / 1.029, 0.917 / 1.006 | calibrated |
+| CL-1e CORR_LEN, DW / FV | 0.941 / 1.026, 0.938 / 1.018 | calibrated |
+| SR-7 steady rain on steady flow | 0.922 / 0.969 | calibrated |
+| **PR-10's original fixture** (100 m, 1 h window) | **0.914 / 1.005** | calibrated |
+
+The last row is the fixture P4 diagnosed in August. Its slowest mode took
+10 h under K1d, so a 1 h window read about 0.10 of the MC width. With per-mode
+rates the same mode settles in about 27 s. `SpinUpDemonstrationOldGeometry` now
+pins τ₀ < 0.1 h.
+
+## Bellinge (21-member MC, 24 h, bit-exact engine)
+
+| | Previous default | A.5 default |
+|---|---|---|
+| all samples | 0.840 / 1.008 | **0.857 / 1.063**, calibrated |
+| material (MC ≥ 0.05 ft) | 0.828 / 1.054 | 0.828 / 1.059 |
+| steady flag | 0.855 / 1.009 | 0.865 / 1.050 |
+| transient flag | 0.769 / 0.998 | 0.819 / 1.380 |
+| no-flow flag | 0.531 / 0.333 | 0.685 / 0.998 |
+| lock (`regression_rom_coverage_bellinge`) | passes | passes |
+| band / depth p50 / p90 / max | 0.198 / 0.83 / 25.2 | 0.208 / 1.34 / 49.7 |
+| wall time, Debug, run alone | 1,680.8 s | 1,680.5 s |
+
+- **The Monte Carlo was regenerated.** The original 21 member dumps were lost
+  from a temp directory. They now live in `SWMM6/data/bellinge_mc/`
+  (`prepare.py`, `mc_member.sh`, resumable `run_mc.sh`, `run_rom.sh`), outside
+  git. The old ROM dumps score identically against the new members, so the
+  regeneration reproduces the original.
+- **Runtime.** No measurable cost against the previous default on the same
+  bit-exact build. The +19.8 % measured for H18 alone (§6) came from the
+  fast-kernel tree, and the A.5 default also drops the modal rain forcing and
+  the dh/dt work.
+- **Tails.** The band tails are wider (no-flow p90 0.55 → 7.6), while the MC
+  shows the no-flow class moving from too narrow (0.333) to on width (0.998).

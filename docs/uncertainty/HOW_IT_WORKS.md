@@ -212,16 +212,22 @@ For a 1D pipe network, build a matrix `L` — the **graph Laplacian** — where:
   j)` if such a pipe exists, or `0` otherwise.
 
 `L` fully encodes the network's *shape*: which nodes talk to which, and how
-strongly. The linearized diffusion-wave equation for how head deviations
-spread through the network is:
+strongly. The conductances are physical: for each pipe, how much extra flow
+leaves per foot of extra head (from the same linearized flow response the
+roughness band uses, so a steep pipe that carries water away quickly has a
+large one). Each node also has a storage `S` — its surface area plus half the
+water surface of the pipes attached to it. Head deviations then obey:
 
 ```
-dh/dt = −K1d · L · h  +  f
+S · dh/dt = −L · h  +  q
 ```
 
-where `h` is the vector of head deviations at every active node, `K1d` is an
-effective conductance (derived from Manning's n, slope, and depth — see
-`computeK1d()`), and `f` is the forcing (inflow, rainfall-driven change).
+where `h` is the vector of head deviations at every active node and `q` the
+extra inflow. It is the leaky bucket again: conductance drains the bucket,
+storage is how much water must move to lower its level. (Until October 2026
+the sidecar used one network-wide drainage constant, K1d, for every shape;
+see `docs/uncertainty/RELAXATION_RATES.md` for why that failed on networks
+that mix steep pipes and deep pools.)
 This is the *network-wide* version of the leaky bucket — except now `h` has
 thousands of entries and this is thousands of coupled equations, which is
 exactly the problem the eigenmode trick solves.
@@ -232,13 +238,14 @@ conductance weighting the mesh edges.)*
 
 ### 4.3 Projecting onto eigenmodes — turning thousands of equations into a handful
 
-`L` has eigenvectors `P[:,0], P[:,1], ..., P[:,n-1]` and eigenvalues
-`λ_0 ≤ λ_1 ≤ ... ≤ λ_{n-1}` (this is the same eigendecomposition behind the
-guitar-string metaphor in §3.2). Compute the coefficient `a_j` — "how much of
+`L` and `S` together have shapes `P[:,0], P[:,1], ..., P[:,n-1]` and rates
+`λ_0 ≤ λ_1 ≤ ... ≤ λ_{n-1}` in 1/s, from `L·v = λ·S·v` (this is the same
+eigendecomposition behind the guitar-string metaphor in §3.2, with storage as
+the weight; each `λ_j` is how fast shape `j` drains). Compute the coefficient `a_j` — "how much of
 shape `j` is present in the current head field" — by projecting:
 
 ```
-a_j = P[:,j]^T · h        (a dot product: "how much does h look like shape j?")
+a_j = P[:,j]^T · S · h    (a storage-weighted dot product: "how much does h look like shape j?")
 ```
 
 Crucially, because `L` is symmetric, its eigenvectors are *orthogonal*: the
@@ -247,12 +254,12 @@ modes. The single giant network equation decomposes into `k` completely
 independent scalar ODEs — one leaky bucket per retained mode:
 
 ```
-da_j/dt = −λ_j · K1d · a_j  +  r_coarse[j]
+da_j/dt = −λ_j · a_j  +  r_coarse[j]
 
-where r_coarse[j] = P[:,j]^T · f      ("how much of the forcing hits shape j")
+where r_coarse[j] = P[:,j]^T · q      ("how much of the extra inflow hits shape j")
 ```
 
-This is exactly the bucket equation from §4.1, with `rate = λ_j · K1d` and
+This is exactly the bucket equation from §4.1, with `rate = λ_j` and
 `f = r_coarse[j]`. Retaining `k=10` modes out of `n=8,000` nodes means
 tracking 10 independent bucket equations instead of 8,000 coupled ones — a
 computational reduction of nearly three orders of magnitude, *before* even
@@ -288,19 +295,24 @@ Project that *deviation* onto the eigenmodes exactly as in §4.3:
 ```
 δa[i,j] = P[:,j]^T · (h_i − h_det)      ("how much member i's deviation looks like shape j")
 
-b_j     = P[:,j]^T · h_det              ("how much of the real deterministic answer is shape j")
+b_j     = P[:,j]^T · S · φ              ("how much of the roughness response is shape j")
 ```
+
+Here `φ` is the steady head change a 1 % rougher network would settle to,
+from a linearized flow-response sweep (H17): every pipe must still carry its
+flow, so heads rise until it can.
 
 The deviation for mode `j`, member `i` obeys its own leaky-bucket equation:
 
 ```
 d(δa[i,j])/dt = −rate[i,j] · δa[i,j]  +  g[i,j]
 
-rate[i,j] = λ_j · K1d / mannings_mult[i]
+rate[i,j] = λ_j / mannings_mult[i]
 
-g[i,j] = −λ_j · K1d · (1/mannings_mult[i] − 1) · b_j     (Manning sensitivity)
-         + (rainfall_mult[i] − 1) · r_coarse[j]           (forcing sensitivity)
+g[i,j] = −λ_j · (1/mannings_mult[i] − 1) · b_j          (Manning sensitivity)
 ```
+
+Rain and other extra inflows no longer go through the modes (§4.5).
 
 The key feature: for the member with `mannings_mult[i] = 1` and
 `rainfall_mult[i] = 1` — the "nominal" member sitting exactly at the
@@ -330,7 +342,19 @@ of the network's thousands of nodes on every routing step, and the reason the
 sidecar is nearly free becomes a matter of simple arithmetic, not a clever
 approximation.
 
-### 4.5 Reading out the answer — reconstructing depths and taking quantiles
+### 4.5 Rain and extra inflow: carried at full size, not in modes (H19)
+
+Extra water travels downstream: a wetter member carries more flow in every
+pipe below the extra rain, and the extra water arrives node by node, not all
+at once. The modes cannot hold that one-way travel stably, so additive
+uncertainties (soft rain, the runoff multiplier, registered inflow sources)
+are carried by one full-size field per source over all nodes, shared by every
+member: `S·dΨ/dt = −J·Ψ + δq`, where `J` is the flow response including the
+one-way transfer and `δq` is the extra inflow per unit member coefficient
+(runoff × the gage's relative spread). Member `i` adds `c_i · Ψ` to its head.
+See `docs/uncertainty/ADDITIVE_CHANNEL.md`.
+
+### 4.6 Reading out the answer — reconstructing depths and taking quantiles
 
 At any moment, reconstruct member `i`'s full head field by adding its
 deviation, summed back through the eigenvector shapes, onto the real
@@ -683,7 +707,7 @@ there, which is more involved than the 1D path-integral approach used above.
 | **Deterministic reference** | The real depth/head from SWMM's ordinary solver, ROM-independent | `h_det` |
 | **Modal deviation** | "How far member `i`'s guess has drifted from the real answer, in shape `j`" | `δa[i,j]` |
 | **Graph Laplacian** | The matrix encoding who's connected to whom | `L` |
-| **K_eff / K1d** | Effective conductance (from Manning's n, slope, depth) | scales the decay rate |
+| **K_eff (2D) / λ_j (1D)** | 2D: effective conductance from Manning's n, slope, depth. 1D: each mode's rate (1/s) from pipe conductance over node storage | sets the decay rate |
 | **Latin Hypercube Sampling** | Stratified "one ticket per price bracket" sampling | strata of `[1−p, 1+p]` |
 | **q05 / q50 / q95** | The 5th / 50th / 95th percentile across all 50 members at a point | sorted `h_i[t]` |
 | **Band `[q05, q95]`** | 5th-to-95th percentile of the members; calibrated (≥ 0.80 of outcomes inside, C1) in some regimes, *ranking only* in others | VALIDATION.md audit table |

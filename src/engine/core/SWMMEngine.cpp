@@ -5368,23 +5368,13 @@ void SWMMEngine::stepRouting(double dt_routing) {
     //       run, so no reseeding is ever needed and spread is never
     //       collapsed).
     if (rom1d_ && rom1d_->is_ready()) {
-        // Warm-start eigenbasis re-solve from the live operator (dynamic-wave
-        // snapshot, or the same quantities derived from state under FV).
-        // PR H18: with per-mode rates the rebuild and the one-way operator
-        // need this step's conductances (flow response), so they move below.
+        // Regime inputs (dynamic-wave snapshot, or the same quantities derived
+        // from state under FV). The basis rebuild, the per-mode rates (H18) and
+        // the one-way operator need this step's flow response, so they run
+        // after it, below.
         const double* regime_fr = nullptr;
         const std::uint8_t* regime_surch = nullptr;
         const int n_regime_edges = rom1dRegime(dt_routing, &regime_fr, &regime_surch);   // conduits + structures
-        if (!rom1d_per_mode_) {
-            if (n_regime_edges > 0)
-                rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
-                                    rom1d_edge_n2_.data(), n_regime_edges, ctx_.current_time,
-                                    regime_surch);
-            // PR H14: Froude-gated directional operator from the same snapshot
-            // (after updateBasis, which clears any operator projected on the old P).
-            refreshRom1dDirectionalOperator(dt_routing);
-        }
-        double K1d = computeK1d() * rom1d_k1d_scale_;   // SR-6 knob, 1.0 by default
 
         const int n_active = static_cast<int>(rom1d_active_map_.size());
 
@@ -5414,21 +5404,6 @@ void SWMMEngine::stepRouting(double dt_routing) {
             ctx_.nodes.head.data(), ctx_.n_nodes(), rom1d_surcharge_cfg_,
             rom1d_alpha_buf_.data());
 
-        // Per-node dh/dt forcing from the just-completed DynWave step. Under
-        // the deviation form its projection enters only scaled by
-        // (runoff_mult - 1), so with the engine default runoff_pert = 0 it
-        // contributes nothing — by construction, not by hotfix. It also
-        // doubles as the field for any registered FORCING_VECTOR 1D param
-        // (e.g. INFLOW) set up in buildROM1D().
-        if (!rom1d_dh_buf_.empty()) {
-            for (int ai = 0; ai < n_active; ++ai) {
-                const auto ui = static_cast<std::size_t>(
-                    rom1d_active_map_[static_cast<std::size_t>(ai)]);
-                rom1d_dh_buf_[static_cast<std::size_t>(ai)] =
-                    (ctx_.nodes.depth[ui] - ctx_.nodes.old_depth[ui]) / dt_routing;
-            }
-        }
-
         // PR H11: per-member phase coordinate. T̄ is refreshed on its own
         // interval cadence (default 60s, same order as the Lanczos basis
         // update interval) rather than every step -- it depends only on the
@@ -5444,14 +5419,14 @@ void SWMMEngine::stepRouting(double dt_routing) {
             refreshRom1dTravelTime();
         }
 
-        // SP1: gage-level soft rainfall spread. loc = dh/dt head-rate, so the
-        // deterministic projection is unchanged; spread = loc * the
-        // area-weighted relative spread of the contributing gages, SPLIT into
-        // two disjoint planes by coefficient family (H7). Under deviation form
-        // member i's field is loc + c_i*spread_A + c_i^B*spread_B
-        // (SOFT_RAINFALL_DESIGN.md §4.3), each plane meeting its own family's
-        // coefficient, both drawn from one shared rank u_i (COHERENCE FULL).
-        if (soft_rain_1d_active_ && !rom1d_soft_spread_a_.empty()) {
+        // SP1/H19: gage-level soft rainfall. Per active node, the extra inflow
+        // per unit member coefficient: the runoff of each contributing
+        // subcatchment times its gage's relative spread (x the SR-6
+        // rain->runoff elasticity), split by coefficient family into plane A
+        // (NORMAL/LOGNORMAL) and plane B (UNIFORM). The full-order additive
+        // channel carries it (stepRom1dAdditiveChannel); the ROM only supplies
+        // the member coefficients, drawn from one shared rank u_i (COHERENCE FULL).
+        if (soft_rain_1d_active_ && rom1d_add_qa_.size() == static_cast<std::size_t>(n_active)) {
             const auto& sr = ctx_.soft_rain;
             auto relSpread1D = [&](int g) -> double {
                 const auto ug = static_cast<std::size_t>(g);
@@ -5482,9 +5457,7 @@ void SWMMEngine::stepRouting(double dt_routing) {
             const bool use_elas = rom1d_runoff_elasticity_enabled_ && rom1d_runoff_probe_.seeded();
             for (int ai = 0; ai < n_active; ++ai) {
                 const auto uai = static_cast<std::size_t>(ai);
-                const double dh = rom1d_dh_buf_[uai];
-                rom1d_soft_loc_[uai] = dh;
-                double numer_a = 0.0, numer_b = 0.0, qa = 0.0, qb = 0.0;
+                double qa = 0.0, qb = 0.0;
                 for (int k = rom1d_soft_off_[uai]; k < rom1d_soft_off_[uai + 1]; ++k) {
                     const auto uk = static_cast<std::size_t>(k);
                     const int sidx = rom1d_soft_sub_[uk];
@@ -5492,85 +5465,70 @@ void SWMMEngine::stepRouting(double dt_routing) {
                                       static_cast<std::size_t>(sidx) < elas.size())
                                      ? elas[static_cast<std::size_t>(sidx)] : 1.0;
                     const double rel = relSpread1D(rom1d_soft_gage_[uk]) * e;
-                    const double w = rom1d_soft_area_[uk] * rel;
-                    (rom1d_soft_is_b_[uk] ? numer_b : numer_a) += w;
-                    // H19: the extra inflow itself -- this subcatchment's runoff
-                    // times its relative spread -- per unit member coefficient.
                     const double runoff = (sidx >= 0) ? ctx_.subcatches.runoff[static_cast<std::size_t>(sidx)] : 0.0;
                     (rom1d_soft_is_b_[uk] ? qb : qa) += runoff * rel;
                 }
-                if (rom1d_add_full_) {
-                    if (rom1d_add_qa_.size() != static_cast<std::size_t>(n_active)) {
-                        rom1d_add_qa_.assign(static_cast<std::size_t>(n_active), 0.0);
-                        rom1d_add_qb_.assign(static_cast<std::size_t>(n_active), 0.0);
-                    }
-                    rom1d_add_qa_[uai] = qa;
-                    rom1d_add_qb_[uai] = qb;
-                }
-                const double tot = rom1d_soft_node_area_[uai];
-                rom1d_soft_spread_a_[uai] = (tot > 0.0) ? dh * numer_a / tot : 0.0;
-                rom1d_soft_spread_b_[uai] = (tot > 0.0) ? dh * numer_b / tot : 0.0;
+                rom1d_add_qa_[uai] = qa;
+                rom1d_add_qb_[uai] = qb;
             }
             if (rom1d_soft_corr_len_ > 0.0) {
                 // SP3: correlated coherence. Single family by construction (mixed
-                // was refused at init). Field built once; the spread magnitude
-                // enters per step through the projection.
+                // was refused at init). Field built once; the additive channel
+                // multiplies the source by it pointwise.
                 if (!rom1d_soft_field_built_) buildRom1DSoftField();
-                const double* spread = soft_rain_1d_has_b_ ? rom1d_soft_spread_b_.data()
-                                                           : rom1d_soft_spread_a_.data();
+                const double* spread = soft_rain_1d_has_b_ ? rom1d_add_qb_.data()
+                                                           : rom1d_add_qa_.data();
                 const uncertainty::DistType fam = soft_rain_1d_has_b_
                     ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
                 if (rom1d_soft_reduced_) {
-                    rom1d_->setSoftForcingReduced(rom1d_soft_loc_.data(), spread, fam,
+                    rom1d_->setSoftForcingReduced(nullptr, spread, fam,
                                                   rom1d_soft_psi_.data(),
                                                   rom1d_soft_a_.data(),
                                                   rom1d_soft_basis_.n_modes());
                 } else {
                     const uncertainty::SoftSpatialField* sf =
                         rom1d_soft_field_.is_spatial() ? &rom1d_soft_field_ : nullptr;
-                    rom1d_->setSoftForcing(rom1d_soft_loc_.data(), spread, fam, sf);
+                    rom1d_->setSoftForcing(nullptr, spread, fam, sf);
                 }
             } else if (soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
                 // MIXED: both planes, each with its own family.
-                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
-                                       rom1d_soft_spread_a_.data(),
+                rom1d_->setSoftForcing(nullptr, rom1d_add_qa_.data(),
                                        soft_rain_1d_family_a_, nullptr,
-                                       rom1d_soft_spread_b_.data(),
+                                       rom1d_add_qb_.data(),
                                        uncertainty::DistType::UNIFORM);
             } else if (soft_rain_1d_has_b_) {
                 // UNIFORM only: plane B is the sole plane, passed as primary.
-                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
-                                       rom1d_soft_spread_b_.data(),
+                rom1d_->setSoftForcing(nullptr, rom1d_add_qb_.data(),
                                        uncertainty::DistType::UNIFORM);
             } else {
                 // NORMAL/LOGNORMAL only: single plane, null second plane, so
                 // this is bit-identical to the pre-H7 single-family call.
-                rom1d_->setSoftForcing(rom1d_soft_loc_.data(),
-                                       rom1d_soft_spread_a_.data(),
+                rom1d_->setSoftForcing(nullptr, rom1d_add_qa_.data(),
                                        soft_rain_1d_family_a_);
             }
         }
 
         // PR H17: the steady linearized flow response replaces depth x alpha.
         const bool flow_src = rom1d_flow_source_ && computeRom1dFlowSource();
-        if (rom1d_add_full_) stepRom1dAdditiveChannel(dt_routing);
-        if (rom1d_per_mode_) {
-            rom1d_h18_rates_.clear();
-            if (n_regime_edges > 0 && assembleRom1dConductance(dt_routing))
-                rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
-                                    rom1d_edge_n2_.data(), n_regime_edges, ctx_.current_time,
-                                    regime_surch, &rom1d_h18_Lc_, rom1d_h18_S_.data());
-            if (rom1d_->hasStorage()) {
-                refreshRom1dModeRates();
-                K1d = 1.0;   // the rates carry the units (1/s)
-            } else {
-                rom1d_->clearModeRates();   // no generalized basis yet: one network K1d
-            }
-            refreshRom1dDirectionalOperator(dt_routing);
+        // H19: additive uncertainties at full order, on this step's flow response.
+        stepRom1dAdditiveChannel(dt_routing);
+        // H18: conductance/storage basis and per-mode rates (1/s), then the
+        // one-way operator on that basis. Until the first storage-weighted
+        // basis exists (no flow yet) the deviations are held: rate 0.
+        rom1d_h18_rates_.clear();
+        if (n_regime_edges > 0 && assembleRom1dConductance(dt_routing))
+            rom1d_->updateBasis(rom1d_edge_off_.data(), rom1d_edge_n1_.data(),
+                                rom1d_edge_n2_.data(), n_regime_edges, ctx_.current_time,
+                                regime_surch, &rom1d_h18_Lc_, rom1d_h18_S_.data());
+        double rate_scale = 0.0;
+        if (rom1d_->hasStorage()) {
+            refreshRom1dModeRates();
+            rate_scale = 1.0;   // the rates carry the units (1/s)
+        } else {
+            rom1d_->clearModeRates();
         }
-        rom1d_last_k1d_ = K1d;                                // P8 diagnostic (tau_j = 1/(lambda_j*K1d))
-        rom1d_->advance(dt_routing, K1d, rom1d_h_buf_.data(),
-                        rom1d_dh_buf_.empty() ? nullptr : rom1d_dh_buf_.data(),
+        refreshRom1dDirectionalOperator(dt_routing);
+        rom1d_->advance(dt_routing, rate_scale, rom1d_h_buf_.data(), nullptr,
                         rom1d_sens_buf_.data(),
                         flow_src ? nullptr : rom1d_alpha_buf_.data());
         // computeQuantiles() is called only at report boundaries (postOutputSnapshot)
@@ -11343,13 +11301,10 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     const auto n_active = active_map.size();
     // NOTE: these vectors are bound by pointer inside SpectralROM1D::
     // setSoftForcing; they are sized exactly once here and never resized.
-    rom1d_soft_loc_.assign(n_active, 0.0);
-    rom1d_soft_spread_a_.assign(n_active, 0.0);
-    rom1d_soft_spread_b_.assign(n_active, 0.0);
-    rom1d_soft_node_area_.assign(n_active, 0.0);
+    rom1d_add_qa_.assign(n_active, 0.0);
+    rom1d_add_qb_.assign(n_active, 0.0);
     rom1d_soft_off_.assign(n_active + 1, 0);
     rom1d_soft_gage_.clear();
-    rom1d_soft_area_.clear();
     rom1d_soft_is_b_.clear();
     rom1d_soft_sub_.clear();
     soft_rain_1d_active_ = false;
@@ -11385,8 +11340,6 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
         if (node < 0 || node >= ctx_.nodes.count()) continue;
         const int ai = full_to_active[static_cast<std::size_t>(node)];
         if (ai < 0) continue;
-        rom1d_soft_node_area_[static_cast<std::size_t>(ai)] +=
-            ctx_.subcatches.area[static_cast<std::size_t>(s)];
         const int g = ctx_.subcatches.gage[static_cast<std::size_t>(s)];
         if (g < 0 || g >= sr.count()) continue;
         const auto ug = static_cast<std::size_t>(g);
@@ -11410,7 +11363,6 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     const auto nnz = static_cast<std::size_t>(rom1d_soft_off_[n_active]);
     if (nnz == 0) return;
     rom1d_soft_gage_.assign(nnz, -1);
-    rom1d_soft_area_.assign(nnz, 0.0);
     rom1d_soft_is_b_.assign(nnz, 0);
     rom1d_soft_sub_.assign(nnz, -1);
 
@@ -11429,7 +11381,6 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
         const auto k = static_cast<std::size_t>(cursor[static_cast<std::size_t>(ai)]++);
         rom1d_soft_gage_[k] = g;
         rom1d_soft_sub_[k]  = s;
-        rom1d_soft_area_[k] = ctx_.subcatches.area[static_cast<std::size_t>(s)];
         rom1d_soft_is_b_[k] = (sr.family[ug] == uncertainty::DistType::UNIFORM) ? 1 : 0;
     }
 
@@ -11480,13 +11431,13 @@ void SWMMEngine::buildRom1DSoftField() noexcept {
     if (n_active <= 0 || M < 2) return;
 
     // Mixed families were refused at init, so exactly one plane is live.
-    const double* spread = soft_rain_1d_has_b_ ? rom1d_soft_spread_b_.data()
-                                               : rom1d_soft_spread_a_.data();
+    const double* spread = soft_rain_1d_has_b_ ? rom1d_add_qb_.data()
+                                               : rom1d_add_qa_.data();
     const uncertainty::DistType fam = soft_rain_1d_has_b_
         ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
 
     // Populate the ROM's family-selected per-member coefficients c_i.
-    rom1d_->setSoftForcing(rom1d_soft_loc_.data(), spread, fam);
+    rom1d_->setSoftForcing(nullptr, spread, fam);
     const std::vector<double> coeff = rom1d_->softCoeff();  // copy: setSoftForcing rebinds
     if (static_cast<int>(coeff.size()) != M) return;
 
@@ -11621,10 +11572,9 @@ void SWMMEngine::buildROM1D() noexcept {
     // Normalize weights to mean 1.0: preserves the relative conductance
     // structure (which conduit is stiffer than another) while keeping the
     // Laplacian's eigenvalue scale matching the topological (uniform-weight)
-    // Laplacian that computeK1d()'s L^2 normalization is calibrated against.
-    // Without this, weights are absolute conductances (0.5*dt*dqdh) that scale
-    // with the routing timestep, so lambda_j*K1d jumps in magnitude the moment
-    // the first weighted rebuild replaces the cold-start uniform basis.
+    // Laplacian. This start-up basis only lives until the first routing step
+    // with flow, when the conductance/storage basis (H18) replaces it and the
+    // modes get rates in 1/s; until then deviations are held.
     {
         double sum_w = 0.0;
         for (double w : weights) sum_w += w;
@@ -11699,7 +11649,6 @@ void SWMMEngine::buildROM1D() noexcept {
 
     // Store active map + per-step buffers for head extraction in stepRouting
     rom1d_active_map_ = active_map;
-    rom1d_dh_buf_.assign(static_cast<std::size_t>(n_active), 0.0);
     rom1d_h_buf_.assign(static_cast<std::size_t>(n_active), 0.0);
     rom1d_invert_buf_.assign(static_cast<std::size_t>(n_active), 0.0);
     rom1d_sens_buf_.assign(static_cast<std::size_t>(n_active), 0.0);
@@ -11720,15 +11669,14 @@ void SWMMEngine::buildROM1D() noexcept {
         rom1d_invert_buf_[static_cast<std::size_t>(ai)] = ctx_.nodes.invert_elev[ui];
     }
 
-    // SP1: gage-level soft rainfall -> 1D ROM. Build a per-active-node CSR of
-    // the subcatchments draining to that node whose gage carries a soft-rain
-    // spread, plus the node's total drained area, so the per-step relative
-    // spread is the area-weighted fraction of the node's runoff that is
-    // uncertain. See SOFT_RAINFALL_DESIGN.md §1 (Move 2) and §4.3.
+    // SP1: gage-level soft rainfall. Build a per-active-node CSR of the
+    // subcatchments draining to that node whose gage carries a soft-rain
+    // spread; each step their runoff x relative spread is the node's extra
+    // inflow per unit member coefficient (H19).
     initSoftRain1D(active_map);
 
     // PR H19: the full-order additive channel carries every additive deviation.
-    rom1d_->external_additive = rom1d_add_full_;
+    rom1d_->external_additive = true;
     rom1d_vec_cols_.clear();
     rom1d_add_np_ = 0;
     rom1d_add_state_.clear();
@@ -11736,12 +11684,9 @@ void SWMMEngine::buildROM1D() noexcept {
     // Generic registered-parameter path (PARAMETER_REGISTRY.md §6). MANNINGS_N/
     // RAINFALL are the built-in path handled above; every other active 1D spec
     // (e.g. an INFLOW FORCING_VECTOR source) gets a registry-generated column.
-    // FORCING_VECTOR params use the per-node dh/dt buffer as their field — the
-    // same DynWave head-rate forcing the built-in runoff scale multiplies — so
-    // an INFLOW member with theta = 1.3 experiences the observed lateral-
-    // inflow-driven head changes 30% stronger. rom1d_dh_buf_ is allocated
-    // above and never resized, so the pointer stays valid for the ROM's
-    // lifetime.
+    // FORCING_VECTOR columns stay with the engine: the full-order additive
+    // channel carries them with the node lateral inflow as source, so an INFLOW
+    // member with theta = 1.3 receives 30 % more lateral inflow (H19).
     {
         uncertainty::UncertaintyEnsemble reg;
         reg.n_members = rom1d_->n_ensemble;
@@ -11758,14 +11703,11 @@ void SWMMEngine::buildROM1D() noexcept {
                 if (s.name == "MANNINGS_N" || s.name == "RAINFALL") continue;
                 const auto* col = reg.column(s.name, uncertainty::LayerTarget::ONE_D);
                 if (!col) continue;
-                if (rom1d_add_full_ && s.entry == uncertainty::ParamEntry::FORCING_VECTOR) {
+                if (s.entry == uncertainty::ParamEntry::FORCING_VECTOR) {
                     rom1d_vec_cols_.push_back(*col);   // H19: carried by the full-order channel
                     continue;
                 }
-                const double* field =
-                    (s.entry == uncertainty::ParamEntry::FORCING_VECTOR)
-                        ? rom1d_dh_buf_.data() : nullptr;
-                rom1d_->addRegisteredParam(s.entry, *col, field);
+                rom1d_->addRegisteredParam(s.entry, *col, nullptr);
             }
         }
     }
@@ -11779,14 +11721,15 @@ void SWMMEngine::buildROM1D() noexcept {
     rom1d_->seed(h0.data());
 
     rom1d_->quasi_static_residual = rom1d_qsr_;   // H17: on by default
-    // FLOW_ROUTING FV (2026-10-13): the sidecar runs, with its regime inputs
-    // derived from the published state, but its bands have not been
-    // calibrated against Monte Carlo under FV. Say so in the report.
+    // FLOW_ROUTING FV: roughness and rain bands are calibrated on the FV
+    // chains (H18/H19), but front-arrival timing is ~8x wide and pumped
+    // networks are a ranking (FV publishes no pump/orifice dQ/dH). Say so.
     if (ctx_.options.routing_model == RoutingModel::FV) {
         push_report_warning(
-            "WARNING: 1D uncertainty bands under FLOW_ROUTING FV are not yet "
-            "validated against Monte Carlo; read them as a ranking, not as "
-            "probability intervals (docs/uncertainty/VALIDATION.md, H17 FV).", 0);
+            "WARNING: under FLOW_ROUTING FV the 1D uncertainty bands are calibrated "
+            "for free-surface and surcharged flow and for soft rain, but not while a "
+            "filling front arrives (about 8x wide) nor across pumps and orifices "
+            "(a ranking only) (docs/uncertainty/USER_GUIDE.md, limitation 10a).", 0);
     }
 
     // Forward to the 2D module so per-member coupling heads can be read at
@@ -11930,71 +11873,6 @@ void SWMMEngine::buildRom1dThresholds() noexcept {
             th.has_ctrl  = true;
         }
     }
-}
-
-// ============================================================================
-// computeK1d() — effective Manning conductance averaged over active conduits
-// ============================================================================
-
-double SWMMEngine::computeK1d() noexcept {
-    if (rom1d_k1d_advective_) ensureXspCache();
-    // Diffusion-wave diffusivity D = PHI * h^(5/3) / (2n*sqrt(S))  [ft^2/s].
-    // GraphEigenBasis eigenvalues are dimensionless (topological, not spatial):
-    // the weighted Laplacian built in buildROM1D()/updateBasis() is normalized
-    // to mean edge weight 1.0, so its eigenvalue scale matches the pure
-    // topological Laplacian regardless of the absolute conductance magnitude
-    // or routing dt. D must still be normalised by L^2 to give K1d in 1/s:
-    //   K1d = D / L^2 = PHI * h^(5/3) / (2n * sqrt(S) * L^2)
-    // This ensures lambda_j * K1d has units 1/s in the ROM advance equation.
-    //
-    // PHI (constants::PHI = 1.486) is the US-customary Manning's-equation unit
-    // factor (Q = (PHI/n)*A*R^(2/3)*S^(1/2)) — REQUIRED here because h and L
-    // are read from ctx_.nodes.depth / conduits.length, which PostParseResolver's
-    // convert_inputs_to_internal() always stores in feet regardless of the
-    // project's declared FLOW_UNITS (legacy-SWMM5 internal-units architecture;
-    // see Link.cpp's own `beta = PHI * sqrt(slope) / n` for the same factor
-    // applied to the same feet-valued state). Omitting PHI here silently used
-    // the SI form of the diffusivity on feet-valued state, understating K1d by
-    // exactly 1/PHI = 0.6729 — found 2026-08-04 while root-causing PR-10's MC
-    // coverage test (measured discrepancy 0.673x matched 1/1.486 to 3 digits).
-    double sum_k = 0.0;
-    int    cnt   = 0;
-    for (int j = 0; j < ctx_.n_links(); ++j) {
-        auto uj = static_cast<std::size_t>(j);
-        if (ctx_.links.type[uj] != LinkType::CONDUIT) continue;
-        // Phase 6: conduit config (roughness/length/slope/mod_length) lives
-        // in the conduits side-table, not the wide LinkData arrays.
-        const int cr = ctx_.link_subtypes.conduit_row(j);
-        if (cr < 0) continue;
-        const auto ucr = static_cast<std::size_t>(cr);
-        const double n_rough = ctx_.link_subtypes.conduits.roughness[ucr];
-        const double slope   = std::fabs(ctx_.link_subtypes.conduits.slope[ucr]);
-        double h = ctx_.nodes.depth[static_cast<std::size_t>(ctx_.links.node1[uj])];
-        // FLOW_ROUTING FV can publish an upstream node head below the node's
-        // own invert (first cell inside a steep pipe): use the conduit's
-        // published depth when the node gives none.
-        if (!(h >= 1e-6)) h = ctx_.links.depth[uj];
-        const double L       = ctx_.link_subtypes.conduits.mod_length[ucr] > 0.0
-                                 ? ctx_.link_subtypes.conduits.mod_length[ucr]
-                                 : ctx_.link_subtypes.conduits.length[ucr];
-        if (n_rough <= 0.0 || slope <= 0.0 || h < 1e-6 || L <= 0.0) continue;
-        const double D = constants::PHI * std::pow(h, 5.0 / 3.0)
-                          / (2.0 * n_rough * std::sqrt(slope));
-        // A deviation relaxes by diffusion (D/L^2) or by being carried out of
-        // the reach at the kinematic celerity (5/3) v (L/c), whichever is
-        // faster. Diffusion alone misses the steep free-surface reaches,
-        // where advection dominates (H17, found under FLOW_ROUTING FV).
-        double adv = 0.0;
-        if (rom1d_k1d_advective_ && uj < xsp_cache_.size()) {
-            const double y = std::clamp(ctx_.links.depth[uj], 0.0, xsp_cache_[uj].y_full);
-            const double A = xsect::getAofY(xsp_cache_[uj], y);
-            const int nb = std::max(ctx_.link_subtypes.conduits.barrels[ucr], 1);
-            if (A > 1e-9) adv = (5.0 / 3.0) * std::fabs(ctx_.links.flow[uj]) / (A * nb) / L;
-        }
-        sum_k += std::max(D / (L * L), adv);
-        ++cnt;
-    }
-    return cnt > 0 ? sum_k / cnt : 1e-4;
 }
 
 // ============================================================================
@@ -12151,7 +12029,6 @@ bool SWMMEngine::assembleRom1dConductance(double dt) noexcept {
     if (na <= 0 || ne <= 0 || static_cast<int>(rom1d_edge_off_.size()) != ne) return false;
     const auto& f2a = rom1d_->full_to_active;
     const auto& links = ctx_.links;
-    const auto& nodes = ctx_.nodes;
     ensureXspCache();
 
     rom1d_h18_wsym_.assign(static_cast<std::size_t>(ne), 0.0);
@@ -12167,20 +12044,26 @@ bool SWMMEngine::assembleRom1dConductance(double dt) noexcept {
         sum_c += c;
         ++n_c;
     }
-    if (n_c == 0 || !(sum_c > 0.0)) return false;
-    const double c_floor = 1.0e-6 * sum_c / n_c;
+    rom1d_h18_diag_.assign(static_cast<std::size_t>(na), 0.0);
+    double sum_d = 0.0;
+    for (const auto& fe : rom1d_fs_edges_) {
+        if (fe.up < 0 || fe.up >= na) continue;
+        const double c = fe.conduit ? std::max(fe.ju + fe.jd, 0.0) : fe.d;
+        rom1d_h18_diag_[static_cast<std::size_t>(fe.up)] += c;
+        sum_d += c;
+    }
+    // The floor is relative to ALL conductance, symmetric and one-sided: on a
+    // fully supercritical network the relay removes every head-gradient term,
+    // and the kinematic diagonal is all there is (2026-10-16: a 5 % chain had
+    // no basis and held its band at zero).
+    const double sum_tot = sum_c + sum_d;
+    if (n_c == 0 || !(sum_tot > 0.0)) return false;
+    const double c_floor = 1.0e-6 * sum_tot / n_c;
     for (int e = 0; e < ne; ++e) {
         const auto ue = static_cast<std::size_t>(e);
         const auto uj = static_cast<std::size_t>(rom1d_conduit_link_[ue]);
         if (links.type[uj] == LinkType::CONDUIT)
             rom1d_h18_wsym_[ue] = std::max(rom1d_h18_wsym_[ue], c_floor);
-    }
-
-    rom1d_h18_diag_.assign(static_cast<std::size_t>(na), 0.0);
-    for (const auto& fe : rom1d_fs_edges_) {
-        if (fe.up < 0 || fe.up >= na) continue;
-        const double c = fe.conduit ? std::max(fe.ju + fe.jd, 0.0) : fe.d;
-        rom1d_h18_diag_[static_cast<std::size_t>(fe.up)] += c;
     }
 
     computeRom1dStorage();
@@ -12553,7 +12436,7 @@ void SWMMEngine::refreshRom1dDirectionalOperator(double dt) noexcept {
 
     // PR H18: on the generalized basis M is P^T Lc,dir P in 1/s -- the
     // physical symmetric conductances here, the one-sided diagonal added below.
-    const bool h18 = rom1d_per_mode_ && rom1d_->hasStorage() &&
+    const bool h18 = rom1d_->hasStorage() &&
                      static_cast<int>(rom1d_h18_wsym_.size()) == nc &&
                      static_cast<int>(rom1d_h18_diag_.size()) == rom1d_->n_nodes;
     int n_links = ctx_.n_links();
@@ -12659,7 +12542,7 @@ void SWMMEngine::refreshRom1dTravelTime() noexcept {
         const auto uj = static_cast<std::size_t>(j);
         if (ctx_.links.type[uj] != LinkType::CONDUIT) continue;
         // Phase 6: conduit config lives in the conduits side-table, not the
-        // wide LinkData arrays (same accessor pattern as computeK1d()).
+        // wide LinkData arrays (conduit_row side-table accessor).
         const int cr = ctx_.link_subtypes.conduit_row(j);
         if (cr < 0) continue;
         const auto ucr = static_cast<std::size_t>(cr);

@@ -414,12 +414,14 @@ corresponds to each node, and returns −1 for outfalls.
 
 **At each `stepRouting()` call** — advance and quantiles:
 
-1. `computeK1d()` estimates mean diffusion-wave diffusivity from current conduit depths, slopes,
-   and roughnesses, then normalises by conduit length² to yield K1d [1/s].
-2. `SpectralROM1D::advance(dt, K1d, h_det_active, runoff)` updates all M×k deviations, using the
-   current active-node heads as the live deterministic reference `h_det_active`.
-3. `computeQuantiles(h_det_active, invert_active)` reconstructs per-active-node head quantiles
-   (`h_det_active + P·δa`, clamped to each node's invert elevation).
+1. The flow response (`computeRom1dFlowSource()`) gives the roughness target φ and each pipe's
+   conductance; `stepRom1dAdditiveChannel()` advances the full-order rain/inflow fields (H19).
+2. The conductance/storage basis is rebuilt when the network has changed enough
+   (`updateBasis()`), and each mode's rate in 1/s is refreshed (`refreshRom1dModeRates()`, H18).
+3. `SpectralROM1D::advance()` updates all M×k roughness deviations, using the current
+   active-node heads as the live deterministic reference `h_det_active`.
+4. `computeQuantiles(h_det_active, invert_active)` reconstructs per-active-node head quantiles
+   (`h_det_active + P·δa` + the rain/inflow fields, clamped to each node's invert elevation).
 
 The 1D ROM has **no reseed mechanism at all**. It seeds once at `initialize()` and, from then
 on, only ever advances the deviation ODE — there is nothing to periodically re-anchor, because
@@ -437,7 +439,7 @@ quantity the deterministic solver computes anyway:
 |---|---|---|
 | `initialize()` | Mesh/network topology — triangle connectivity, conduit node pairs, cell areas, conduit lengths | Assembles the Laplacian eigenbasis: the same operator CVODE will invert at every Newton step |
 | First `CvodeSurfaceSolver::advance()` | CVODE depth array `h[]` (current state after solver warmup) | Seeds all M members: zeroes every deviation, stores `h` as `h_det` |
-| Each `advance()` | Current wet-cell depths, Manning's n values, bed slopes, and the live deterministic depth/head (`h_det`) | Computes K_eff (2D) or K1d (1D); `h_det` supplies the Manning-sensitivity forcing term (§4.6) |
+| Each `advance()` | Current wet-cell depths, Manning's n values, bed slopes, and the live deterministic depth/head (`h_det`) | Computes K_eff (2D) or the per-mode rates from pipe conductance and node storage (1D); the flow response supplies the Manning-sensitivity target (§4.6) |
 | Coupling exchange | Deterministic DYNWAVE node heads from `computeCouplingExchange()` | Per-member orifice equation — M realisations of what the inlet head difference is, applied as a deviation from the deterministic exchange |
 | Wet-domain check (2D only) | CVODE's current wet-cell count | Decides when the ROM basis needs rebuilding to cover newly-wet cells (not a drift correction — the 1D ROM has no equivalent hook at all) |
 
@@ -449,9 +451,9 @@ and emits three extra depth fields per cell without altering the solver's own tr
 
 | | 2D ROM (`SpectralROM`) | 1D ROM (`SpectralROM1D`) |
 |---|---|---|
-| Laplacian type | Geometric mesh Laplacian (area/distance-weighted) | Graph (topological) Laplacian (connectivity only, uniform weights) |
-| Eigenvalue character | Carries spatial scale implicitly via mesh geometry | Dimensionless — counts graph connectivity, not metres |
-| Diffusivity parameter | K_eff [m^(4/3)/s] — spatial scale baked into mesh Laplacian | K1d = D/L² [1/s] — must normalise by L² to give 1/s |
+| Laplacian type | Geometric mesh Laplacian (area/distance-weighted) | Conductance Laplacian (each pipe's flow-per-head) with node storage as weight |
+| Eigenvalue character | Carries spatial scale implicitly via mesh geometry | A rate in 1/s per mode (conductance over storage) |
+| Diffusivity parameter | K_eff [m^(4/3)/s] — spatial scale baked into mesh Laplacian | None — the rates come from the network itself (H18) |
 | When seeded | Deferred to first CVODE advance (solver warms up first) | Immediately at `initialize()` (from initial steady-state heads) |
 | Automatic reseeding | Yes — triggered by wetting-front advance | No |
 | Eigenbasis type | `MeshEigenBasis` (mesh geometry) | `GraphEigenBasis` (network connectivity) |
@@ -519,11 +521,11 @@ interest. Modes with high `λ_j` decay so fast (sub-second) that they contribute
 uncertainty by the time the CVODE step completes; they are safely discarded.
 
 The same formulation applies to the 1D sewer ROM (`SpectralROM1D`), substituting the network
-graph Laplacian for the 2D mesh Laplacian. The 1D K_eff is computed as the diffusion-wave
-diffusivity `D = h^(5/3) / (2n√S)` [m²/s] averaged over active conduits, then normalised by
-conduit length squared `L²` to yield units of 1/s. This normalisation is essential: graph
-Laplacian eigenvalues are dimensionless (they count topological connectivity, not spatial
-scale), so `λ_j × K1d` must have units of 1/s.
+graph Laplacian for the 2D mesh Laplacian. In 1D each mode drains at its own rate, from the
+generalized eigenproblem `L·v = λ·S·v` with `L` the pipes' conductances (extra flow per foot of
+head) and `S` the node storage, so `λ_j` is in 1/s with no network-wide constant
+(docs/uncertainty/RELAXATION_RATES.md). Rain and other extra inflows are carried at full size,
+not in modes (docs/uncertainty/ADDITIVE_CHANNEL.md).
 
 **Does this work with SWMM's dynamic wave routing?**
 
@@ -794,7 +796,7 @@ Step 1, so applying the absolute per-member flux would double-count it:
 **Step 3 — independent ROM advances**
 
 After coupling, `SpectralROM::advance()` and `SpectralROM1D::advance()` run independently for
-the remainder of the routing step using their respective K_eff and K1d. The coupling
+the remainder of the routing step using their respective K_eff and per-mode rates. The coupling
 deviation injected in Step 2 is a one-shot impulse on the 2D ROM's modal deviations; the 2D
 ROM then evolves freely until the next routing step.
 
@@ -802,7 +804,7 @@ ROM then evolves freely until the next routing step.
 
 The 1D ROM coefficients are not modified by `applyCouplingFluxToROM()`. The 1D ROM sees the
 coupling only indirectly — through the lateral flow term in DYNWAVE, which updates
-`ctx_.nodes.head[]`, which in turn affects K1d and the initial seed state. This is an
+`ctx_.nodes.head[]`, which in turn affects the flow response and the mode rates. This is an
 operator-splitting approximation: the 2D ensemble absorbs per-member coupling uncertainty;
 the 1D ensemble evolves under its own Manning uncertainty and contributes per-member 1D heads
 to the coupling exchange in Step 2.
@@ -848,7 +850,7 @@ five columns; a reader that splits on commas and takes the first five keeps work
 |---|---|
 | Spread peaks at inlet/outlet junctions | These are hydraulic bottlenecks where Manning's n most strongly controls conveyance. The Fiedler gradient (§7.4) confirms this. |
 | Spread grows downstream along a pipe | Manning's n uncertainty compounds over flow path length — each cell passes its uncertainty to the next. |
-| Spread is near zero early in the event, grows later | Deviation-form spread starts at exactly zero by construction and grows toward its parametric steady state with per-mode time constants `1/(λ_j·K1d)`. This is spin-up, not an error — see §8 limitation 1. |
+| Spread is near zero early in the event, grows later | Deviation-form spread starts at exactly zero by construction and grows toward its parametric steady state with per-mode time constants `1/λ_j` (storage over conductance). This is spin-up, not an error — see §8 limitation 1. |
 | Spread is near zero everywhere despite non-zero perturbation | On a network with **no grounded boundary at all** (no outfall / open edge), the constant mode is unrepresentable and a spatially uniform field projects to nothing. With a normal outfall this no longer applies — the basis is grounded there and uniform inputs do produce spread. Check the model actually has an outfall; otherwise use a non-uniform IC. |
 | High relative spread in dry cells | Relative spread = (q95−q05)/q50 blows up as q50 → 0. Use **absolute** spread (q95−q05 in metres) for dry-cell analysis. |
 
@@ -1290,7 +1292,8 @@ constant uncertainty).
 **Files**: `src/engine/uncertainty/GraphEigenBasis.hpp/cpp`,
 `src/engine/uncertainty/NetworkLaplacian1D.hpp`,
 `src/engine/uncertainty/SpectralROM1D.hpp/cpp`  
-**Engine hooks**: `SWMMEngine::buildROM1D()`, `SWMMEngine::computeK1d()` in
+**Engine hooks**: `SWMMEngine::buildROM1D()`, `assembleRom1dConductance()`,
+`refreshRom1dModeRates()`, `stepRom1dAdditiveChannel()` in
 `src/engine/core/SWMMEngine.cpp`  
 **Tests**: `tests/unit/engine/test_engine_spectral_rom1d.cpp` (39/39) +
 `tests/unit/engine/test_engine_1d_rom_integration.cpp` (5/5)
@@ -1308,9 +1311,9 @@ A 1D network spectral ROM mirroring the 2D design:
   is configured, or when the 2D ROM is enabled. Builds the Laplacian from `ctx_.links` conduit
   pairs, runs the eigensolver, seeds from current node heads, and registers with
   `surface_router_.setROM1D()`.
-- `SWMMEngine::computeK1d()` — diffusion-wave diffusivity
-  `D = h^(5/3) / (2n√S)` [m²/s], averaged over active conduits and normalised by mean
-  conduit length squared `L²` to yield 1/s for the dimensionless graph Laplacian eigenvalues.
+- Per-mode rates (H18, since 2026-10): the basis comes from the pipes' conductance and the
+  nodes' storage, and each mode's rate in 1/s is refreshed every step. The former network-wide
+  constant K1d (`computeK1d()`) is gone.
 
 **Accessing 1D quantiles from C++:**
 
@@ -1466,7 +1469,7 @@ xarray as a supplementary group.
    yet implemented.
 
 6. **1D ROM quantiles now written to HDF5.** The 1D ROM is fully wired into the
-   engine (`buildROM1D()` / `computeK1d()` / advance per step). Quantiles are
+   engine (`buildROM1D()` / per-mode rates / advance per step). Quantiles are
    accessible via `SWMMEngine::rom1d()` (see §7.7) and are now also written to
    the `/rom1d` group in the HDF5 output file when `OUTPUT_FILE` is specified
    (§7.10). The `.uncertainty.csv` file continues as the zero-dependency path.
@@ -1517,13 +1520,14 @@ xarray as a supplementary group.
     a channel after a weir stops spilling (`no_flow`), where members differ by stored volume
     rather than by flow. See `docs/uncertainty/VALIDATION.md`, "H17".
 
-10a. **Under `FLOW_ROUTING FV` the 1D bands are a ranking.** The sidecar runs under the
-    finite-volume solver: its inputs are derived from the published hydraulic state
-    instead of the dynamic-wave solver's internals, and the engine warns in the report. Against
-    Monte Carlo routed the same way, the free-surface chain is calibrated (0.90), a surcharged
-    chain is conservative (0.80 coverage, 2× wide) and a front passage is about 8× wide. The ROM's single
-    network relaxation rate is too slow where FV's steep reaches drain quickly. Use dynamic
-    wave when you need calibrated bands. VALIDATION.md "H17 §12".
+10a. **Under `FLOW_ROUTING FV`, front timing and pumped networks are not calibrated.** The
+    sidecar runs under the finite-volume solver: its inputs are derived from the published
+    hydraulic state instead of the dynamic-wave solver's internals, and the engine notes this in
+    the report. Against Monte Carlo routed the same way, the free-surface and surcharged chains
+    and both soft-rain gates are calibrated. Two cells are not: a filling front is about 8× wide
+    (the front-arrival timing correction under FV), and Example 8's pumped network is a ranking
+    (FV's own force-main solution runs backward against the pump, and FV publishes no
+    flow-versus-head response for pumps and orifices). VALIDATION.md "H17 §12", "H18", "H19".
 
 10b. **Engine checkpoints are refused while uncertainty runs.** The engine's checkpoint/restart
     does not yet save the sidecar's ensemble, so enabling a checkpoint with `[UNCERTAINTY]`,
@@ -1696,9 +1700,12 @@ RG3  UNIFORM  HALFRANGE 1.5
 
 where `u_i = shuffledStrata(M, seed+4)[i]` and `z_i = probit(u_i)`.
 
-A `[SOFT_RAINGAGES]` entry activates the 1D network ROM on its own. The ROM's
-forcing field is the dh/dt head-rate buffer, so the gage-level spread is
-mapped as `spread_now[n] = dh/dt[n] · area-weighted relative spread`.
+A `[SOFT_RAINGAGES]` entry activates the 1D network ROM on its own. Each node's
+extra inflow per unit member coefficient is the runoff of every subcatchment
+draining to it times its gage's relative spread (and the rain→runoff
+elasticity). The full-order additive channel carries that extra water down the
+network (H19, docs/uncertainty/ADDITIVE_CHANNEL.md), so a band forms in steady
+flow too: the earlier dh/dt-driven mapping gave none once levels stopped rising.
 
 **Mixed families across gages.** Different gages may use different families.
 Each gage's spread is multiplied by *its own* family's member coefficient: the

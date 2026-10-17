@@ -1,8 +1,10 @@
 # Per-mode relaxation rates (H18) — design note
 
-Status: design fixed 2026-10-13, implemented behind the internal hook
-`SWMMEngine::rom1dPerModeRates()` (default off). The default is decided by the A.4
-validation gate in `RELAXATION_RATES_AND_UPSTREAM_TESTS_PLAN.md`, not here.
+Status: design fixed 2026-10-13; **the default since 2026-10-16** (A.5). K1d,
+its scale knob and the advective hook are deleted. Rain and other additive
+uncertainties do not use these modes: they are carried at full order
+(`ADDITIVE_CHANNEL.md`, H19), after §3's placement of the kinematic term proved
+wrong for them (correction box below). Validation: VALIDATION.md "H18", "H19", "A.5".
 
 ## 1. The problem in one paragraph
 

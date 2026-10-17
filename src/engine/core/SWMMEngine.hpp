@@ -608,8 +608,6 @@ private:
     std::vector<double> rom1d_h_buf_;      ///< per-active-node deterministic head buffer (reused each step)
     std::vector<double> rom1d_invert_buf_; ///< per-active-node invert elevations (filled once at build)
     std::vector<double> rom1d_sens_buf_;   ///< per-active-node depth (head - invert): Manning-sensitivity reference (PR 10)
-    std::vector<double> rom1d_dh_buf_;     ///< per-active-node dh/dt forcing buffer (reused each step; also the field
-                                            ///< for any registered FORCING_VECTOR 1D param, e.g. INFLOW)
     std::vector<double> rom1d_alpha_buf_;  ///< per-active-node PR H5 surcharge-attenuation factor (reused each step)
     // PR H14 — Froude-gated directional operator
     uncertainty::DirectionalOperatorConfig rom1d_directional_cfg_;
@@ -630,7 +628,6 @@ private:
     int rom1dRegime(double dt, const double** link_froude, const std::uint8_t** surcharged) noexcept;
     std::vector<char>   rom1d_fs_pinned_;   ///< nodes overflowing at the rim (phi = 0)
     std::vector<double> rom1d_floor_buf_;   ///< per-node member floor min(invert, h_det)
-    bool rom1d_k1d_advective_ = false;   ///< measurement hook: advective relaxation in K1d
     std::vector<double>       rom1d_state_froude_;
     std::vector<std::uint8_t> rom1d_state_surch_;
     bool rom1d_flow_source_ = true;
@@ -661,13 +658,8 @@ private:
     // spread meets exactly its own family's member coefficient and there is no
     // first-family fallback. These buffers are bound by POINTER inside
     // SpectralROM1D::setSoftForcing, so they must never be resized after build.
-    std::vector<double> rom1d_soft_loc_;       ///< per-active-node soft location (= dh_buf)
-    std::vector<double> rom1d_soft_spread_a_;  ///< plane A: NORMAL/LOGNORMAL gages' spread
-    std::vector<double> rom1d_soft_spread_b_;  ///< plane B: UNIFORM gages' spread
-    std::vector<double> rom1d_soft_node_area_; ///< total subcatchment area draining to each active node
     std::vector<int>    rom1d_soft_off_;       ///< CSR offsets (n_active+1)
     std::vector<int>    rom1d_soft_gage_;      ///< CSR gage index per configured subcatchment contribution
-    std::vector<double> rom1d_soft_area_;      ///< CSR area per contribution
     std::vector<char>   rom1d_soft_is_b_;      ///< CSR: 1 when the contribution's gage is UNIFORM (plane B)
     std::vector<int>    rom1d_soft_sub_;       ///< CSR: subcatchment index per contribution (SR-6 elasticity lookup)
     // ---- SR-6: rain->runoff elasticity for the soft-rain spread mapping ----
@@ -754,29 +746,15 @@ private:
     void buildRom1DSoftField() noexcept;
 
 public:
-    /// SR-6 diagnostic knob (test-only, default 1.0 = bit-identical): multiplies
-    /// the per-step K1d handed to the 1D ROM. Exists to falsify the hypothesis
-    /// that the soft-rain band shortfall is set by the forcing channel's
-    /// dissipation lambda*K1d. Not parser-exposed; set through the C++ handle
-    /// between open() and the first step.
-    double& rom1dK1dScale() noexcept { return rom1d_k1d_scale_; }
     /// Measurement hook: 1D ROM mode count (0 = built-in rule). Set before initialize().
     int& rom1dModeCountOverride() noexcept { return rom1d_k_modes_override_; }
     /// Internal A/B hook: quasi-static residual of the Manning channel (default on). Set before initialize().
     bool& rom1dQuasiStatic() noexcept { return rom1d_qsr_; }
-    /// Measurement hook: include advective relaxation in K1d.
-    bool& rom1dK1dAdvective() noexcept { return rom1d_k1d_advective_; }
-    /// PR H18 internal hook: per-mode relaxation rates from a conductance /
-    /// storage generalized eigenbasis instead of one network K1d (default off
-    /// until validated; docs/uncertainty/RELAXATION_RATES.md). Set before the first step.
-    bool& rom1dPerModeRates() noexcept { return rom1d_per_mode_; }
-    /// PR H19 internal hook: full-order additive channel (soft rain, runoff
-    /// multiplier, FORCING_VECTOR) instead of modal additive forcing
-    /// (docs/uncertainty/ADDITIVE_CHANNEL.md). Set before initialize().
-    bool& rom1dAdditiveFullOrder() noexcept { return rom1d_add_full_; }
     /// Diagnostic: Gauss-Seidel sweeps of the last additive-channel step (max over planes).
     int rom1dAdditiveSweeps() const noexcept { return rom1d_add_sweeps_; }
-    /// Diagnostic: the per-mode rates (1/s) used on the last step (H18; empty when off).
+    /// Diagnostic: the per-mode rates (1/s) used on the last step (H18,
+    /// docs/uncertainty/RELAXATION_RATES.md); empty before the first
+    /// conductance/storage basis exists.
     const std::vector<double>& rom1dModeRates() const noexcept { return rom1d_h18_rates_; }
     /// Diagnostic: node storage S (ft^2) of the last H18 assembly, active space.
     const std::vector<double>& rom1dStorage() const noexcept { return rom1d_h18_S_; }
@@ -797,17 +775,9 @@ public:
     /// spread (default on). Off reproduces the pre-SR-6 mapping bit-for-bit.
     bool& rom1dRunoffElasticityEnabled() noexcept { return rom1d_runoff_elasticity_enabled_; }
     const uncertainty::RunoffElasticityProbe& rom1dRunoffProbe() const noexcept { return rom1d_runoff_probe_; }
-    /// P8 diagnostic: the K1d handed to the 1D ROM on the most recent routing
-    /// step (0 before the first). With the basis eigenvalues this gives the
-    /// modal time constants tau_j = 1/(lambda_j*K1d) that a coverage fixture
-    /// must fit inside its sampling window (the P4 root cause).
-    double rom1dLastK1d() const noexcept { return rom1d_last_k1d_; }
 private:
-    double rom1d_k1d_scale_ = 1.0;
     int rom1d_k_modes_override_ = 0;
     bool rom1d_qsr_ = true;   ///< H17 quasi-static residual (internal A/B hook)
-    bool rom1d_per_mode_ = false;   ///< H18 per-mode rates (internal hook)
-    bool rom1d_add_full_ = false;   ///< H19 full-order additive channel (internal hook)
     int rom1d_add_sweeps_ = 0;
     int rom1d_add_np_ = 0;
     uncertainty::AdditiveSystem rom1d_add_sys_;
@@ -825,10 +795,6 @@ private:
     bool assembleRom1dConductance(double dt) noexcept;
     /** @brief H18: per-mode generalized Rayleigh rates on the current basis into rom1d_h18_rates_. */
     void refreshRom1dModeRates() noexcept;
-    double rom1d_last_k1d_ = 0.0;
-
-    /** @brief Compute effective 1D Manning conductance K1d (1/s) from current state. */
-    double computeK1d() noexcept;
 
     /// Non-owning pointer to the 2D HDF5 output plugin (lifetime owned by
     /// PluginFactory's output_plugins_). Set in open() when [2D_OPTIONS]
