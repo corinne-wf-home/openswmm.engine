@@ -12,21 +12,20 @@
  *
  *            d(δa_ij)/dt = −(λ_j·K1d/mm_i)·δa_ij
  *                          − λ_j·K1d·(1/mm_i − 1)·b_j(t)   (Manning sensitivity)
- *                          + (rm_i − 1)·r_j(t)             (forcing sensitivity)
  *
  *          where:
- *            λ_j    = j-th eigenvalue of the network Laplacian
- *            K1d    = effective 1D conductance scale (1/s after L² normalization)
- *            mm_i   = member i Manning multiplier, rm_i = runoff multiplier
- *            b_j(t) = P[:,j]^T · h_det   (deterministic head projection)
- *            r_j(t) = P[:,j]^T · runoff_per_node
+ *            λ_j    = j-th rate of the basis (1/s on the engine's
+ *                     conductance/storage basis, H18; the engine passes K1d = 1)
+ *            mm_i   = member i Manning multiplier
+ *            b_j(t) = P[:,j]^T · S · φ   (projection of the roughness response)
  *
- *          The nominal member (mm = rm = 1) has zero forcing and zero deviation
+ *          The nominal member (mm = 1) has zero forcing and zero deviation
  *          forever, so the median tracks the deterministic run by construction
  *          and no reseeding is ever required (spread is never collapsed).
  *
- *          Per-member runoff from RunoffEnsemble can be injected via
- *          setEnsembleRunoff(): (rm_i − 1) is replaced by (rate_i/mean − 1).
+ *          Additive uncertainties (rain, inflow) are not in the modes: the
+ *          engine carries them at full order (H19, ADDITIVE_CHANNEL.md) and
+ *          hands the fields over with setAdditivePlanes().
  *
  * @ingroup engine_uncertainty
  */
@@ -38,7 +37,6 @@
 #include "RomDensePropagator.hpp"
 #include "NetworkLaplacian1D.hpp"
 #include "UncertaintyTypes.hpp"
-#include "SoftSpatialField.hpp"
 #include "RomPhaseCoordinate.hpp"
 #include "RomQuantileGemm.hpp"
 #include <vector>
@@ -57,12 +55,9 @@ namespace openswmm::uncertainty {
  *   2. Optionally set n_ensemble, mannings_pert, runoff_pert.
  *   3. Call initialize().
  *   4. Call seed(h_nodes) — zeroes all deviations, primes h_det_last_.
- *   5. Each timestep: call advance(dt, K1d, h_det_active, runoff_per_node),
+ *   5. Each timestep: call advance(dt, K1d, h_det_active, sens_ref),
  *      then computeQuantiles(h_det_active, invert_active) when output is due.
  *   6. Read q05, q50, q95 per active node.
- *
- * Optionally call setEnsembleRunoff() before each advance() to inject
- * per-member runoff rates from RunoffEnsemble (Phase 3 integration).
  */
 struct SpectralROM1D {
 
@@ -159,8 +154,6 @@ struct SpectralROM1D {
     /// response field (sens_ref); off only as an internal A/B hook.
     bool quasi_static_residual = true;
 
-    /// Pre-projected runoff forcing: r_coarse[j] = P[:,j]^T * runoff_per_node.
-    std::vector<double> r_coarse;
 
     /// Pre-projected deterministic head: b_coarse[j] = P[:,j]^T * h_det.
     /// Refreshed at the top of every advance() call.
@@ -206,160 +199,31 @@ struct SpectralROM1D {
                             const std::vector<double>& runoff);
 
     /**
-     * @brief Supply per-member runoff rates from RunoffEnsemble.
+     * @brief Per-member coefficients of a soft-rain distribution family.
      *
-     * When set, advance() uses these rates as per-member multipliers on
-     * r_coarse[j]:  f_j^i = r_coarse[j] * rate_i / mean_rate.
-     * Requires a non-null runoff_per_node argument to advance().
-     *
-     * @param per_member_rates Per-member surface runoff rate (m/s),
-     *                         length n_ensemble.
-     * @throws std::invalid_argument if size != n_ensemble.
+     * One rank per member, u_i = shuffledStrata(M, sample_seed + 4), shared by
+     * every family so a member sits at the same rank everywhere (COHERENCE
+     * FULL): UNIFORM gives c_i = 2 u_i - 1 (half-range band); NORMAL and
+     * LOGNORMAL give c_i = probit(u_i) (LOGNORMAL by the delta linearization,
+     * the caller scaling the spread by its location). The engine's full-order
+     * additive channel (H19) multiplies its rain planes by these. Valid after
+     * initialize().
      */
-    void setEnsembleRunoff(const std::vector<double>& per_member_rates);
-
-    /// Revert to the scalar runoff_mult path.
-    void clearEnsembleRunoff();
-
-    /**
-     * @brief Supply a location/spread forcing pair for soft rainfall / inflow.
-     *
-     * The deterministic forcing projection uses @p loc (when non-null); the
-     * uncertainty sensitivity uses c_i * (P^T spread) with the per-member
-     * coefficient c_i selected by @p family (fixed at initialize()):
-     *   - NORMAL / LOGNORMAL : c_i = z_i = probit(u_i)   (location-scale delta)
-     *   - UNIFORM            : c_i = 2*u_i - 1            (half-range band)
-     * so member i's realized forcing is loc + c_i * spread. For LOGNORMAL the
-     * caller passes spread = sigma_log * loc (delta linearization, §4.3).
-     *
-     * Both pointers are NON-OWNING and must remain valid until changed or
-     * cleared. Passing nullptr for @p spread disables the soft spread path.
-     *
-     * @param soft_field Optional per-member spatial coefficient field
-     *        (`COHERENCE CORR_LEN`, CL-1b). NON-OWNING; must outlive the ROM
-     *        or be cleared. When null (default) or non-spatial, the comonotone
-     *        scalar `c_i` path is used and the result is bit-identical to the
-     *        pre-CL-1b behaviour. When spatial, member i's per-mode forcing
-     *        sensitivity becomes `Σ_t P_j[t]·spread[t]·W_i[t]` (a per-member
-     *        projection) in place of the scalar `c_i · (P^T spread)_j`. The
-     *        field's `n_cells` must equal the number of active ROM nodes and
-     *        `n_members` must equal n_ensemble; its per-node column mean over
-     *        members must equal mean_i(c_i) so q50 still tracks the
-     *        deterministic answer (checked by assertion in debug builds).
-     *
-     * @param spread_b Optional SECOND spread plane carrying a DIFFERENT
-     *        distribution family (PR H7). Null (default) leaves the ROM
-     *        single-family and bit-identical to the pre-H7 behaviour. When
-     *        non-null the member forcing sensitivity becomes
-     *
-     *            c_i·(Pᵀ·spread)_j  +  c_i^B·(Pᵀ·spread_b)_j
-     *
-     *        i.e. two projections per advance, one per family, instead of one
-     *        family's coefficient applied to a range-matched single plane.
-     *        NON-OWNING, same lifetime contract as @p spread. Callers split a
-     *        MIXED source by family: cells/gages of family A go in @p spread
-     *        (zero elsewhere), family B's go in @p spread_b (zero elsewhere).
-     * @param family_b Family selecting c_i^B. Both coefficients derive from
-     *        the SAME `u_i = shuffledStrata(M, sample_seed+4)` stream, so one
-     *        rank per member holds across families — the COHERENCE FULL
-     *        contract — and the nominal member is nominal in both channels
-     *        simultaneously.
-     *
-     * @note Scope guard (PR H7): a second plane is REFUSED when @p soft_field
-     *       is spatial (`COHERENCE CORR_LEN`), because the correlated path
-     *       carries one coefficient family per source by construction. The
-     *       call still succeeds as a single-family call and softPlanesError()
-     *       returns a non-empty explanation; CORR_LEN × MIXED is additive
-     *       future work.
-     */
-    void setSoftForcing(const double* loc, const double* spread,
-                        DistType family = DistType::NORMAL,
-                        const SoftSpatialField* soft_field = nullptr,
-                        const double* spread_b = nullptr,
-                        DistType family_b = DistType::UNIFORM) noexcept;
-
-    /// Clear the soft forcing path and revert to the legacy forcing inputs.
-    void clearSoftForcing() noexcept;
-
-    /**
-     * @brief Correlated soft forcing via a reduced spatial basis (CL-2c).
-     *
-     * Equivalent to `setSoftForcing(loc, spread, family)` for the location and
-     * comonotone-coefficient setup, but replaces the materialized `M×n` field
-     * of the CL-1b/CL-1c path with a reduced basis: `K_s` per-point-normalized
-     * mode fields `ψ_m(t)` (from `SpdeSpatialBasis::normalizedModes`, so the
-     * per-point normalization `g(t)` is already folded in) and per-member modal
-     * coefficients `a_im`. Member i's per-mode forcing sensitivity becomes
-     *
-     *     R_{ij} = Σ_m a_im · Σ_t P_j[t]·spread[t]·ψ_m(t)
-     *
-     * computed as `K_s` mode projections + an `M×K_s` reconstruction per
-     * advance — `O(K_s·k·n) + O(M·K_s·k)` instead of the materialized path's
-     * `O(M·k·n)`. Numerically equals the materialized field's `R_{ij}` (the two
-     * only differ in summation order). `K_s = 1` (comonotone limit) reproduces
-     * the scalar `c_i` path exactly.
-     *
-     * Both @p psi_modes and @p a_coeffs are NON-OWNING and must outlive the ROM
-     * (or be cleared). @p psi_modes is `K_s × n_nodes` row-major; @p a_coeffs is
-     * `n_ensemble × K_s` row-major. Takes precedence over any `soft_field` set
-     * via setSoftForcing.
-     *
-     * @note Single-family only (PR H7 scope guard): this call clears any second
-     *       family plane previously armed via setSoftForcing's `spread_b`, for
-     *       the same reason CORR_LEN × MIXED is refused there — the modal
-     *       coefficients `a_im` fold in one family's `c_i` by construction.
-     *
-     * @param loc        Location field (may be null); same role as setSoftForcing.
-     * @param spread     Spread field (non-null to activate); NON-OWNING.
-     * @param family     Distribution family (selects the comonotone c_i).
-     * @param psi_modes  Normalized mode fields ψ_m(t), K_s × n_nodes row-major.
-     * @param a_coeffs   Per-member modal coefficients a_im, M × K_s row-major.
-     * @param n_modes    Number of retained basis modes K_s (≥ 1).
-     */
-    void setSoftForcingReduced(const double* loc, const double* spread,
-                               DistType family,
-                               const double* psi_modes, const double* a_coeffs,
-                               int n_modes) noexcept;
-
-    /// Per-member soft-forcing coefficient c_i (family-selected in
-    /// setSoftForcing). Empty until setSoftForcing() has been called. Used by
-    /// the engine to seed the CL-1c correlated coefficient field.
-    const std::vector<double>& softCoeff() const noexcept { return soft_coeff_; }
-
-    /// Per-member coefficient c_i^B of the second family plane (PR H7). Empty
-    /// until a setSoftForcing() call supplied a non-null `spread_b`.
-    const std::vector<double>& softCoeffB() const noexcept { return soft_coeff_b_; }
-
-    /// Empty when the last setSoftForcing() call was honoured in full;
-    /// non-empty when a requested second family plane was REFUSED (currently
-    /// only the CORR_LEN × MIXED combination — see setSoftForcing()). The ROM
-    /// stays in a valid single-family state either way.
-    const std::string& softPlanesError() const noexcept { return soft_planes_error_; }
+    std::vector<double> softCoefficients(DistType family) const;
 
     /**
      * @brief Register an additional uncertain parameter column (PR 9b).
      *
-     * The built-in Manning/runoff machinery is untouched; registered params
-     * fold into the deviation dynamics per their taxonomy
-     * (PARAMETER_REGISTRY.md §5):
-     *   RATE_MULT      — multiplies the effective Manning multiplier
-     *                    (mm_eff = mm · Π θ), shaping both the decay rate and
-     *                    the Manning-sensitivity forcing.
-     *   FORCING_MULT   — multiplies the runoff forcing scale
-     *                    (scale = rm · Π θ, sensitivity (scale − 1)·r_j).
-     *   FORCING_VECTOR — @p field points to a per-active-node field v
-     *                    (length n_nodes, NON-OWNING, must outlive the ROM or
-     *                    be cleared); projected each advance();
-     *                    sensitivity (θ_i − 1)·(Pᵀv)_j.
-     *   COUPLING_MULT  — ignored by advance() (coupling reads cd_mult).
+     * RATE_MULT multiplies the effective Manning multiplier
+     * (mm_eff = mm · Π θ), shaping both the decay rate and the Manning target.
+     * COUPLING_MULT is accepted and ignored here (coupling reads cd_mult).
+     * Additive entries (FORCING_MULT, FORCING_VECTOR) are carried by the
+     * engine's full-order additive channel (H19) and are refused.
      *
      * Call after initialize(). @p column length must equal n_ensemble.
-     *
-     * @throws std::invalid_argument on size mismatch, or FORCING_VECTOR
-     *         without a field.
+     * @throws std::invalid_argument on size mismatch or an additive entry.
      */
-    void addRegisteredParam(ParamEntry entry, const std::vector<double>& column,
-                            const double* field = nullptr);
+    void addRegisteredParam(ParamEntry entry, const std::vector<double>& column);
 
     /// Remove all registered extra parameters (restores built-in-only behavior).
     void clearRegisteredParams();
@@ -409,12 +273,9 @@ struct SpectralROM1D {
     // conduit_off. A rebuild is forced while no storage is held yet. The
     // caller then supplies per-step rates (setModeRates) and K1d = 1.
 
-    /// PR H19 (docs/uncertainty/ADDITIVE_CHANNEL.md): when true the engine
-    /// carries every additive deviation (soft rain, runoff multiplier,
-    /// FORCING_VECTOR) in its full-order channel; advance() applies no modal
-    /// additive forcing (coefficients are still generated by setSoftForcing),
-    /// and reconstruction adds sum_p kappa_ip * Psi_p from setAdditivePlanes().
-    bool external_additive = false;
+    /// PR H19 (docs/uncertainty/ADDITIVE_CHANNEL.md): the engine carries every
+    /// additive deviation (soft rain, runoff multiplier, registered inflow
+    /// sources) at full order; reconstruction adds sum_p kappa_ip * Psi_p.
     /// Psi: n_planes x n_nodes (row-major); kappa: n_ensemble x n_planes. Copied.
     void setAdditivePlanes(int n_planes, const double* psi, const double* kappa);
 
@@ -480,7 +341,7 @@ struct SpectralROM1D {
      *
      * For each member i and mode j (see DEVIATION_FORM.md §3):
      *   rate  = λ_j·K1d / mm_i
-     *   g     = −λ_j·K1d·(1/mm_i − 1)·b_j + (rm_i − 1)·r_j
+     *   g     = −λ_j·K1d·(1/mm_i − 1)·b_j
      *   δa   ← (δa − g/rate)·exp(−rate·dt) + g/rate
      * with b_j = P[:,j]^T·(sensitivity reference) recomputed at every call.
      *
@@ -489,8 +350,6 @@ struct SpectralROM1D {
      * @param h_det_active    Deterministic head per active node (length
      *                        n_nodes). Must be non-null; also stored as
      *                        h_det_last_ for reconstructHead().
-     * @param runoff_per_node Per-active-node runoff rate (m/s), length n_nodes.
-     *                        May be null (no forcing-sensitivity term).
      * @param sens_ref        Optional Manning-sensitivity reference field
      *                        (length n_nodes). When non-null, b_j is projected
      *                        from THIS field instead of h_det_active. The
@@ -514,13 +373,10 @@ struct SpectralROM1D {
      *                        50-190x (VALIDATION.md). alpha=1 at a node
      *                        reproduces the pre-H5 projection exactly; alpha=0
      *                        zeroes ONLY the Manning-sensitivity contribution
-     *                        at that node — the forcing-sensitivity term
-     *                        (r_coarse, from runoff_per_node) is projected
-     *                        separately and is never attenuated. Null (default)
-     *                        is bit-identical to alpha≡1 (no attenuation).
+     *                        at that node. Null (default) is bit-identical to
+     *                        alpha≡1 (no attenuation).
      */
     void advance(double dt, double K1d, const double* h_det_active,
-                 const double* runoff_per_node,
                  const double* sens_ref = nullptr,
                  const double* alpha = nullptr);
 
@@ -643,59 +499,16 @@ private:
         return mode_rates_.empty() ? basis->eigenvalues[j] : mode_rates_[j];
     }
     std::vector<double> qsr_r_, qsr_mm1_;
-    std::size_t add_np_ = 0;                         ///< H19 additive planes
-    std::vector<double> add_psi_, add_kappa_;   ///< quasi-static residual field / per-member (mm - 1)
+    std::size_t add_np_ = 0;                    ///< H19 additive planes
+    std::vector<double> add_psi_, add_kappa_;   ///< H19 Psi (P x n) and kappa (M x P)
 
-    std::vector<double> ensemble_runoff_;
-    double mean_ensemble_runoff_ = 0.0;
-
-    const double* soft_loc_field_ = nullptr;
-    const double* soft_spread_field_ = nullptr;
-    std::vector<double> soft_r_spread_;
     std::vector<double> soft_u_;             ///< Fixed shuffled-strata percentiles u_i.
     std::vector<double> soft_z_;             ///< probit(u_i) — normal/lognormal coefficient.
-    std::vector<double> soft_coeff_;         ///< Active per-member coefficient c_i (family-selected).
-    double soft_max_abs_coeff_ = 0.0;        ///< max_i |c_i| for mode activation.
 
-    // PR H7 — second per-family coefficient plane. Null unless a caller
-    // supplied a (spread_b, family_b) channel; when null every expression
-    // below adds an exact 0.0, so the single-family path is bit-identical.
-    const double* soft_spread_field_b_ = nullptr;
-    std::vector<double> soft_r_spread_b_;    ///< (P^T spread_b)_j.
-    std::vector<double> soft_coeff_b_;       ///< Per-member c_i^B (family_b-selected, same u_i).
-    double soft_max_abs_coeff_b_ = 0.0;      ///< max_i |c_i^B| for mode activation.
-    /// Empty on success; set when a second plane was REFUSED (see
-    /// softPlanesError()). Never throws — setSoftForcing is noexcept.
-    std::string soft_planes_error_;
-
-    /// CL-1b correlated-coherence (`COHERENCE CORR_LEN`) spatial field. When
-    /// non-null and spatial, replaces the scalar `c_i · (P^T spread)_j` term
-    /// with the per-member projection `Σ_t P_j[t]·spread[t]·W_i[t]`. NON-OWNING.
-    const SoftSpatialField* soft_field_ = nullptr;
-    /// Per-member per-mode projection R_{ij} = Σ_t P_j[t]·spread[t]·W_i[t],
-    /// row-major [i * n_kept + j]; populated each advance() when spatial.
-    std::vector<double> soft_r_spread_spatial_;
-    /// Per-mode max_i |R_{ij}| for the spatial mode-activation criterion.
-    std::vector<double> soft_spatial_absmax_;
-
-    /// CL-2c reduced spatial basis. When set (takes precedence over
-    /// soft_field_), the per-member per-mode projection R_{ij} is assembled
-    /// from K_s normalized mode fields ψ_m and per-member coefficients a_im
-    /// instead of a materialized M×n field. Both pointers NON-OWNING.
-    const double* soft_reduced_psi_ = nullptr;  ///< ψ_m(t), K_s × n_nodes row-major.
-    const double* soft_reduced_a_   = nullptr;  ///< a_im, n_ensemble × K_s row-major.
-    int           soft_reduced_ks_  = 0;        ///< K_s (0 ⇒ inactive).
-    /// Scratch R_m[j] = Σ_t P_j[t]·spread[t]·ψ_m(t), K_s × n_kept row-major.
-    std::vector<double> soft_reduced_rm_;
-
-    /// One registered extra parameter (PR 9b). `rv` is the per-mode
-    /// projection scratch for FORCING_VECTOR fields, refreshed each advance().
+    /// One registered extra parameter (PR 9b): RATE_MULT or COUPLING_MULT.
     struct ExtraParam {
         ParamEntry          entry;
         std::vector<double> column;         ///< θ_i per member (copied)
-        const double*       field = nullptr;///< FORCING_VECTOR: per-node v (non-owning)
-        std::vector<double> rv;             ///< n_kept projections of field
-        double              max_dev = 0.0;  ///< max_i |θ_i − 1| (refreshed per advance)
     };
     std::vector<ExtraParam> extra_params_;
 

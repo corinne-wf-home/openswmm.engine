@@ -649,15 +649,12 @@ private:
     /// path bit-identical — when disabled or when no conduit is gated.
     void refreshRom1dDirectionalOperator(double dt) noexcept;
 
-    // ---- SP1: gage-level soft rainfall -> 1D ROM forcing (SR-1a/1b re-port) ----
-    // loc = dh/dt head-rate (so the deterministic projection is unchanged; under
-    // deviation form its runoff_pert=0 scaling contributes nothing). The spread
-    // is split into TWO disjoint planes by coefficient family (H7): plane A is
-    // NORMAL/LOGNORMAL gages (probit coefficient), plane B is UNIFORM gages
-    // (2u-1 coefficient). They sum to the single-plane spread, so each gage's
-    // spread meets exactly its own family's member coefficient and there is no
-    // first-family fallback. These buffers are bound by POINTER inside
-    // SpectralROM1D::setSoftForcing, so they must never be resized after build.
+    // ---- SP1: gage-level soft rainfall -> 1D additive channel (H19) ----
+    // The spread is split into TWO disjoint planes by coefficient family (H7):
+    // plane A is NORMAL/LOGNORMAL gages (probit coefficient), plane B is
+    // UNIFORM gages (2u-1 coefficient). They sum to the single-plane spread,
+    // so each gage's spread meets exactly its own family's member coefficient
+    // and there is no first-family fallback.
     std::vector<int>    rom1d_soft_off_;       ///< CSR offsets (n_active+1)
     std::vector<int>    rom1d_soft_gage_;      ///< CSR gage index per configured subcatchment contribution
     std::vector<char>   rom1d_soft_is_b_;      ///< CSR: 1 when the contribution's gage is UNIFORM (plane B)
@@ -752,6 +749,8 @@ public:
     bool& rom1dQuasiStatic() noexcept { return rom1d_qsr_; }
     /// Diagnostic: Gauss-Seidel sweeps of the last additive-channel step (max over planes).
     int rom1dAdditiveSweeps() const noexcept { return rom1d_add_sweeps_; }
+    /// Diagnostic: number of additive-channel planes on the last step (H19).
+    int rom1dAdditivePlanes() const noexcept { return rom1d_add_np_; }
     /// Diagnostic: the per-mode rates (1/s) used on the last step (H18,
     /// docs/uncertainty/RELAXATION_RATES.md); empty before the first
     /// conductance/storage basis exists.
@@ -784,6 +783,7 @@ private:
     std::vector<double> rom1d_add_qa_, rom1d_add_qb_;           ///< soft-rain extra inflow per unit coefficient (cfs)
     std::vector<double> rom1d_add_state_, rom1d_add_kappa_, rom1d_add_q_;
     std::vector<std::vector<double>> rom1d_vec_cols_;          ///< FORCING_VECTOR columns (theta) under H19
+    std::vector<std::vector<double>> rom1d_fmult_cols_;        ///< FORCING_MULT columns (theta): scale the runoff plane
     /** @brief Node storage S (ft^2, active space) into rom1d_h18_S_. */
     void computeRom1dStorage() noexcept;
     /** @brief H19: advance every additive plane one backward-Euler step and hand them to the ROM. */

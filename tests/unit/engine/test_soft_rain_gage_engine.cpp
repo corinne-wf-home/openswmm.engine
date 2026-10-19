@@ -315,9 +315,7 @@ void writeTwoGageInp(const std::string& path, const char* soft_lines) {
 
 struct PlaneProbe {
     bool   ran = false;
-    bool   has_coeff_b = false;     // second coefficient plane armed
-    bool   has_coeff_a = false;
-    std::string planes_error;
+    int    planes = 0;              // additive-channel planes (one per family)
     int    mixed_family_warnings = 0;
     int    corr_len_warnings = 0;
     double band = 0.0;
@@ -336,11 +334,7 @@ PlaneProbe runPlaneProbe(const std::string& inp, const std::string& rpt,
     }
     runToEnd(handle);
     auto* eng = static_cast<openswmm::SWMMEngine*>(handle);
-    if (const auto* rom = eng->rom1d()) {
-        pr.has_coeff_a = !rom->softCoeff().empty();
-        pr.has_coeff_b = !rom->softCoeffB().empty();
-        pr.planes_error = rom->softPlanesError();
-    }
+    if (eng->rom1d()) pr.planes = eng->rom1dAdditivePlanes();
     for (const auto& w : eng->context().warnings) {
         if (w.find("mixed distribution families") != std::string::npos)
             ++pr.mixed_family_warnings;
@@ -366,9 +360,7 @@ TEST(SoftRainGageEngine, MixedFamiliesArmBothPlanesWithNoFallback) {
     writeTwoGageInp(inp, "RG1 NORMAL CV 0.30\nRG2 UNIFORM HALFRANGE 1.8");
     const PlaneProbe pr = runPlaneProbe(inp, rpt, csv);
     ASSERT_TRUE(pr.ran);
-    EXPECT_TRUE(pr.has_coeff_a);
-    EXPECT_TRUE(pr.has_coeff_b) << "second (UNIFORM) coefficient plane was never armed";
-    EXPECT_TRUE(pr.planes_error.empty()) << pr.planes_error;
+    EXPECT_EQ(pr.planes, 2) << "each family must carry its own plane";
     EXPECT_EQ(pr.mixed_family_warnings, 0)
         << "the first-family fallback and its warning must not exist";
     EXPECT_GT(pr.band, 1.0e-6);
@@ -388,11 +380,11 @@ TEST(SoftRainGageEngine, SingleFamilyLeavesSecondPlaneUnarmed) {
     ASSERT_TRUE(pn.ran);
     ASSERT_TRUE(pu.ran);
     // NORMAL + LOGNORMAL share the probit coefficient: one plane, no warning.
-    EXPECT_FALSE(pn.has_coeff_b);
+    EXPECT_EQ(pn.planes, 1);
     EXPECT_EQ(pn.mixed_family_warnings, 0);
     EXPECT_GT(pn.band, 1.0e-6);
     // All-UNIFORM: the UNIFORM plane is the primary and the only plane.
-    EXPECT_FALSE(pu.has_coeff_b);
+    EXPECT_EQ(pu.planes, 1);
     EXPECT_GT(pu.band, 1.0e-6);
 }
 

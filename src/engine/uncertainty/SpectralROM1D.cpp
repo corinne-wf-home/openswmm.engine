@@ -33,157 +33,32 @@ void SpectralROM1D::setExternalSamples(const std::vector<double>& mann,
 }
 
 // ============================================================================
-// setEnsembleRunoff / clearEnsembleRunoff
+// softCoefficients / registered parameters
 // ============================================================================
 
-void SpectralROM1D::setEnsembleRunoff(const std::vector<double>& per_member_rates) {
-    if (static_cast<int>(per_member_rates.size()) != n_ensemble)
-        throw std::invalid_argument(
-            "SpectralROM1D::setEnsembleRunoff: size must equal n_ensemble");
-    ensemble_runoff_ = per_member_rates;
-    mean_ensemble_runoff_ = std::accumulate(per_member_rates.begin(),
-                                            per_member_rates.end(), 0.0)
-                            / static_cast<double>(n_ensemble);
+std::vector<double> SpectralROM1D::softCoefficients(DistType family) const {
+    // One rank per member, u_i = shuffledStrata(M, sample_seed + 4), shared by
+    // every family: UNIFORM gives the half-range band 2u - 1, NORMAL and
+    // LOGNORMAL the standard-normal quantile z = probit(u) (LOGNORMAL through
+    // the delta linearization; the caller scales the spread by its location).
+    std::vector<double> c(soft_u_.size());
+    for (std::size_t i = 0; i < c.size(); ++i)
+        c[i] = (family == DistType::UNIFORM) ? 2.0 * soft_u_[i] - 1.0 : soft_z_[i];
+    return c;
 }
-
-void SpectralROM1D::clearEnsembleRunoff() {
-    ensemble_runoff_.clear();
-}
-
-void SpectralROM1D::setSoftForcing(const double* loc, const double* spread,
-                                  DistType family,
-                                  const SoftSpatialField* soft_field,
-                                  const double* spread_b,
-                                  DistType family_b) noexcept {
-    soft_loc_field_ = loc;
-    soft_spread_field_ = spread;
-    soft_field_ = soft_field;
-    soft_planes_error_.clear();
-    // Switching to the scalar/materialized path must retire any previously
-    // configured reduced basis, otherwise advance() would keep taking the
-    // reduced path and dereference now-stale pointers. setSoftForcingReduced()
-    // re-arms these after calling us, so the clear-then-set order is safe.
-    soft_reduced_psi_ = nullptr;
-    soft_reduced_a_ = nullptr;
-    soft_reduced_ks_ = 0;
-    // Select the per-member coefficient c_i by family. UNIFORM uses the raw
-    // half-range band (2u-1); NORMAL/LOGNORMAL use the standard-normal quantile
-    // z_i (LOGNORMAL via the delta linearization, caller scales spread by loc).
-    soft_max_abs_coeff_ = 0.0;
-    for (int i = 0; i < n_ensemble; ++i) {
-        const auto ui = static_cast<std::size_t>(i);
-        const double c = (family == DistType::UNIFORM)
-            ? (2.0 * soft_u_[ui] - 1.0)
-            : soft_z_[ui];
-        soft_coeff_[ui] = c;
-        soft_max_abs_coeff_ = std::max(soft_max_abs_coeff_, std::abs(c));
-    }
-
-    // ---- PR H7: second per-family coefficient plane -------------------------
-    // Scope guard: the correlated-coherence paths (CL-1b materialized field,
-    // CL-2c reduced basis) carry ONE coefficient family per source by
-    // construction -- W_i[t] / a_im already fold a single family's c_i into
-    // the per-member projection, so there is nowhere for a second family's
-    // coefficient to enter without redefining that field. Refuse the second
-    // plane rather than silently mixing families, and say so.
-    const bool corr_len_active = (soft_field_ != nullptr) && soft_field_->is_spatial();
-    if (spread_b != nullptr && corr_len_active) {
-        soft_planes_error_ =
-            "per-family coefficient planes (MIXED) are not supported together "
-            "with COHERENCE CORR_LEN: the correlated field carries one "
-            "coefficient family per source. Use COHERENCE FULL for MIXED "
-            "sources, or a single family with CORR_LEN. (CORR_LEN x MIXED is "
-            "additive future work -- PR H7 scope guard.)";
-        spread_b = nullptr;
-    }
-    soft_spread_field_b_ = spread_b;
-    soft_max_abs_coeff_b_ = 0.0;
-    if (soft_spread_field_b_ != nullptr) {
-        // Same u_i stream as channel A -- comonotone coherence across families
-        // holds by construction (one rank per member everywhere), and the
-        // nominal member (u_i closest to 0.5) is nominal in BOTH channels.
-        soft_coeff_b_.assign(static_cast<std::size_t>(n_ensemble), 0.0);
-        for (int i = 0; i < n_ensemble; ++i) {
-            const auto ui = static_cast<std::size_t>(i);
-            const double c = (family_b == DistType::UNIFORM)
-                ? (2.0 * soft_u_[ui] - 1.0)
-                : soft_z_[ui];
-            soft_coeff_b_[ui] = c;
-            soft_max_abs_coeff_b_ = std::max(soft_max_abs_coeff_b_, std::abs(c));
-        }
-    } else {
-        soft_coeff_b_.clear();
-    }
-
-    // CL-1b: when a spatial field is supplied it must be dimensionally
-    // consistent and its per-node column mean must match the scalar-coefficient
-    // mean c̄, so the nominal member stays zero-deviation and q50 tracks the
-    // deterministic answer. Checked only in debug builds (config-time cost).
-#ifndef NDEBUG
-    if (soft_field_ != nullptr && soft_field_->is_spatial()) {
-        assert(soft_field_->n_members == n_ensemble &&
-               "soft spatial field n_members must equal n_ensemble");
-        double cbar = 0.0;
-        for (int i = 0; i < n_ensemble; ++i)
-            cbar += soft_coeff_[static_cast<std::size_t>(i)];
-        cbar /= static_cast<double>(n_ensemble);
-        for (int t = 0; t < soft_field_->n_cells; ++t) {
-            double colmean = 0.0;
-            for (int i = 0; i < n_ensemble; ++i)
-                colmean += soft_field_->at(i, t);
-            colmean /= static_cast<double>(n_ensemble);
-            assert(std::abs(colmean - cbar) < 1.0e-9 &&
-                   "soft spatial field column mean must equal mean_i(c_i)");
-        }
-    }
-#endif
-}
-
-void SpectralROM1D::clearSoftForcing() noexcept {
-    soft_loc_field_ = nullptr;
-    soft_spread_field_ = nullptr;
-    soft_field_ = nullptr;
-    soft_reduced_psi_ = nullptr;
-    soft_reduced_a_ = nullptr;
-    soft_reduced_ks_ = 0;
-    soft_spread_field_b_ = nullptr;
-    soft_coeff_b_.clear();
-    soft_max_abs_coeff_b_ = 0.0;
-    soft_planes_error_.clear();
-}
-
-void SpectralROM1D::setSoftForcingReduced(const double* loc, const double* spread,
-                                          DistType family,
-                                          const double* psi_modes,
-                                          const double* a_coeffs,
-                                          int n_modes) noexcept {
-    // Reuse the scalar location + comonotone-coefficient setup (soft_field
-    // stays null; the reduced basis takes precedence in advance()).
-    setSoftForcing(loc, spread, family, nullptr);
-    soft_reduced_psi_ = psi_modes;
-    soft_reduced_a_   = a_coeffs;
-    soft_reduced_ks_  = (psi_modes != nullptr && a_coeffs != nullptr)
-                        ? n_modes : 0;
-}
-
-// ============================================================================
-// addRegisteredParam / clearRegisteredParams (PR 9b)
-// ============================================================================
 
 void SpectralROM1D::addRegisteredParam(ParamEntry entry,
-                                       const std::vector<double>& column,
-                                       const double* field) {
+                                       const std::vector<double>& column) {
     if (static_cast<int>(column.size()) != n_ensemble)
         throw std::invalid_argument(
             "SpectralROM1D::addRegisteredParam: column size must equal n_ensemble");
-    if (entry == ParamEntry::FORCING_VECTOR && field == nullptr)
+    if (entry == ParamEntry::FORCING_MULT || entry == ParamEntry::FORCING_VECTOR)
         throw std::invalid_argument(
-            "SpectralROM1D::addRegisteredParam: FORCING_VECTOR requires a field");
+            "SpectralROM1D::addRegisteredParam: additive parameters (FORCING_MULT, "
+            "FORCING_VECTOR) are carried by the engine's full-order additive channel");
     ExtraParam ep;
     ep.entry  = entry;
     ep.column = column;
-    ep.field  = field;
-    ep.rv.assign(static_cast<std::size_t>(n_kept), 0.0);
     extra_params_.push_back(std::move(ep));
 }
 
@@ -209,7 +84,6 @@ void SpectralROM1D::initialize() {
 
     a_ensemble.assign(static_cast<std::size_t>(n_ensemble) *
                       static_cast<std::size_t>(n_kept), 0.0);
-    r_coarse.assign(static_cast<std::size_t>(n_kept), 0.0);
     b_coarse.assign(static_cast<std::size_t>(n_kept), 0.0);
 
     q05.assign(static_cast<std::size_t>(n_nodes), 0.0);
@@ -219,9 +93,6 @@ void SpectralROM1D::initialize() {
     sort_buf_.assign(static_cast<std::size_t>(n_ensemble), 0.0);
     mode_energy_.assign(static_cast<std::size_t>(n_kept), 0.0);
     h_det_last_.assign(static_cast<std::size_t>(n_nodes), 0.0);
-    soft_r_spread_.assign(static_cast<std::size_t>(n_kept), 0.0);
-    soft_r_spread_b_.assign(static_cast<std::size_t>(n_kept), 0.0);
-    soft_spatial_absmax_.assign(static_cast<std::size_t>(n_kept), 0.0);
 
     mode_active.assign(static_cast<std::size_t>(n_kept), true);
     n_modes_active = n_kept;
@@ -255,8 +126,6 @@ void SpectralROM1D::initialize() {
 
     soft_z_.resize(static_cast<std::size_t>(n_ensemble));
     soft_u_.resize(static_cast<std::size_t>(n_ensemble));
-    soft_coeff_.assign(static_cast<std::size_t>(n_ensemble), 0.0);
-    soft_max_abs_coeff_ = 0.0;
     const auto soft_u = shuffledStrata(n_ensemble, sample_seed + 4);
     for (int i = 0; i < n_ensemble; ++i) {
         const auto ui = static_cast<std::size_t>(i);
@@ -306,7 +175,6 @@ void SpectralROM1D::setReducedOperator(const std::vector<double>& M_in) {
 
 void SpectralROM1D::advance(double dt, double K1d,
                              const double* h_det_active,
-                             const double* runoff_per_node,
                              const double* sens_ref,
                              const double* alpha) {
     assert(is_ready());
@@ -316,9 +184,10 @@ void SpectralROM1D::advance(double dt, double K1d,
     auto nk = static_cast<std::size_t>(n_kept);
 
     // Manning-sensitivity reference: the field whose modal content the
-    // (mm−1)-scaled steady state tracks. Default = h_det; the engine passes
-    // depth (head − invert) so roughness sensitivity acts on conveyance, not
-    // on the immovable invert relief (PR 10 finding, VALIDATION.md).
+    // (mm−1)-scaled steady state tracks. The engine passes the flow-response
+    // field phi = dh/d(ln n) (H17); without one, h_det. Additive uncertainties
+    // (rain, inflow) are not in the modes: the engine carries them at full
+    // order and hands them over with setAdditivePlanes() (H19).
     const double* bref = sens_ref ? sens_ref : h_det_active;
 
     // ---- Step 1: Deviation mode energy E_j = mean_i(δa²_{i,j}) --------------
@@ -331,13 +200,9 @@ void SpectralROM1D::advance(double dt, double K1d,
         mode_energy_[j] = sum_sq / static_cast<double>(n_ensemble);
     }
 
-    // ---- Step 2: Project sensitivity reference and runoff into coarse space -
-    // PR H5: alpha (per-active-node, [0,1]) folds elementwise into bref
-    // BEFORE projection, damping only the Manning-sensitivity channel in
-    // surcharged regime. alpha==nullptr is bit-identical to alpha[i]==1 for
-    // every i (no attenuation) -- the pre-H5 code path exactly. Do NOT apply
-    // alpha to the r_coarse/soft_r_spread_ projections below: those are the
-    // forcing-sensitivity channel and must stay untouched (H5 spec).
+    // ---- Step 2: Project the sensitivity reference --------------------------
+    // PR H5: alpha (per-active-node, [0,1]) folds elementwise into bref before
+    // projection (used only when the flow response is unavailable; null = 1).
     for (std::size_t j = 0; j < nk; ++j) {
         const double* Pj = projCol_(j);
         double dot_b = 0.0;
@@ -347,10 +212,17 @@ void SpectralROM1D::advance(double dt, double K1d,
         }
         b_coarse[j] = dot_b;
     }
+
+    auto rate_mult_prod = [this](std::size_t ui) {
+        double prod = 1.0;
+        for (const auto& ep : extra_params_)
+            if (ep.entry == ParamEntry::RATE_MULT) prod *= ep.column[ui];
+        return prod;
+    };
+
     // Quasi-static residual: the part of the target the kept modes leave out.
     // Only for a supplied response field: the h_det fallback is an absolute
-    // head, not a response, and its residual (including any constant part an
-    // ungrounded basis discards) is not a Manning sensitivity.
+    // head, not a response.
     if (quasi_static_residual && sens_ref) {
         qsr_r_.assign(nn, 0.0);
         for (std::size_t i = 0; i < nn; ++i)
@@ -363,248 +235,35 @@ void SpectralROM1D::advance(double dt, double K1d,
         qsr_mm1_.assign(static_cast<std::size_t>(n_ensemble), 0.0);
         for (int m = 0; m < n_ensemble; ++m) {
             const auto um = static_cast<std::size_t>(m);
-            double mm = mannings_mult[um];
-            for (const auto& ep : extra_params_)
-                if (ep.entry == ParamEntry::RATE_MULT) mm *= ep.column[um];
-            qsr_mm1_[um] = mm - 1.0;
+            qsr_mm1_[um] = mannings_mult[um] * rate_mult_prod(um) - 1.0;
         }
     } else {
         qsr_r_.clear();
     }
-    // PR H19: with the full-order additive channel the engine carries every
-    // additive deviation itself (setAdditivePlanes); no modal additive forcing.
-    const double* loc_field = external_additive ? nullptr
-                            : (soft_loc_field_ ? soft_loc_field_ : runoff_per_node);
-    const double* spread_a = external_additive ? nullptr : soft_spread_field_;
-    const double* spread_b = external_additive ? nullptr : soft_spread_field_b_;
-    if (loc_field) {
-        for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = projCol_(j);
-            double dot = 0.0;
-            for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * loc_field[i];
-            r_coarse[j] = dot;
-        }
-    } else {
-        std::fill(r_coarse.begin(), r_coarse.end(), 0.0);
-    }
-    if (spread_a) {
-        for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = projCol_(j);
-            double dot = 0.0;
-            for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * spread_a[i];
-            soft_r_spread_[j] = dot;
-        }
-    } else {
-        std::fill(soft_r_spread_.begin(), soft_r_spread_.end(), 0.0);
-    }
-    // PR H7: the second family plane's own projection (Pᵀ·spread_b)_j. This is
-    // the "two projections per advance" of the per-family design -- the two
-    // planes are disjoint by construction (each cell/gage contributes to
-    // exactly one), so their sum reconstructs the full spread field while each
-    // keeps its own family's coefficient.
-    if (spread_b) {
-        for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = projCol_(j);
-            double dot = 0.0;
-            for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * spread_b[i];
-            soft_r_spread_b_[j] = dot;
-        }
-    } else {
-        std::fill(soft_r_spread_b_.begin(), soft_r_spread_b_.end(), 0.0);
-    }
-    // CL-1b: correlated-coherence per-member projection. When a spatial field
-    // is active, the comonotone factorization c_i·(Pᵀspread)_j no longer holds;
-    // each member gets its own R_{ij} = Σ_t P_j[t]·spread[t]·W_i[t] (the
-    // O(M·k·n) path). A constant field (W_i[t] = c_i ∀t) reduces this exactly
-    // to c_i·soft_r_spread_[j], so the comonotone limit is bit-identical.
-    const bool soft_reduced = (soft_reduced_psi_ != nullptr) &&
-                              (soft_reduced_a_ != nullptr) &&
-                              (soft_reduced_ks_ > 0) &&
-                              (spread_a != nullptr);
-    const bool soft_spatial = !soft_reduced &&
-                              (soft_field_ != nullptr) &&
-                              soft_field_->is_spatial() &&
-                              (spread_a != nullptr);
-    // Either spatial path fills soft_r_spread_spatial_ / soft_spatial_absmax_;
-    // downstream mode-activation and forcing use this combined flag.
-    const bool soft_use_rij = soft_spatial || soft_reduced;
-    if (soft_spatial) {
-        assert(soft_field_->n_members == n_ensemble);
-        assert(static_cast<std::size_t>(soft_field_->n_cells) == nn);
-        soft_r_spread_spatial_.assign(
-            static_cast<std::size_t>(n_ensemble) * nk, 0.0);
-        std::fill(soft_spatial_absmax_.begin(), soft_spatial_absmax_.end(), 0.0);
-        for (int i = 0; i < n_ensemble; ++i) {
-            const double* Wi = &soft_field_->values[
-                static_cast<std::size_t>(i) * nn];
-            double* Ri = &soft_r_spread_spatial_[
-                static_cast<std::size_t>(i) * nk];
-            for (std::size_t j = 0; j < nk; ++j) {
-                const double* Pj = projCol_(j);
-                double dot = 0.0;
-                for (std::size_t t = 0; t < nn; ++t)
-                    dot += Pj[t] * soft_spread_field_[t] * Wi[t];
-                Ri[j] = dot;
-                const double ad = std::abs(dot);
-                if (ad > soft_spatial_absmax_[j]) soft_spatial_absmax_[j] = ad;
-            }
-        }
-    } else if (soft_reduced) {
-        // CL-2c reduced-basis projection. ψ_m already folds in the per-point
-        // normalization g(t) (SpdeSpatialBasis::normalizedModes — the "seam"),
-        // so R_{ij} = Σ_m a_im·(Σ_t P_j[t]·spread[t]·ψ_m[t]) reproduces the
-        // materialized field's R_{ij} up to summation order.
-        const auto Ks = static_cast<std::size_t>(soft_reduced_ks_);
-        // R_m[j] = Σ_t P_j[t]·spread[t]·ψ_m(t)  (K_s·k projections).
-        soft_reduced_rm_.assign(Ks * nk, 0.0);
-        for (std::size_t m = 0; m < Ks; ++m) {
-            const double* psim = soft_reduced_psi_ + m * nn;
-            double* Rm = &soft_reduced_rm_[m * nk];
-            for (std::size_t j = 0; j < nk; ++j) {
-                const double* Pj = projCol_(j);
-                double dot = 0.0;
-                for (std::size_t t = 0; t < nn; ++t)
-                    dot += Pj[t] * soft_spread_field_[t] * psim[t];
-                Rm[j] = dot;
-            }
-        }
-        // R_{ij} = Σ_m a_im·R_m[j]  (M·K_s·k reconstruction).
-        soft_r_spread_spatial_.assign(
-            static_cast<std::size_t>(n_ensemble) * nk, 0.0);
-        std::fill(soft_spatial_absmax_.begin(), soft_spatial_absmax_.end(), 0.0);
-        for (int i = 0; i < n_ensemble; ++i) {
-            const double* ai = soft_reduced_a_ +
-                               static_cast<std::size_t>(i) * Ks;
-            double* Ri = &soft_r_spread_spatial_[
-                static_cast<std::size_t>(i) * nk];
-            for (std::size_t j = 0; j < nk; ++j) {
-                double s = 0.0;
-                for (std::size_t m = 0; m < Ks; ++m)
-                    s += ai[m] * soft_reduced_rm_[m * nk + j];
-                Ri[j] = s;
-                const double ad = std::abs(s);
-                if (ad > soft_spatial_absmax_[j]) soft_spatial_absmax_[j] = ad;
-            }
-        }
-    }
-    // Registered FORCING_VECTOR fields (PR 9b): re-project each per call
-    // (the fields are live engine buffers that change every routing step).
-    for (auto& ep : extra_params_) {
-        if (ep.entry != ParamEntry::FORCING_VECTOR) continue;
-        if (external_additive) { std::fill(ep.rv.begin(), ep.rv.end(), 0.0); continue; }
-        for (std::size_t j = 0; j < nk; ++j) {
-            const double* Pj = projCol_(j);
-            double dot = 0.0;
-            for (std::size_t i = 0; i < nn; ++i)
-                dot += Pj[i] * ep.field[i];
-            ep.rv[j] = dot;
-        }
-    }
     h_det_last_.assign(h_det_active, h_det_active + nn);
 
-    // Per-member effective multipliers from registered extra params
-    // (PARAMETER_REGISTRY.md §5). Products over an empty list are exactly 1.0,
-    // so the no-extra-params path is bit-identical to the built-in behavior.
-    auto rate_mult_prod = [this](std::size_t ui) {
-        double prod = 1.0;
-        for (const auto& ep : extra_params_)
-            if (ep.entry == ParamEntry::RATE_MULT) prod *= ep.column[ui];
-        return prod;
-    };
-    auto forcing_mult_prod = [this](std::size_t ui) {
-        double prod = 1.0;
-        for (const auto& ep : extra_params_)
-            if (ep.entry == ParamEntry::FORCING_MULT) prod *= ep.column[ui];
-        return prod;
-    };
-
     // ---- Step 3: Active set ---------------------------------------------------
-    // A mode participates when its current deviation energy OR either
-    // first-order forcing-sensitivity magnitude exceeds the drop threshold.
-    // Both forcing scales use |multiplier − 1| (deviation form): zero
-    // perturbation ⇒ zero forcing ⇒ modes stay inactive and δa stays 0.
-    const bool has_ensemble_runoff = !ensemble_runoff_.empty()
-                                      && (runoff_per_node != nullptr)
-                                      && (mean_ensemble_runoff_ > 1.0e-30);
-    double max_rain_dev = 0.0;   // max_i |scale_i − 1|  (incl. FORCING_MULT extras)
-    for (std::size_t i = 0; i < static_cast<std::size_t>(n_ensemble); ++i) {
-        const double base = has_ensemble_runoff
-            ? (ensemble_runoff_[i] / mean_ensemble_runoff_)
-            : runoff_mult[i];
-        max_rain_dev = std::max(max_rain_dev,
-                                std::abs(base * forcing_mult_prod(i) - 1.0));
-    }
-    double max_mann_dev = 0.0;   // max_i |1/mm_eff_i − 1|  (incl. RATE_MULT extras)
+    // A mode participates when its deviation energy or its first-order Manning
+    // forcing exceeds the drop threshold. Zero perturbation => zero forcing =>
+    // no mode activates and δa stays exactly 0.
+    double max_mann_dev = 0.0;   // max_i |1/mm_eff_i − 1|
     for (std::size_t i = 0; i < static_cast<std::size_t>(n_ensemble); ++i)
         max_mann_dev = std::max(max_mann_dev,
             std::abs(1.0 / (mannings_mult[i] * rate_mult_prod(i)) - 1.0));
-    // Per-FORCING_VECTOR-param max deviation max_i |θ_i − 1|.
-    for (auto& ep : extra_params_) {
-        if (ep.entry != ParamEntry::FORCING_VECTOR) continue;
-        ep.max_dev = 0.0;
-        for (double th : ep.column)
-            ep.max_dev = std::max(ep.max_dev, std::abs(th - 1.0));
-    }
-
-    const double rain_scale = (loc_field != nullptr)
-                               ? std::abs(dt) * max_rain_dev : 0.0;
     const double mann_scale = std::abs(dt) * K1d * max_mann_dev;
-    // Soft-forcing activation scale. Comonotone: |dt|·max_i|c_i| times
-    // |soft_r_spread_[j]|. Spatial (CL-1b/CL-2c): the coefficient is already
-    // folded into R_{ij}, so the scale is |dt| times max_i|R_{ij}| =
-    // soft_spatial_absmax_[j].
-    const double soft_scale = (spread_a != nullptr)
-                               ? (soft_use_rij ? std::abs(dt)
-                                               : std::abs(dt) * soft_max_abs_coeff_)
-                               : 0.0;
-    // PR H7: channel B's own activation scale. Zero when no second plane is
-    // configured, so every expression below reduces to the pre-H7 one exactly.
-    const double soft_scale_b = (spread_b != nullptr)
-                               ? std::abs(dt) * soft_max_abs_coeff_b_
-                               : 0.0;
-
     n_modes_active = 0;
     for (std::size_t j = 0; j < nk; ++j) {
         const double lam = modeRate_(j);
-        bool by_energy  = mode_energy_[j] >= mode_drop_threshold;
-        bool by_rain    = rain_scale > 0.0 &&
-                          std::abs(r_coarse[j]) * rain_scale >= mode_drop_threshold;
-        bool by_manning = mann_scale > 0.0 &&
-                          lam * std::abs(b_coarse[j]) * mann_scale >= mode_drop_threshold;
-        // PR H7: sum the two channels' first-order magnitudes rather than
-        // OR-ing two independent tests -- a mode whose per-channel terms are
-        // each just under the threshold but whose combined forcing clears it
-        // must stay active. With no second plane the added term is exactly
-        // 0.0 and the test is the pre-H7 one bit-for-bit.
-        const double soft_metric =
-            (soft_use_rij ? soft_spatial_absmax_[j]
-                          : std::abs(soft_r_spread_[j])) * soft_scale
-            + std::abs(soft_r_spread_b_[j]) * soft_scale_b;
-        bool by_soft    = (soft_scale > 0.0 || soft_scale_b > 0.0) &&
-                          soft_metric >= mode_drop_threshold;
-        bool by_vector  = false;
-        for (const auto& ep : extra_params_) {
-            if (ep.entry == ParamEntry::FORCING_VECTOR &&
-                ep.max_dev * std::abs(dt) * std::abs(ep.rv[j]) >= mode_drop_threshold) {
-                by_vector = true;
-                break;
-            }
-        }
-        mode_active[j] = by_energy || by_rain || by_manning || by_soft || by_vector;
+        const bool by_energy  = mode_energy_[j] >= mode_drop_threshold;
+        const bool by_manning = mann_scale > 0.0 &&
+                                lam * std::abs(b_coarse[j]) * mann_scale >= mode_drop_threshold;
+        mode_active[j] = by_energy || by_manning;
         if (mode_active[j]) ++n_modes_active;
     }
 
-    const bool has_extra = !extra_params_.empty();
-
     // ---- Step 4 (PR H14), reduced-operator path -------------------------------
-    //   d(δa_i)/dt = −(K1d·M/mm_i)·δa_i − K1d·(1/mm_i − 1)·M·b + g_i
-    // Modes couple through M, so the per-mode active set does not apply: all
-    // modes advance. The forcing vector g_i is assembled exactly as on the
-    // diagonal path below; only the decay operator and its Manning-sensitivity
-    // term generalize from diag(λ) to M.
+    //   d(δa_i)/dt = −(K1d·M/mm_i)·δa_i − K1d·(1/mm_i − 1)·M·b
+    // Modes couple through M, so every mode advances.
     if (hasReducedOperator()) {
         for (std::size_t p = 0; p < nk; ++p) {
             double dot = 0.0;
@@ -630,29 +289,10 @@ void SpectralROM1D::advance(double dt, double K1d,
         for (int i = 0; i < n_ensemble; ++i) {
             auto ui = static_cast<std::size_t>(i);
             double* ai = &a_ensemble[ui * nk];
-            const double mm       = mannings_mult[ui] * rate_mult_prod(ui);
-            const double s        = (mm > 1.0e-12) ? 1.0 / mm : 1.0;
-            const double base     = has_ensemble_runoff
-                ? (ensemble_runoff_[ui] / mean_ensemble_runoff_)
-                : runoff_mult[ui];
-            const double scale_1  = base * forcing_mult_prod(ui) - 1.0;
-            for (std::size_t j = 0; j < nk; ++j) {
-                double g = -K1d * (s - 1.0) * reduced_Mb_[j] + scale_1 * r_coarse[j];
-                if (soft_spread_field_) {
-                    if (soft_use_rij)
-                        g += soft_r_spread_spatial_[ui * nk + j];
-                    else
-                        g += soft_coeff_[ui] * soft_r_spread_[j];
-                }
-                if (soft_spread_field_b_)
-                    g += soft_coeff_b_[ui] * soft_r_spread_b_[j];
-                if (has_extra) {
-                    for (const auto& ep : extra_params_)
-                        if (ep.entry == ParamEntry::FORCING_VECTOR)
-                            g += (ep.column[ui] - 1.0) * ep.rv[j];
-                }
-                reduced_g_[j] = g * dt;   // forcing integral column c = dt·g
-            }
+            const double mm = mannings_mult[ui] * rate_mult_prod(ui);
+            const double s  = (mm > 1.0e-12) ? 1.0 / mm : 1.0;
+            for (std::size_t j = 0; j < nk; ++j)
+                reduced_g_[j] = -K1d * (s - 1.0) * reduced_Mb_[j] * dt;   // forcing integral c = dt·g
             reduced_batch_.apply(s, reduced_g_.data(), ai);
         }
 
@@ -663,45 +303,19 @@ void SpectralROM1D::advance(double dt, double K1d,
     }
 
     // ---- Step 4: Advance deviations (exact exponential step) ------------------
-    //   d(δa)/dt = −rate·δa + g,   rate = λ_j·K1d/mm_i
-    //   g = −λ_j·K1d·(1/mm_i − 1)·b_j + (scale_i − 1)·r_j
+    //   d(δa)/dt = −rate·δa + g,   rate = λ_j·K1d/mm_i,
+    //   g = −λ_j·K1d·(1/mm_i − 1)·b_j   (fixed point (mm_i − 1)·b_j)
     const double rate_floor = 1.0e-12;
-
     for (int i = 0; i < n_ensemble; ++i) {
         auto ui = static_cast<std::size_t>(i);
         double* ai = &a_ensemble[ui * nk];
         const double mm       = mannings_mult[ui] * rate_mult_prod(ui);
         const double inv_mm_1 = 1.0 / mm - 1.0;
-        const double base     = has_ensemble_runoff
-            ? (ensemble_runoff_[ui] / mean_ensemble_runoff_)
-            : runoff_mult[ui];
-        const double scale_1  = base * forcing_mult_prod(ui) - 1.0;
-
         for (std::size_t j = 0; j < nk; ++j) {
             if (!mode_active[j]) continue;
-
             const double lam  = modeRate_(j);
             const double rate = lam * K1d / mm;
-            double g          = -lam * K1d * inv_mm_1 * b_coarse[j]
-                                + scale_1 * r_coarse[j];
-            if (soft_spread_field_) {
-                if (soft_use_rij)
-                    g += soft_r_spread_spatial_[ui * nk + j];
-                else
-                    g += soft_coeff_[ui] * soft_r_spread_[j];
-            }
-            // PR H7: second family plane, its own coefficient. Both c_i and
-            // c_i^B come from the same u_i, so member i sits at the same rank
-            // in both families -- comonotone coherence, and a zero-coefficient
-            // (nominal) member contributes exactly zero to both.
-            if (soft_spread_field_b_)
-                g += soft_coeff_b_[ui] * soft_r_spread_b_[j];
-            if (has_extra) {
-                for (const auto& ep : extra_params_)
-                    if (ep.entry == ParamEntry::FORCING_VECTOR)
-                        g += (ep.column[ui] - 1.0) * ep.rv[j];
-            }
-
+            const double g    = -lam * K1d * inv_mm_1 * b_coarse[j];
             if (rate > rate_floor) {
                 const double steady = g / rate;
                 ai[j] = (ai[j] - steady) * std::exp(-rate * dt) + steady;
@@ -823,7 +437,7 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
         }
     }
     // PR H19: full-order additive deviations, sum_p kappa_ip * Psi_p.
-    if (external_additive && add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
+    if (add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
         add_kappa_.size() == M * add_np_) {
         for (std::size_t t = 0; t < nn; ++t) {
             double* row = &recon_buf_[t * M];
@@ -1142,7 +756,7 @@ double SpectralROM1D::reconstructHead(int member, int active_node) const noexcep
         h += basis->P[j * nn + uk] * ai[j];
     }
     if (qsr_r_.size() == nn && ui < qsr_mm1_.size()) h += qsr_mm1_[ui] * qsr_r_[uk];
-    if (external_additive && add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
+    if (add_np_ > 0 && add_psi_.size() == add_np_ * nn &&
         add_kappa_.size() == static_cast<std::size_t>(n_ensemble) * add_np_)
         for (std::size_t p = 0; p < add_np_; ++p) h += add_kappa_[ui * add_np_ + p] * add_psi_[p * nn + uk];
     return std::max(h, 0.0);

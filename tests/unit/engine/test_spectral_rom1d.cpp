@@ -327,46 +327,6 @@ TEST(GroundedLaplacian, UniformVectorProjectsNonzero) {
         << "retained grounded modes must capture >= 50% of the constant vector";
 }
 
-TEST(GroundedLaplacian, UniformForcingCreatesSpread) {
-    // A SpectralROM1D on a grounded basis, forced by a SPATIALLY UNIFORM runoff
-    // field, develops ensemble spread — this fails on the ungrounded operator
-    // (uniform forcing projects to exactly zero on every zero-mean Neumann mode).
-    std::vector<int> active_map, full_to_active;
-    CsrGraph L = make_grounded_chain(8, active_map, full_to_active);
-
-    GraphEigenBasis basis;
-    ASSERT_TRUE(basis.build(L, 5));
-
-    SpectralROM1D rom;
-    rom.basis         = &basis;
-    rom.full_to_active = full_to_active;
-    rom.n_full_nodes  = 8;
-    rom.n_ensemble    = 20;
-    rom.mannings_pert = 0.20;
-    rom.runoff_pert   = 0.20;
-    rom.initialize();
-
-    // Seed all members on a zero deterministic reference, then force uniformly.
-    // Deviation form: spread comes from (runoff_mult − 1)·r_j with
-    // r_j = P^T·(uniform runoff), nonzero only on the grounded operator.
-    std::vector<double> h0(static_cast<std::size_t>(rom.n_nodes), 0.0);
-    rom.seed(h0.data());
-
-    std::vector<double> runoff(static_cast<std::size_t>(rom.n_nodes), 1.0e-4);  // uniform
-    for (int step = 0; step < 10; ++step)
-        rom.advance(10.0, 1.0e-3, h0.data(), runoff.data());
-    rom.computeQuantiles(h0.data(), nullptr);
-
-    // Interior active nodes must show spread (endpoints nearest the ground may be small).
-    double max_spread = 0.0;
-    for (int i = 0; i < rom.n_nodes; ++i)
-        max_spread = std::max(max_spread,
-                              rom.q95[static_cast<std::size_t>(i)]
-                            - rom.q05[static_cast<std::size_t>(i)]);
-    EXPECT_GT(max_spread, 1.0e-10)
-        << "uniform forcing on a grounded basis must produce ensemble spread";
-}
-
 TEST(GroundedLaplacian, NeumannFallbackPreserved) {
     // ground_outfalls=false restores the pure Neumann (topological) Laplacian.
     // The defining structural invariant is the row sum: a pure graph Laplacian
@@ -525,11 +485,8 @@ TEST(SpectralROM1D, QuantilesClampedToInvert) {
     auto h = f.bump_head();
     f.rom.seed(h.data());
 
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
-    for (int i = 0; i < f.N; ++i)
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + 0.5 * std::sin(i * 0.4));
     for (int step = 0; step < 20; ++step)
-        f.rom.advance(30.0, 0.1, h.data(), runoff.data());
+        f.rom.advance(30.0, 0.1, h.data());
 
     std::vector<double> invert(static_cast<std::size_t>(f.N), 0.0);
     f.rom.computeQuantiles(h.data(), invert.data());
@@ -545,13 +502,9 @@ TEST(SpectralROM1D, QuantilesMonotone) {
     ROM1DFixture f;
     auto h = f.bump_head();
     f.rom.seed(h.data());
-    // Non-uniform runoff forcing
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
-    for (int i = 0; i < f.N; ++i)
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + 0.5 * std::sin(i * 0.4));
 
     for (int step = 0; step < 20; ++step)
-        f.rom.advance(30.0, 0.1, h.data(), runoff.data());
+        f.rom.advance(30.0, 0.1, h.data());
     f.rom.computeQuantiles(h.data(), nullptr);
 
     for (int i = 0; i < f.rom.n_nodes; ++i) {
@@ -577,12 +530,9 @@ TEST(SpectralROM1D, SpreadGrowsWithPerturbation) {
     auto h = f.bump_head();
     f.rom.seed(h.data());
 
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
-    for (int i = 0; i < f.N; ++i)
-        runoff[static_cast<std::size_t>(i)] = 2.0e-5 * (1.0 + std::sin(i * 0.5));
 
     for (int step = 0; step < 30; ++step)
-        f.rom.advance(30.0, 0.1, h.data(), runoff.data());
+        f.rom.advance(30.0, 0.1, h.data());
     f.rom.computeQuantiles(h.data(), nullptr);
 
     double max_spread = 0.0;
@@ -602,7 +552,7 @@ TEST(SpectralROM1D, FrozenReferenceSaturatesAtAnalyticSteadyState) {
     f.rom.seed(h.data());
 
     for (int step = 0; step < 200; ++step)
-        f.rom.advance(30.0, 1.0, h.data(), nullptr);  // large K1d → fast convergence
+        f.rom.advance(30.0, 1.0, h.data());  // large K1d → fast convergence
 
     // b_j = P[:,j]^T h
     const auto nn = static_cast<std::size_t>(f.rom.n_nodes);
@@ -634,7 +584,7 @@ TEST(SpectralROM1D, DecayingReferenceDrivesDeviationsToZero) {
 
     std::vector<double> h_det = h;
     for (int step = 0; step < 400; ++step) {
-        f.rom.advance(30.0, 1.0, h_det.data(), nullptr);
+        f.rom.advance(30.0, 1.0, h_det.data());
         for (double& v : h_det) v *= 0.9;  // geometric decay of the reference
     }
     f.rom.computeQuantiles(h_det.data(), nullptr);
@@ -642,120 +592,6 @@ TEST(SpectralROM1D, DecayingReferenceDrivesDeviationsToZero) {
     double max_q95 = *std::max_element(f.rom.q95.begin(), f.rom.q95.end());
     EXPECT_LT(max_q95, 1.0e-6)
         << "band must collapse onto the decayed (zero) reference";
-}
-
-// ============================================================================
-// SpectralROM1D — ensemble runoff path
-// ============================================================================
-
-TEST(SpectralROM1D, SetEnsembleRunoffThrowsOnSizeMismatch) {
-    ROM1DFixture f;
-    std::vector<double> wrong(static_cast<std::size_t>(f.rom.n_ensemble + 5), 1.0e-5);
-    EXPECT_THROW(f.rom.setEnsembleRunoff(wrong), std::invalid_argument);
-}
-
-TEST(SpectralROM1D, EnsembleRunoffHigherRateGivesMoreEnergy) {
-    // Members with higher per-member runoff rates should accumulate more modal energy.
-    // Requires non-uniform spatial runoff so r_coarse[j] != 0.
-    const int N = 20, M = 20, K = 4;
-    GraphEigenBasis basis;
-    CsrGraph L = make_chain_laplacian(N);
-    basis.build(L, K);
-
-    SpectralROM1D rom;
-    rom.basis         = &basis;
-    rom.n_ensemble    = M;
-    rom.mannings_pert = 0.0;  // uniform Manning → isolate runoff effect
-    rom.runoff_pert   = 0.0;
-    rom.initialize();
-
-    // Seed from a Gaussian bump off-centre
-    std::vector<double> h(static_cast<std::size_t>(N), 0.0);
-    double x0 = N / 3.0, sigma = N / 8.0;
-    for (int i = 0; i < N; ++i) {
-        double dx = i - x0;
-        h[static_cast<std::size_t>(i)] = 0.10 * std::exp(-0.5 * dx * dx / (sigma * sigma));
-    }
-    rom.seed(h.data());
-
-    // Linearly spaced per-member rates (member 0 lowest, M-1 highest)
-    std::vector<double> rates(static_cast<std::size_t>(M));
-    double r_base = 1.0e-5;
-    for (int i = 0; i < M; ++i)
-        rates[static_cast<std::size_t>(i)] = r_base * (0.5 + static_cast<double>(i) / M);
-    rom.setEnsembleRunoff(rates);
-
-    // Non-uniform spatial runoff so r_coarse[j] != 0
-    std::vector<double> runoff(static_cast<std::size_t>(N));
-    for (int i = 0; i < N; ++i)
-        runoff[static_cast<std::size_t>(i)] = r_base * (1.0 + std::sin(i * 0.7));
-
-    for (int step = 0; step < 60; ++step)
-        rom.advance(30.0, 0.01, h.data(), runoff.data());
-    rom.computeQuantiles(h.data(), nullptr);
-
-    // Rate spread (rate_i/mean − 1 ≠ 0) must produce head spread
-    double max_spread = 0.0;
-    for (int i = 0; i < N; ++i) {
-        auto ui = static_cast<std::size_t>(i);
-        max_spread = std::max(max_spread, rom.q95[ui] - rom.q05[ui]);
-    }
-    EXPECT_GT(max_spread, 1.0e-8)
-        << "ensemble runoff should produce nonzero spread";
-}
-
-TEST(SpectralROM1D, ClearEnsembleRunoffRevertsToScalarPath) {
-    // With mannings_pert=runoff_pert=0 and all ensemble rates equal to mean:
-    // ensemble path and scalar path give identical results.
-    // After clearEnsembleRunoff(), results stay the same.
-    const int N = 20, M = 20, K = 4;
-    GraphEigenBasis basis;
-    CsrGraph L = make_chain_laplacian(N);
-    basis.build(L, K);
-
-    // Scalar-only ROM
-    SpectralROM1D rom_scalar;
-    rom_scalar.basis         = &basis;
-    rom_scalar.n_ensemble    = M;
-    rom_scalar.mannings_pert = 0.0;
-    rom_scalar.runoff_pert   = 0.0;
-    rom_scalar.initialize();
-
-    // Ensemble ROM with uniform rates = mean
-    SpectralROM1D rom_ens;
-    rom_ens.basis         = &basis;
-    rom_ens.n_ensemble    = M;
-    rom_ens.mannings_pert = 0.0;
-    rom_ens.runoff_pert   = 0.0;
-    rom_ens.initialize();
-    std::vector<double> uniform_rates(static_cast<std::size_t>(M), 1.0e-5);
-    rom_ens.setEnsembleRunoff(uniform_rates);
-    rom_ens.clearEnsembleRunoff();  // revert to scalar path
-
-    std::vector<double> h(static_cast<std::size_t>(N), 0.0);
-    for (int i = 0; i < N; ++i) {
-        double dx = i - N / 3.0;
-        h[static_cast<std::size_t>(i)] = 0.10 * std::exp(-0.5 * dx * dx / (N / 8.0 * N / 8.0));
-    }
-    rom_scalar.seed(h.data());
-    rom_ens.seed(h.data());
-
-    std::vector<double> runoff(static_cast<std::size_t>(N));
-    for (int i = 0; i < N; ++i)
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + std::sin(i * 0.7));
-
-    for (int step = 0; step < 20; ++step) {
-        rom_scalar.advance(30.0, 0.1, h.data(), runoff.data());
-        rom_ens.advance(30.0, 0.1, h.data(), runoff.data());
-    }
-    rom_scalar.computeQuantiles(h.data(), nullptr);
-    rom_ens.computeQuantiles(h.data(), nullptr);
-
-    for (int i = 0; i < N; ++i) {
-        auto ui = static_cast<std::size_t>(i);
-        EXPECT_NEAR(rom_scalar.q50[ui], rom_ens.q50[ui], 1.0e-12)
-            << "q50 differs after clearEnsembleRunoff at node " << i;
-    }
 }
 
 // ============================================================================
@@ -1476,7 +1312,7 @@ TEST(UpdateBasis, ReProjectionPreservesCoeffNorm) {
     for (int i = 0; i < N; ++i)
         h_det[static_cast<std::size_t>(i)] = (i + 1) * 0.1;
     for (int step = 0; step < 10; ++step)
-        rom.advance(10.0, 0.1, h_det.data(), nullptr);
+        rom.advance(10.0, 0.1, h_det.data());
 
     // Record Frobenius norm before
     double norm_before = 0.0;
@@ -1528,7 +1364,7 @@ TEST(UpdateBasis, QuantilesRemainValidAfterUpdate) {
         std::vector<double> w(static_cast<std::size_t>(NC), scale);
         w[2] = scale * 3.0;  // one conduit always wetter
         rom.updateBasis(w.data(), n1.data(), n2.data(), NC);
-        rom.advance(10.0, scale * 100.0, h_det.data(), nullptr);
+        rom.advance(10.0, scale * 100.0, h_det.data());
         rom.computeQuantiles(h_det.data(), invert.data());
 
         for (int i = 0; i < rom.n_nodes; ++i) {
@@ -1995,17 +1831,14 @@ TEST(DeviationForm, ZeroPerturbationIsExact) {
     f.rom.seed(h0.data());
 
     std::vector<double> h_det(static_cast<std::size_t>(f.N));
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
     for (int step = 0; step < 100; ++step) {
         // Arbitrary time-varying deterministic reference and forcing
         const double phase = 0.05 * step;
         for (int i = 0; i < f.N; ++i) {
             h_det[static_cast<std::size_t>(i)]  =
                 h0[static_cast<std::size_t>(i)] * (1.0 + 0.5 * std::sin(phase + 0.3 * i));
-            runoff[static_cast<std::size_t>(i)] =
-                1.0e-5 * (1.0 + std::cos(phase + 0.7 * i));
         }
-        f.rom.advance(15.0, 0.1, h_det.data(), runoff.data());
+        f.rom.advance(15.0, 0.1, h_det.data());
     }
     f.rom.computeQuantiles(h_det.data(), nullptr);
 
@@ -2040,7 +1873,7 @@ TEST(DeviationForm, MedianTracksDeterministic) {
     }
     rom.seed(h_det.data());
     for (int step = 0; step < 50; ++step)
-        rom.advance(30.0, 0.1, h_det.data(), nullptr);
+        rom.advance(30.0, 0.1, h_det.data());
     rom.computeQuantiles(h_det.data(), nullptr);
 
     for (int i = 0; i < rom.n_nodes; ++i) {
@@ -2065,7 +1898,7 @@ TEST(DeviationForm, SpreadNeverCollapses) {
         const double grow = 1.0 + static_cast<double>(step) / 300.0;  // ramp up
         for (int i = 0; i < f.N; ++i)
             h_det[static_cast<std::size_t>(i)] = h0[static_cast<std::size_t>(i)] * grow;
-        f.rom.advance(1.0, 0.01, h_det.data(), nullptr);
+        f.rom.advance(1.0, 0.01, h_det.data());
 
         if (step > 50) {
             f.rom.computeQuantiles(h_det.data(), nullptr);
@@ -2093,7 +1926,7 @@ TEST(DeviationForm, SpreadScalesWithManningPert) {
         auto h = f.bump_head();
         f.rom.seed(h.data());
         for (int step = 0; step < 40; ++step)
-            f.rom.advance(30.0, 0.1, h.data(), nullptr);
+            f.rom.advance(30.0, 0.1, h.data());
         f.rom.computeQuantiles(h.data(), nullptr);
         return max_spread(f.rom);
     };
@@ -2122,7 +1955,7 @@ TEST(DeviationForm, InvertClampRespected) {
 
     f.rom.seed(h_det.data());
     for (int step = 0; step < 60; ++step)
-        f.rom.advance(30.0, 0.5, h_det.data(), nullptr);
+        f.rom.advance(30.0, 0.5, h_det.data());
 
     std::vector<double> invert(static_cast<std::size_t>(f.N), 10.0);
     f.rom.computeQuantiles(h_det.data(), invert.data());
@@ -2162,7 +1995,7 @@ TEST(DeviationForm, UpdateBasisPreservesDeviation) {
         h_det[static_cast<std::size_t>(i)] = (i + 1) * 0.1;
 
     for (int step = 0; step < 10; ++step)
-        rom.advance(10.0, 0.1, h_det.data(), nullptr);
+        rom.advance(10.0, 0.1, h_det.data());
 
     rom.computeQuantiles(h_det.data(), nullptr);
     const double spread_before = max_spread(rom);
@@ -2211,7 +2044,7 @@ TEST(DeviationForm, ForcedColdRebuildPreservesDeviation) {
     for (int i = 0; i < N; ++i)
         h_det[static_cast<std::size_t>(i)] = (i + 1) * 0.1;
     for (int step = 0; step < 10; ++step)
-        rom.advance(10.0, 0.1, h_det.data(), nullptr);
+        rom.advance(10.0, 0.1, h_det.data());
 
     rom.computeQuantiles(h_det.data(), nullptr);
     const double spread_before = max_spread(rom);
@@ -2245,51 +2078,6 @@ TEST(DeviationForm, ForcedColdRebuildPreservesDeviation) {
 // PR 9b — RegisteredParams (generic parameter consumption in the 1D ROM)
 // ============================================================================
 
-TEST(RegisteredParams, ForcingVectorProducesSpreadAndClearRestores) {
-    // Zero built-in perturbation → the ONLY uncertainty source is the
-    // registered FORCING_VECTOR param. Spread must appear with it and the
-    // ROM must return to exact zero-deviation behavior after clearing.
-    ROM1DFixture f;
-    f.rom.mannings_pert = 0.0;
-    f.rom.runoff_pert   = 0.0;
-    f.rom.initialize();
-
-    auto h_det = f.bump_head();
-    f.rom.seed(h_det.data());
-
-    // Non-uniform per-node field (uniform projects to ~0 on Neumann modes).
-    std::vector<double> v(static_cast<std::size_t>(f.N));
-    for (int i = 0; i < f.N; ++i)
-        v[static_cast<std::size_t>(i)] = 1.0e-4 * (1.0 + std::sin(i * 0.7));
-
-    // Lognormal-style multiplier column around 1 (any spread-carrying column works).
-    std::vector<double> theta(static_cast<std::size_t>(f.rom.n_ensemble));
-    for (int i = 0; i < f.rom.n_ensemble; ++i)
-        theta[static_cast<std::size_t>(i)] =
-            1.0 + 0.3 * (2.0 * (static_cast<double>(i) + 0.5)
-                             / static_cast<double>(f.rom.n_ensemble) - 1.0);
-    f.rom.addRegisteredParam(ParamEntry::FORCING_VECTOR, theta, v.data());
-
-    for (int step = 0; step < 30; ++step)
-        f.rom.advance(30.0, 0.1, h_det.data(), nullptr);
-    f.rom.computeQuantiles(h_det.data(), nullptr);
-    EXPECT_GT(max_spread(f.rom), 1.0e-9)
-        << "a registered FORCING_VECTOR param must produce spread";
-
-    // Clear + reseed: with no perturbation sources left, quantiles equal the
-    // deterministic reference EXACTLY after any number of steps.
-    f.rom.clearRegisteredParams();
-    f.rom.seed(h_det.data());
-    for (int step = 0; step < 30; ++step)
-        f.rom.advance(30.0, 0.1, h_det.data(), nullptr);
-    f.rom.computeQuantiles(h_det.data(), nullptr);
-    for (int i = 0; i < f.rom.n_nodes; ++i) {
-        auto ui = static_cast<std::size_t>(i);
-        EXPECT_DOUBLE_EQ(f.rom.q05[ui], h_det[ui]) << "node " << i;
-        EXPECT_DOUBLE_EQ(f.rom.q95[ui], h_det[ui]) << "node " << i;
-    }
-}
-
 TEST(RegisteredParams, RateMultEquivalentToBuiltInManning) {
     // A registered RATE_MULT column must reproduce, bit-exactly, the dynamics
     // of the same multipliers supplied through the built-in Manning path.
@@ -2321,8 +2109,8 @@ TEST(RegisteredParams, RateMultEquivalentToBuiltInManning) {
     romB.seed(h_det.data());
 
     for (int step = 0; step < 20; ++step) {
-        romA.advance(30.0, 0.1, h_det.data(), nullptr);
-        romB.advance(30.0, 0.1, h_det.data(), nullptr);
+        romA.advance(30.0, 0.1, h_det.data());
+        romB.advance(30.0, 0.1, h_det.data());
     }
     ASSERT_EQ(romA.a_ensemble.size(), romB.a_ensemble.size());
     for (std::size_t k = 0; k < romA.a_ensemble.size(); ++k)
@@ -2335,7 +2123,7 @@ TEST(RegisteredParams, InvalidRegistrationThrows) {
     std::vector<double> ok(static_cast<std::size_t>(f.rom.n_ensemble), 1.0);
     EXPECT_THROW(f.rom.addRegisteredParam(ParamEntry::RATE_MULT, wrong),
                  std::invalid_argument);
-    EXPECT_THROW(f.rom.addRegisteredParam(ParamEntry::FORCING_VECTOR, ok, nullptr),
+    EXPECT_THROW(f.rom.addRegisteredParam(ParamEntry::FORCING_VECTOR, ok),
                  std::invalid_argument);
 }
 
@@ -2348,8 +2136,7 @@ TEST(RegisteredParams, InvalidRegistrationThrows) {
 // sensitivity term `-lam*K1d*inv_mm_1*b_coarse[j]`. It does NOT touch the
 // per-member decay RATE `lam*K1d/mm_i` (mm_i still varies the relaxation
 // timescale even when alpha=0 everywhere — H5's spec attenuates the source,
-// not the rate) and does NOT touch the forcing-sensitivity term
-// `scale_1*r_coarse[j]` (projected from runoff_per_node, a separate loop).
+// not the rate).
 // computeSurchargeAlpha() itself (the ramp formula) is covered by
 // test_rom_surcharge_attenuation.cpp; these tests cover only what advance()
 // does with whatever alpha array it's given.
@@ -2364,12 +2151,10 @@ TEST(SurchargeAttenuation, NullAlphaMatchesAllOnesArray) {
     ASSERT_TRUE(basis.build(L, K));
 
     std::vector<double> h_det(static_cast<std::size_t>(N));
-    std::vector<double> runoff(static_cast<std::size_t>(N));
     for (int i = 0; i < N; ++i) {
         double dx = i - N / 3.0;
         h_det[static_cast<std::size_t>(i)] =
             0.10 * std::exp(-0.5 * dx * dx / (N / 8.0 * N / 8.0));
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + std::sin(0.4 * i));
     }
     const std::vector<double> ones(static_cast<std::size_t>(N), 1.0);
 
@@ -2386,8 +2171,8 @@ TEST(SurchargeAttenuation, NullAlphaMatchesAllOnesArray) {
     romB.seed(h_det.data());
 
     for (int step = 0; step < 20; ++step) {
-        romA.advance(30.0, 0.1, h_det.data(), runoff.data());                       // alpha = nullptr
-        romB.advance(30.0, 0.1, h_det.data(), runoff.data(), nullptr, ones.data()); // alpha = all-1.0
+        romA.advance(30.0, 0.1, h_det.data());                       // alpha = nullptr
+        romB.advance(30.0, 0.1, h_det.data(), nullptr, ones.data()); // alpha = all-1.0
     }
     ASSERT_EQ(romA.a_ensemble.size(), romB.a_ensemble.size());
     for (std::size_t k = 0; k < romA.a_ensemble.size(); ++k)
@@ -2412,66 +2197,35 @@ TEST(SurchargeAttenuation, FullAttenuationWithNoForcingGivesExactZeroDeviation) 
 
     const std::vector<double> zero_alpha(static_cast<std::size_t>(f.N), 0.0);
     for (int step = 0; step < 40; ++step)
-        f.rom.advance(30.0, 0.1, h_det.data(), nullptr, nullptr, zero_alpha.data());
+        f.rom.advance(30.0, 0.1, h_det.data(), nullptr, zero_alpha.data());
 
     for (double a : f.rom.a_ensemble)
         EXPECT_NEAR(a, 0.0, 1e-12);
 }
 
-TEST(SurchargeAttenuation, FullAttenuationStillRespondsToForcing) {
-    // Same full attenuation (alpha = all-0.0), but now runoff_pert > 0 with a
-    // non-uniform runoff field -- the forcing-sensitivity channel
-    // (r_coarse, projected separately from bref) must still drive nonzero
-    // spread. alpha=0 silences ONLY the Manning channel, not the ROM.
-    ROM1DFixture f;
-    f.rom.mannings_pert = 0.30;
-    f.rom.runoff_pert   = 0.30;
-    f.rom.initialize();
-
-    auto h_det = f.bump_head();
-    f.rom.seed(h_det.data());
-
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
-    for (int i = 0; i < f.N; ++i)
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + std::cos(0.5 * i));
-
-    const std::vector<double> zero_alpha(static_cast<std::size_t>(f.N), 0.0);
-    for (int step = 0; step < 40; ++step)
-        f.rom.advance(30.0, 0.1, h_det.data(), runoff.data(), nullptr,
-                      zero_alpha.data());
-    f.rom.computeQuantiles(h_det.data(), nullptr);
-
-    EXPECT_GT(max_spread(f.rom), 0.0)
-        << "forcing-sensitivity channel must remain active under full "
-           "Manning attenuation";
-}
-
 TEST(SurchargeAttenuation, PartialAttenuationReducesButDoesNotEliminateSpread) {
-    // With BOTH channels active (mannings_pert and runoff_pert > 0, plus a
-    // non-uniform runoff field), full attenuation must strictly reduce total
-    // spread relative to no attenuation, but not to exactly zero -- the
-    // channel-selective damping the H5 design decision describes, observed
-    // end-to-end through computeQuantiles() rather than asserted on raw
-    // a_ensemble values.
+    // Half attenuation (alpha = 0.5 everywhere) must strictly narrow the
+    // Manning-driven band relative to no attenuation, but not to zero --
+    // observed end-to-end through computeQuantiles() rather than asserted on
+    // raw a_ensemble values. (Additive forcings no longer enter the modal
+    // ODE; they ride the full-order H19 channel, so only the Manning
+    // channel is left to attenuate here.)
     auto run_with_alpha = [](const double* alpha) {
         ROM1DFixture f;
         f.rom.mannings_pert = 0.30;
-        f.rom.runoff_pert   = 0.30;
+        f.rom.runoff_pert   = 0.0;
         f.rom.initialize();
         auto h_det = f.bump_head();
         f.rom.seed(h_det.data());
-        std::vector<double> runoff(static_cast<std::size_t>(f.N));
-        for (int i = 0; i < f.N; ++i)
-            runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + std::cos(0.5 * i));
         for (int step = 0; step < 40; ++step)
-            f.rom.advance(30.0, 0.1, h_det.data(), runoff.data(), nullptr, alpha);
+            f.rom.advance(30.0, 0.1, h_det.data(), nullptr, alpha);
         f.rom.computeQuantiles(h_det.data(), nullptr);
         return max_spread(f.rom);
     };
 
     const double spread_unattenuated = run_with_alpha(nullptr);
-    const std::vector<double> zero_alpha(20, 0.0);  // ROM1DFixture::N
-    const double spread_attenuated = run_with_alpha(zero_alpha.data());
+    const std::vector<double> half_alpha(20, 0.5);  // ROM1DFixture::N
+    const double spread_attenuated = run_with_alpha(half_alpha.data());
 
     EXPECT_GT(spread_unattenuated, 0.0);
     EXPECT_GT(spread_attenuated, 0.0);
@@ -2500,16 +2254,13 @@ TEST(SurchargeAttenuation, ZeroPerturbationExactWithMixedAlpha) {
     }
 
     std::vector<double> h_det(static_cast<std::size_t>(f.N));
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
     for (int step = 0; step < 100; ++step) {
         const double phase = 0.05 * step;
         for (int i = 0; i < f.N; ++i) {
             h_det[static_cast<std::size_t>(i)] =
                 h0[static_cast<std::size_t>(i)] * (1.0 + 0.5 * std::sin(phase + 0.3 * i));
-            runoff[static_cast<std::size_t>(i)] =
-                1.0e-5 * (1.0 + std::cos(phase + 0.7 * i));
         }
-        f.rom.advance(15.0, 0.1, h_det.data(), runoff.data(), nullptr, alpha.data());
+        f.rom.advance(15.0, 0.1, h_det.data(), nullptr, alpha.data());
     }
     f.rom.computeQuantiles(h_det.data(), nullptr);
 
@@ -2546,12 +2297,10 @@ TEST(PhaseCoordinate, NoTravelTimeIsBitIdentical) {
     ASSERT_TRUE(basis.build(L, K));
 
     std::vector<double> h_det(static_cast<std::size_t>(N));
-    std::vector<double> runoff(static_cast<std::size_t>(N));
     for (int i = 0; i < N; ++i) {
         double dx = i - N / 3.0;
         h_det[static_cast<std::size_t>(i)] =
             0.10 * std::exp(-0.5 * dx * dx / (N / 8.0 * N / 8.0));
-        runoff[static_cast<std::size_t>(i)] = 1.0e-5 * (1.0 + std::sin(0.4 * i));
     }
 
     SpectralROM1D romA;
@@ -2569,8 +2318,8 @@ TEST(PhaseCoordinate, NoTravelTimeIsBitIdentical) {
     romB.setTravelTime(zero_tbar.data());
 
     for (int step = 0; step < 20; ++step) {
-        romA.advance(30.0, 0.1, h_det.data(), runoff.data());
-        romB.advance(30.0, 0.1, h_det.data(), runoff.data());
+        romA.advance(30.0, 0.1, h_det.data());
+        romB.advance(30.0, 0.1, h_det.data());
     }
     romA.computeQuantiles(h_det.data(), nullptr);
     romB.computeQuantiles(h_det.data(), nullptr);
@@ -2602,16 +2351,13 @@ TEST(PhaseCoordinate, ZeroPerturbationExactWithPhase) {
     f.rom.setTravelTime(tbar.data());
 
     std::vector<double> h_det(static_cast<std::size_t>(f.N));
-    std::vector<double> runoff(static_cast<std::size_t>(f.N));
     for (int step = 0; step < 100; ++step) {
         const double phase = 0.05 * step;
         for (int i = 0; i < f.N; ++i) {
             h_det[static_cast<std::size_t>(i)]  =
                 h0[static_cast<std::size_t>(i)] * (1.0 + 0.5 * std::sin(phase + 0.3 * i));
-            runoff[static_cast<std::size_t>(i)] =
-                1.0e-5 * (1.0 + std::cos(phase + 0.7 * i));
         }
-        f.rom.advance(15.0, 0.1, h_det.data(), runoff.data());
+        f.rom.advance(15.0, 0.1, h_det.data());
     }
     f.rom.computeQuantiles(h_det.data(), nullptr);
 
@@ -2639,7 +2385,6 @@ TEST(PhaseCoordinate, SteadyDetTrajectoryPhaseAddsNothing) {
     ASSERT_TRUE(basis.build(L, K));
 
     std::vector<double> h_det(static_cast<std::size_t>(N));
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     for (int i = 0; i < N; ++i) {
         double dx = i - N / 3.0;
         h_det[static_cast<std::size_t>(i)] =
@@ -2662,8 +2407,8 @@ TEST(PhaseCoordinate, SteadyDetTrajectoryPhaseAddsNothing) {
     romB.setTravelTime(tbar.data());
 
     for (int step = 0; step < 60; ++step) {
-        romA.advance(15.0, 0.1, h_det.data(), runoff.data());
-        romB.advance(15.0, 0.1, h_det.data(), runoff.data());
+        romA.advance(15.0, 0.1, h_det.data());
+        romB.advance(15.0, 0.1, h_det.data());
     }
     romA.computeQuantiles(h_det.data(), nullptr);
     romB.computeQuantiles(h_det.data(), nullptr);
@@ -2705,15 +2450,14 @@ TEST(PhaseCoordinate, RisingFrontPhaseWidensBand) {
     romB.seed(h_seed.data());
     romB.setTravelTime(tbar.data());
 
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     std::vector<double> h_det(static_cast<std::size_t>(N));
     const double dt = 10.0;
     const int n_steps = 60;
     for (int step = 1; step <= n_steps; ++step) {
         const double t = step * dt;
         std::fill(h_det.begin(), h_det.end(), h0 + slope * t);
-        romA.advance(dt, 0.1, h_det.data(), runoff.data());
-        romB.advance(dt, 0.1, h_det.data(), runoff.data());
+        romA.advance(dt, 0.1, h_det.data());
+        romB.advance(dt, 0.1, h_det.data());
     }
     romA.computeQuantiles(h_det.data(), nullptr);
     romB.computeQuantiles(h_det.data(), nullptr);
@@ -2768,7 +2512,6 @@ TEST(PhaseCoordinate, NegativeTauUsesReflection) {
     for (int i = 0; i < N; ++i) tbar[static_cast<std::size_t>(i)] = 30.0 * i;
     rom.setTravelTime(tbar.data());
 
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     std::vector<double> h_det(static_cast<std::size_t>(N));
     const double dt = 10.0;
     const int n_steps = 50;
@@ -2776,7 +2519,7 @@ TEST(PhaseCoordinate, NegativeTauUsesReflection) {
     for (int step = 1; step <= n_steps; ++step) {
         t_now = step * dt;
         std::fill(h_det.begin(), h_det.end(), h0 + slope * t_now);
-        rom.advance(dt, 0.1, h_det.data(), runoff.data());
+        rom.advance(dt, 0.1, h_det.data());
     }
     rom.computeQuantiles(h_det.data(), nullptr);
 
@@ -2824,7 +2567,6 @@ TEST(PhaseCoordinate, HistoryShorterThanTauDegradesGracefully) {
     for (int i = 0; i < N; ++i) tbar[static_cast<std::size_t>(i)] = 30.0 * i;
     rom.setTravelTime(tbar.data());
 
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     std::vector<double> h_det(static_cast<std::size_t>(N));
     double t_accum = 0.0;
 
@@ -2832,7 +2574,7 @@ TEST(PhaseCoordinate, HistoryShorterThanTauDegradesGracefully) {
         for (int s = 0; s < n_steps; ++s) {
             t_accum += dt;
             std::fill(h_det.begin(), h_det.end(), h0 + slope * t_accum);
-            rom.advance(dt, 0.1, h_det.data(), runoff.data());
+            rom.advance(dt, 0.1, h_det.data());
         }
         rom.computeQuantiles(h_det.data(), nullptr);
     };
@@ -2918,9 +2660,8 @@ TEST(QuantileGemm, GemmIsRunToRunDeterministic) {
     }
     rom.seed(h0.data());
     std::vector<double> h_det = h0;
-    std::vector<double> runoff(static_cast<std::size_t>(N), 1.0e-5);
     for (int step = 0; step < 25; ++step)
-        rom.advance(20.0, 0.1, h_det.data(), runoff.data());
+        rom.advance(20.0, 0.1, h_det.data());
 
     rom.computeQuantiles(h_det.data(), nullptr);
     const std::vector<double> q05_1 = rom.q05, q50_1 = rom.q50, q95_1 = rom.q95;
@@ -2963,16 +2704,13 @@ TEST(QuantileGemm, NaiveMatchesGemm1D) {
     rom.seed(h0.data());
 
     std::vector<double> h_det(static_cast<std::size_t>(N));
-    std::vector<double> runoff(static_cast<std::size_t>(N));
     for (int step = 0; step < 60; ++step) {
         const double phase = 0.07 * step;
         for (int i = 0; i < N; ++i) {
             h_det[static_cast<std::size_t>(i)] =
                 h0[static_cast<std::size_t>(i)] * (1.0 + 0.4 * std::sin(phase + 0.35 * i));
-            runoff[static_cast<std::size_t>(i)] =
-                1.0e-5 * (1.0 + std::cos(phase + 0.5 * i));
         }
-        rom.advance(20.0, 0.12, h_det.data(), runoff.data());
+        rom.advance(20.0, 0.12, h_det.data());
     }
 
     // Force a real "some modes inactive" scenario, INCLUDING a frozen
@@ -3031,9 +2769,8 @@ TEST(QuantileGemm, NaiveMatchesGemm1DWithInvertClamp) {
     rom.seed(h0.data());
 
     std::vector<double> h_det = h0;
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     for (int step = 0; step < 40; ++step)
-        rom.advance(15.0, 0.15, h_det.data(), runoff.data());
+        rom.advance(15.0, 0.15, h_det.data());
 
     rom.rom_quantile_naive = true;
     rom.computeQuantiles(h_det.data(), invert.data());
@@ -3079,9 +2816,8 @@ TEST(QuantileGemm, SortedMemberValuesStaysFullySortedUnderGemm) {
     }
     rom.seed(h0.data());
     std::vector<double> h_det = h0;
-    std::vector<double> runoff(static_cast<std::size_t>(N), 0.0);
     for (int step = 0; step < 30; ++step)
-        rom.advance(20.0, 0.1, h_det.data(), runoff.data());
+        rom.advance(20.0, 0.1, h_det.data());
     rom.computeQuantiles(h_det.data(), nullptr);
 
     const auto& mv = rom.sortedMemberValues();
@@ -3108,12 +2844,12 @@ std::vector<double> steadyDeviations(bool quasi_static, std::vector<double>& phi
     f.rom.quasi_static_residual = quasi_static;
     f.rom.initialize();
     const auto N = static_cast<std::size_t>(f.N);
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0);
+    std::vector<double> h_det(N, 10.0);
     phi.assign(N, 0.2);
     phi[15] = 1.0;   // localized: 6 smooth modes of a 20-node chain cannot hold it
     f.rom.seed(h_det.data());
     for (int step = 0; step < 400; ++step)
-        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+        f.rom.advance(100.0, 1.0, h_det.data(), phi.data());
     f.rom.computeQuantiles(h_det.data(), nullptr);
     std::vector<double> dev(N * static_cast<std::size_t>(f.M));
     for (int m = 0; m < f.M; ++m)
@@ -3153,11 +2889,11 @@ TEST(QuasiStaticResidual, ZeroPerturbationStaysExact) {
     f.rom.runoff_pert   = 0.0;
     f.rom.initialize();
     const auto N = static_cast<std::size_t>(f.N);
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.2);
+    std::vector<double> h_det(N, 10.0), phi(N, 0.2);
     phi[15] = 1.0;
     f.rom.seed(h_det.data());
     for (int step = 0; step < 50; ++step)
-        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+        f.rom.advance(100.0, 1.0, h_det.data(), phi.data());
     f.rom.computeQuantiles(h_det.data(), nullptr);
     for (std::size_t i = 0; i < N; ++i) {
         EXPECT_EQ(f.rom.q05[i], h_det[i]);
@@ -3176,11 +2912,11 @@ TEST(DeviationForm, FloorAtTheDeterministicHeadKeepsTheBand) {
     f.rom.runoff_pert = 0.0;
     f.rom.initialize();
     const auto N = static_cast<std::size_t>(f.N);
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.5), floor(N);
+    std::vector<double> h_det(N, 10.0), phi(N, 0.5), floor(N);
     for (std::size_t i = 0; i < N; ++i) floor[i] = std::min(10.5, h_det[i]);
     f.rom.seed(h_det.data());
     for (int step = 0; step < 200; ++step)
-        f.rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+        f.rom.advance(100.0, 1.0, h_det.data(), phi.data());
     f.rom.computeQuantiles(h_det.data(), floor.data());
     for (std::size_t i = 0; i < N; ++i) {
         EXPECT_LE(f.rom.q05[i], h_det[i] + 1e-12) << "node " << i;
@@ -3299,11 +3035,11 @@ TEST(PerModeRates, SteadyBandIsStillTheFullResponse) {
     auto keep = makeH18Rom(ch, 4, rom, 0.2);
     ASSERT_TRUE(rom.hasStorage());
     const auto N = static_cast<std::size_t>(n);
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.2);
+    std::vector<double> h_det(N, 10.0), phi(N, 0.2);
     phi[7] = 1.0;
     rom.seed(h_det.data());
     for (int step = 0; step < 400; ++step)
-        rom.advance(1000.0, 1.0, h_det.data(), runoff.data(), phi.data());
+        rom.advance(1000.0, 1.0, h_det.data(), phi.data());
     double worst = 0.0;
     for (int m = 0; m < rom.n_ensemble; ++m)
         for (std::size_t i = 0; i < N; ++i)
@@ -3320,10 +3056,10 @@ TEST(PerModeRates, ZeroPerturbationStaysExact) {
     auto keep = makeH18Rom(ch, 4, rom, 0.0);
     ASSERT_TRUE(rom.hasStorage());
     const auto N = static_cast<std::size_t>(n);
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N, 0.3);
+    std::vector<double> h_det(N, 10.0), phi(N, 0.3);
     rom.seed(h_det.data());
     for (int step = 0; step < 50; ++step)
-        rom.advance(100.0, 1.0, h_det.data(), runoff.data(), phi.data());
+        rom.advance(100.0, 1.0, h_det.data(), phi.data());
     rom.computeQuantiles(h_det.data(), nullptr);
     for (std::size_t i = 0; i < N; ++i) {
         EXPECT_EQ(rom.q05[i], h_det[i]);
@@ -3373,11 +3109,11 @@ TEST(PerModeRates, TransientOfAGeneralizedModeIsExact) {
     ASSERT_TRUE(rom.hasStorage());
     const auto N = static_cast<std::size_t>(n);
     const double lam0 = rom.basis->eigenvalues[0];
-    std::vector<double> h_det(N, 10.0), runoff(N, 0.0), phi(N);
+    std::vector<double> h_det(N, 10.0), phi(N);
     for (std::size_t i = 0; i < N; ++i) phi[i] = rom.basis->P[i];
     rom.seed(h_det.data());
     const double t = 0.7 / lam0;
-    rom.advance(t, 1.0, h_det.data(), runoff.data(), phi.data());
+    rom.advance(t, 1.0, h_det.data(), phi.data());
     double worst = 0.0, scale = 0.0;
     for (int m = 0; m < rom.n_ensemble; ++m) {
         const double mm = rom.mannings_mult[static_cast<std::size_t>(m)];

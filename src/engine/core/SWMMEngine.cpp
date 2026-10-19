@@ -5471,41 +5471,10 @@ void SWMMEngine::stepRouting(double dt_routing) {
                 rom1d_add_qa_[uai] = qa;
                 rom1d_add_qb_[uai] = qb;
             }
-            if (rom1d_soft_corr_len_ > 0.0) {
-                // SP3: correlated coherence. Single family by construction (mixed
-                // was refused at init). Field built once; the additive channel
-                // multiplies the source by it pointwise.
-                if (!rom1d_soft_field_built_) buildRom1DSoftField();
-                const double* spread = soft_rain_1d_has_b_ ? rom1d_add_qb_.data()
-                                                           : rom1d_add_qa_.data();
-                const uncertainty::DistType fam = soft_rain_1d_has_b_
-                    ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
-                if (rom1d_soft_reduced_) {
-                    rom1d_->setSoftForcingReduced(nullptr, spread, fam,
-                                                  rom1d_soft_psi_.data(),
-                                                  rom1d_soft_a_.data(),
-                                                  rom1d_soft_basis_.n_modes());
-                } else {
-                    const uncertainty::SoftSpatialField* sf =
-                        rom1d_soft_field_.is_spatial() ? &rom1d_soft_field_ : nullptr;
-                    rom1d_->setSoftForcing(nullptr, spread, fam, sf);
-                }
-            } else if (soft_rain_1d_has_a_ && soft_rain_1d_has_b_) {
-                // MIXED: both planes, each with its own family.
-                rom1d_->setSoftForcing(nullptr, rom1d_add_qa_.data(),
-                                       soft_rain_1d_family_a_, nullptr,
-                                       rom1d_add_qb_.data(),
-                                       uncertainty::DistType::UNIFORM);
-            } else if (soft_rain_1d_has_b_) {
-                // UNIFORM only: plane B is the sole plane, passed as primary.
-                rom1d_->setSoftForcing(nullptr, rom1d_add_qb_.data(),
-                                       uncertainty::DistType::UNIFORM);
-            } else {
-                // NORMAL/LOGNORMAL only: single plane, null second plane, so
-                // this is bit-identical to the pre-H7 single-family call.
-                rom1d_->setSoftForcing(nullptr, rom1d_add_qa_.data(),
-                                       soft_rain_1d_family_a_);
-            }
+            // SP3: correlated coherence (single family by construction; mixed
+            // was refused at init). The spatial field is built once; the
+            // additive channel multiplies the source by it pointwise.
+            if (rom1d_soft_corr_len_ > 0.0 && !rom1d_soft_field_built_) buildRom1DSoftField();
         }
 
         // PR H17: the steady linearized flow response replaces depth x alpha.
@@ -5528,7 +5497,7 @@ void SWMMEngine::stepRouting(double dt_routing) {
             rom1d_->clearModeRates();
         }
         refreshRom1dDirectionalOperator(dt_routing);
-        rom1d_->advance(dt_routing, rate_scale, rom1d_h_buf_.data(), nullptr,
+        rom1d_->advance(dt_routing, rate_scale, rom1d_h_buf_.data(),
                         rom1d_sens_buf_.data(),
                         flow_src ? nullptr : rom1d_alpha_buf_.data());
         // computeQuantiles() is called only at report boundaries (postOutputSnapshot)
@@ -11299,8 +11268,8 @@ void SWMMEngine::stageSoftGridForcings() noexcept {
 //
 void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
     const auto n_active = active_map.size();
-    // NOTE: these vectors are bound by pointer inside SpectralROM1D::
-    // setSoftForcing; they are sized exactly once here and never resized.
+    // Per-node soft-rain sources for the additive channel (H19), one per
+    // coefficient family; sized once here.
     rom1d_add_qa_.assign(n_active, 0.0);
     rom1d_add_qb_.assign(n_active, 0.0);
     rom1d_soft_off_.assign(n_active + 1, 0);
@@ -11414,8 +11383,8 @@ void SWMMEngine::initSoftRain1D(const std::vector<int>& active_map) noexcept {
 // ============================================================================
 //
 // Re-home of the pre-port CL-2c builder. Called once, lazily, from the first
-// soft-forcing step (it needs the ROM's coefficient column, which setSoftForcing
-// fills). Marks itself attempted up front so a fallback never retries per step.
+// soft-forcing step (it needs the ROM's coefficient column, softCoefficients()).
+// Marks itself attempted up front so a fallback never retries per step.
 //
 void SWMMEngine::buildRom1DSoftField() noexcept {
     rom1d_soft_field_built_ = true;
@@ -11430,15 +11399,12 @@ void SWMMEngine::buildRom1DSoftField() noexcept {
     const int M = rom1d_->n_ensemble;
     if (n_active <= 0 || M < 2) return;
 
-    // Mixed families were refused at init, so exactly one plane is live.
-    const double* spread = soft_rain_1d_has_b_ ? rom1d_add_qb_.data()
-                                               : rom1d_add_qa_.data();
+    // Mixed families were refused at init, so exactly one family is live.
     const uncertainty::DistType fam = soft_rain_1d_has_b_
         ? uncertainty::DistType::UNIFORM : soft_rain_1d_family_a_;
 
-    // Populate the ROM's family-selected per-member coefficients c_i.
-    rom1d_->setSoftForcing(nullptr, spread, fam);
-    const std::vector<double> coeff = rom1d_->softCoeff();  // copy: setSoftForcing rebinds
+    // The family's per-member coefficients c_i (mode 0 of the spatial basis).
+    const std::vector<double> coeff = rom1d_->softCoefficients(fam);
     if (static_cast<int>(coeff.size()) != M) return;
 
     // Node [COORDINATES] give the geometry the correlation length acts over.
@@ -11676,8 +11642,8 @@ void SWMMEngine::buildROM1D() noexcept {
     initSoftRain1D(active_map);
 
     // PR H19: the full-order additive channel carries every additive deviation.
-    rom1d_->external_additive = true;
     rom1d_vec_cols_.clear();
+    rom1d_fmult_cols_.clear();
     rom1d_add_np_ = 0;
     rom1d_add_state_.clear();
 
@@ -11703,11 +11669,17 @@ void SWMMEngine::buildROM1D() noexcept {
                 if (s.name == "MANNINGS_N" || s.name == "RAINFALL") continue;
                 const auto* col = reg.column(s.name, uncertainty::LayerTarget::ONE_D);
                 if (!col) continue;
+                // H19: additive entries stay with the engine's full-order
+                // channel; only RATE_MULT / COUPLING_MULT reach the ROM.
                 if (s.entry == uncertainty::ParamEntry::FORCING_VECTOR) {
-                    rom1d_vec_cols_.push_back(*col);   // H19: carried by the full-order channel
+                    rom1d_vec_cols_.push_back(*col);
                     continue;
                 }
-                rom1d_->addRegisteredParam(s.entry, *col, nullptr);
+                if (s.entry == uncertainty::ParamEntry::FORCING_MULT) {
+                    rom1d_fmult_cols_.push_back(*col);
+                    continue;
+                }
+                rom1d_->addRegisteredParam(s.entry, *col);
             }
         }
     }
@@ -12131,7 +12103,8 @@ void SWMMEngine::computeRom1dStorage() noexcept {
 //   soft rain   COHERENCE FULL: plane A (NORMAL/LOGNORMAL gages, kappa = c_i)
 //               and plane B (UNIFORM gages, kappa = c_i^B); CORR_LEN: one plane
 //               per spatial mode (kappa = a_im) or per member (materialized);
-//   runoff      built-in 1D RAINFALL multiplier: node runoff, kappa = rm_i - 1;
+//   runoff      built-in 1D RAINFALL multiplier and FORCING_MULT columns: node
+//               runoff, kappa = rm_i * prod(theta_i) - 1;
 //   vectors     registered FORCING_VECTOR sources: node lateral inflow,
 //               kappa = theta_i - 1.
 // Member deviations sum_p kappa_ip Psi_p are added at reconstruction.
@@ -12149,8 +12122,8 @@ void SWMMEngine::stepRom1dAdditiveChannel(double dt) noexcept {
     std::vector<std::vector<double>> q;       // P x n
     std::vector<std::vector<double>> kap;     // P x M
     if (soft_rain_1d_active_ && rom1d_add_qa_.size() == un) {
-        const auto& cA = rom1d_->softCoeff();
-        const auto& cB = rom1d_->softCoeffB();
+        const std::vector<double> cA = rom1d_->softCoefficients(soft_rain_1d_family_a_);
+        const std::vector<double> cB = rom1d_->softCoefficients(uncertainty::DistType::UNIFORM);
         const bool corr = rom1d_soft_corr_len_ > 0.0 && rom1d_soft_field_built_;
         const std::vector<double>& qs = soft_rain_1d_has_b_ && !soft_rain_1d_has_a_ ? rom1d_add_qb_ : rom1d_add_qa_;
         if (corr && rom1d_soft_reduced_) {
@@ -12172,11 +12145,13 @@ void SWMMEngine::stepRom1dAdditiveChannel(double dt) noexcept {
             q.push_back(rom1d_add_qa_); kap.push_back(cA);
             q.push_back(rom1d_add_qb_); kap.push_back(cB);
         } else {
-            // Single family: setSoftForcing armed that family's coefficients as plane A.
-            q.push_back(qs); kap.push_back(cA);
+            // Single family: its own coefficients (UNIFORM-only networks use plane B).
+            q.push_back(qs); kap.push_back(soft_rain_1d_has_a_ ? cA : cB);
         }
     }
-    if (rom1d_->runoff_pert > 0.0) {
+    // Runoff multiplier (built-in 1D RAINFALL) and registered FORCING_MULT
+    // columns scale the same source: member i's runoff is rm_i * prod(theta_i).
+    if (rom1d_->runoff_pert > 0.0 || !rom1d_fmult_cols_.empty()) {
         std::vector<double> f(un, 0.0), k(uM);
         const auto& f2a = rom1d_->full_to_active;
         for (int sc = 0; sc < ctx_.n_subcatches(); ++sc) {
@@ -12184,7 +12159,11 @@ void SWMMEngine::stepRom1dAdditiveChannel(double dt) noexcept {
             const int a = (node >= 0 && node < static_cast<int>(f2a.size())) ? f2a[static_cast<std::size_t>(node)] : -1;
             if (a >= 0) f[static_cast<std::size_t>(a)] += ctx_.subcatches.runoff[static_cast<std::size_t>(sc)];
         }
-        for (std::size_t i = 0; i < uM; ++i) k[i] = rom1d_->runoff_mult[i] - 1.0;
+        for (std::size_t i = 0; i < uM; ++i) {
+            double scale = rom1d_->runoff_mult[i];
+            for (const auto& col : rom1d_fmult_cols_) scale *= col[i];
+            k[i] = scale - 1.0;
+        }
         q.push_back(std::move(f)); kap.push_back(std::move(k));
     }
     for (const auto& col : rom1d_vec_cols_) {

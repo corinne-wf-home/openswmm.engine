@@ -281,8 +281,10 @@ The reduced basis is consumed by both ROMs and both engine paths.
 empirical variance arithmetic as `materializeField()`. Folding `g` into the
 modes makes the reduced projection variance-correct (§4).
 
-**ROM path.** `SpectralROM1D::setSoftForcingReduced()` and
-`SpectralROM::setSoftForcingReduced()` (2D) store non-owning pointers to `ψ_m`
+**ROM path.** (1D since H19: the engine builds one additive-channel plane per
+SPDE mode, source `spread·ψ_m`, coefficient `a_im` — `ADDITIVE_CHANNEL.md`;
+the modal projection below now applies to the 2D ROM only.)
+`SpectralROM::setSoftForcingReduced()` (2D) stores non-owning pointers to `ψ_m`
 (K_s × n) and `a_im` (M × K_s). Each `advance()`:
 
 ```

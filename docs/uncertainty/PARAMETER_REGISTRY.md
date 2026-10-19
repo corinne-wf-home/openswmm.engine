@@ -51,9 +51,13 @@ Notes:
   scales: `FORCING_MULT` rides the ROM's existing forcing argument
   (rainfall/runoff), while a `FORCING_VECTOR` param carries its own non-owning
   pointer to a per-node/per-cell field supplied by the caller and re-projected
-  each `advance()`. It subsumes `setEnsembleRunoff` (a per-member rate scale on
-  a nodal field) and is the natural slot for the soft-rainfall spread plane
-  (SR-3) later.
+  each `advance()`. It subsumes the ensemble-runoff path (a per-member rate
+  scale on a nodal field) and is the natural slot for the soft-rainfall spread
+  plane (SR-3) later.
+- **1D, since H19:** `SpectralROM1D::addRegisteredParam` accepts only
+  `RATE_MULT`. The engine applies 1D `FORCING_MULT` columns to the runoff plane
+  and 1D `FORCING_VECTOR` columns to the lateral-inflow plane of the
+  full-order additive channel (`ADDITIVE_CHANNEL.md`).
 - `COUPLING_MULT` is a **documented extension** beyond the three-entry
   taxonomy originally sketched in the reform checklist: Cd does not enter the
   modal ODE at all (PR 7 removed the orifice `/mm` division precisely because

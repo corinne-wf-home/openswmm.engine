@@ -56,8 +56,11 @@ steady = g/rate
 δa ← (δa − steady)·exp(−rate·dt) + steady      (Euler fallback below rate_floor)
 ```
 
-Ensemble-runoff path (`setEnsembleRunoff`): replace `(rm_i − 1)` with
-`(rate_i/mean_rate − 1)`.
+**1D, since H19 (2026-10-16):** the `(rm_i − 1)·r_j` term is gone from
+`SpectralROM1D`. Additive forcings (runoff, soft rain, forcing vectors) are
+carried at full order by the additive channel (`ADDITIVE_CHANNEL.md`) and
+added at reconstruction; the modal ODE keeps only the Manning term. The 2D ROM
+still uses the form above.
 
 ## 4. Properties (each one is an acceptance test)
 

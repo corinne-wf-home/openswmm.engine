@@ -85,9 +85,9 @@ One Gauss–Seidel solve per plane per routing step, at O(edges) per sweep.
 ## 5. What the ROM does
 
 `SpectralROM1D` still generates the per-member
-coefficients (`setSoftForcing` arms c_i and c_i^B). With `external_additive`
-set, it no longer applies any additive modal forcing, and its reconstruction
-(`computeQuantiles`, `reconstructHead`) adds Σ_p κ_ip Ψ_p from
+coefficients (`softCoefficients(family)` returns c_i or c_i^B). It applies no
+additive modal forcing (the modal path was deleted on 2026-10-19), and its
+reconstruction (`computeQuantiles`, `reconstructHead`) adds Σ_p κ_ip Ψ_p from
 `setAdditivePlanes(P, Ψ, κ)`. The Manning channel, the phase coordinate and the
 flags are unchanged.
 

@@ -375,11 +375,10 @@ TEST(SpectralROM1DReduced, DiagLambdaOperatorReproducesDiagonalPath) {
     Chain ch(10, 5, 1.0, 0.1);
     const int k = ch.basis.num_kept;
     const auto n = static_cast<std::size_t>(ch.n_active);
-    std::vector<double> h(n), sens(n), runoff(n);
+    std::vector<double> h(n), sens(n);
     for (std::size_t i = 0; i < n; ++i) {
         h[i] = 100.0 - 2.0 * static_cast<double>(i) + 0.3 * std::sin(0.9 * static_cast<double>(i));
         sens[i] = 0.4 + 0.2 * std::cos(0.7 * static_cast<double>(i));
-        runoff[i] = 1e-5 * (1.0 + 0.5 * std::sin(0.4 * static_cast<double>(i)));
     }
     SpectralROM1D diag, red;
     makeRom(diag, ch.basis, 12, h);
@@ -390,14 +389,14 @@ TEST(SpectralROM1DReduced, DiagLambdaOperatorReproducesDiagonalPath) {
     ASSERT_TRUE(red.hasReducedOperator());
 
     for (int step = 0; step < 6; ++step) {
-        diag.advance(30.0, 0.02, h.data(), runoff.data(), sens.data(), nullptr);
-        red.advance(30.0, 0.02, h.data(), runoff.data(), sens.data(), nullptr);
+        diag.advance(30.0, 0.02, h.data(), sens.data(), nullptr);
+        red.advance(30.0, 0.02, h.data(), sens.data(), nullptr);
     }
     double max_a = 0.0;
     for (double a : diag.a_ensemble) max_a = std::max(max_a, std::fabs(a));
     ASSERT_GT(max_a, 1e-9) << "vacuous: no deviation developed";
-    // The diagonal path skips inactive modes; with runoff + Manning
-    // perturbation every mode is active here, so the two must agree.
+    // The diagonal path skips inactive modes; with the Manning perturbation
+    // every mode is active here, so the two must agree.
     EXPECT_LT(maxAbsDiff(diag.a_ensemble, red.a_ensemble), 1e-10 * max_a);
 }
 
@@ -415,8 +414,8 @@ TEST(SpectralROM1DReduced, ClearRestoresDiagonalPathExactly) {
     b.clearReducedOperator();
     EXPECT_FALSE(b.hasReducedOperator());
     for (int step = 0; step < 3; ++step) {
-        a.advance(20.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
-        b.advance(20.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
+        a.advance(20.0, 0.05, h.data(), sens.data(), nullptr);
+        b.advance(20.0, 0.05, h.data(), sens.data(), nullptr);
     }
     EXPECT_EQ(maxAbsDiff(a.a_ensemble, b.a_ensemble), 0.0);
 }
@@ -443,8 +442,8 @@ TEST(SpectralROM1DReduced, FrozenSourceFixedPointIsOperatorIndependent) {
     makeRom(diag, ch.basis, 16, h);
     dir.setReducedOperator(Mdir);
     for (int step = 0; step < 60; ++step) {
-        dir.advance(60.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
-        diag.advance(60.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
+        dir.advance(60.0, 0.05, h.data(), sens.data(), nullptr);
+        diag.advance(60.0, 0.05, h.data(), sens.data(), nullptr);
     }
     const auto uk = static_cast<std::size_t>(k);
     std::vector<double> b(uk, 0.0);
@@ -488,8 +487,8 @@ TEST(SpectralROM1DReduced, GatedChainCutsTheTransientLeakUpstreamOfAFillingPool)
     const int n_steps = 40;
     for (int step = 0; step < n_steps; ++step) {
         sens[n - 1] = 4.0 * (step + 1) / n_steps;
-        dir.advance(60.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
-        sym.advance(60.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
+        dir.advance(60.0, 0.05, h.data(), sens.data(), nullptr);
+        sym.advance(60.0, 0.05, h.data(), sens.data(), nullptr);
     }
     std::vector<double> inv(n, 0.0);
     dir.computeQuantiles(h.data(), inv.data());
@@ -498,7 +497,7 @@ TEST(SpectralROM1DReduced, GatedChainCutsTheTransientLeakUpstreamOfAFillingPool)
     // fixed point (operator-independent, see the previous test).
     SpectralROM1D frozen;
     makeRom(frozen, ch.basis, 16, h);
-    for (int step = 0; step < 200; ++step) frozen.advance(60.0, 0.05, h.data(), nullptr, sens.data(), nullptr);
+    for (int step = 0; step < 200; ++step) frozen.advance(60.0, 0.05, h.data(), sens.data(), nullptr);
     frozen.computeQuantiles(h.data(), inv.data());
 
     const double w_dir = dir.q95[0] - dir.q05[0];
