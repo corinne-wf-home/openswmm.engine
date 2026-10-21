@@ -1227,6 +1227,139 @@ TEST(SpectralROM, CouplingFluxUsesROM1DHeadsPerMember) {
         << "deterministic head should give identical coupling delta for all members";
 }
 
+// Shared fixture for the 2D<->1D coupling tests below: a 2D ROM with no own
+// perturbation, a 5-node 1D ROM, one coupling point on cell 0.
+namespace {
+struct CouplingRig {
+    Fixture f;
+    GraphEigenBasis basis1d;
+    SpectralROM1D rom1d;
+    std::vector<CouplingPoint> cps;
+    explicit CouplingRig(double h2d = 0.05) {
+        f.rom.mannings_pert = 0.0;
+        f.rom.rainfall_pert = 0.0;
+        f.rom.initialize();
+        std::vector<double> h(static_cast<std::size_t>(f.rom.n_tri), h2d);
+        f.rom.seed(h.data());
+        CsrGraph L1d = make_1d_chain_for_5a(5);
+        basis1d.build(L1d, 3);
+        rom1d.basis = &basis1d;
+        rom1d.n_ensemble = f.rom.n_ensemble;
+        rom1d.mannings_pert = 0.0;
+        rom1d.runoff_pert = 0.0;
+        rom1d.initialize();
+        rom1d.full_to_active = {0, 1, 2, 3, 4};
+        CouplingPoint cp;
+        cp.cell_idx = 0; cp.vertex_idx = -1; cp.node_idx = 0;
+        cp.cd = 0.6; cp.area = 0.04; cp.is_outfall = false; cp.has_flap_gate = false;
+        cps = {cp};
+    }
+    /// Give member i a 1D head deviation of i*step at every node (any units).
+    void memberDeviation(double step) {
+        const double P00 = basis1d.P[0];
+        const auto nk1 = static_cast<std::size_t>(rom1d.n_kept);
+        for (int i = 0; i < rom1d.n_ensemble; ++i) {
+            auto ui = static_cast<std::size_t>(i);
+            for (std::size_t j = 0; j < nk1; ++j) rom1d.a_ensemble[ui * nk1 + j] = 0.0;
+            rom1d.a_ensemble[ui * nk1] = i * step / P00;   // exact at node 0
+        }
+        std::fill(rom1d.mode_active.begin(), rom1d.mode_active.end(), true);
+    }
+    double maxChange(const std::vector<double>& a0, const std::vector<double>& add0) const {
+        double w = 0.0;
+        for (std::size_t k = 0; k < a0.size(); ++k) w = std::max(w, std::abs(f.rom.a_ensemble[k] - a0[k]));
+        for (std::size_t k = 0; k < add0.size() && k < f.rom.a_add.size(); ++k)
+            w = std::max(w, std::abs(f.rom.a_add[k] - add0[k]));
+        return w;
+    }
+};
+}  // namespace
+
+// Units: the 1D ROM reconstructs heads in the engine's internal FEET while the
+// 2D mesh and node_heads are metres. A member's 1D deviation must enter the
+// exchange converted to metres (Bellinge, 2026-10-21: unconverted absolute feet
+// heads put metres of water on dry cells before any rain).
+TEST(SpectralROM, CouplingFluxConvertsRom1dFeetToMetres) {
+    const double ft = 0.3048;
+    const double head_m = 1.0;   // manhole level (m); 2D cell level is z + 0.05
+    // Run A: 1D in feet, converted by the scale.
+    CouplingRig A;
+    const double hm_a = A.f.mesh.tri_cz[0] + 0.05 + 0.30;
+    std::vector<double> ft_heads(5, hm_a / ft), m_heads(5, hm_a);
+    A.rom1d.seed(ft_heads.data());
+    A.memberDeviation(0.05 / ft);                 // 5 cm per member, expressed in feet
+    A.f.rom.applyCouplingFlux(A.cps, m_heads.data(), A.f.mesh, 10.0, &A.rom1d, ft);
+    // Run B: the same physics with the 1D ROM already in metres.
+    CouplingRig B;
+    B.rom1d.seed(m_heads.data());
+    B.memberDeviation(0.05);
+    B.f.rom.applyCouplingFlux(B.cps, m_heads.data(), B.f.mesh, 10.0, &B.rom1d, 1.0);
+    double worst = 0.0, scale = 0.0;
+    for (std::size_t k = 0; k < A.f.rom.a_add.size(); ++k) {
+        worst = std::max(worst, std::abs(A.f.rom.a_add[k] - B.f.rom.a_add[k]));
+        scale = std::max(scale, std::abs(B.f.rom.a_add[k]));
+    }
+    for (std::size_t k = 0; k < A.f.rom.a_ensemble.size(); ++k) {
+        worst = std::max(worst, std::abs(A.f.rom.a_ensemble[k] - B.f.rom.a_ensemble[k]));
+        scale = std::max(scale, std::abs(B.f.rom.a_ensemble[k]));
+    }
+    EXPECT_GT(scale, 1.0e-6) << "fixture must move the members, or the comparison proves nothing";
+    EXPECT_LT(worst, 1.0e-9 * scale) << "feet run must equal the metre run after conversion";
+    (void)head_m;
+}
+
+// Deviation form: with every member identical to the deterministic state the
+// coupling adds exactly nothing, even when the 1D ROM's own reference head
+// differs from the head the 2D step used (it lags by one routing step in the
+// engine). Before 2026-10-21 the member exchange was compared with the
+// integrator's booked flow, and on Bellinge the zero-perturbation median
+// drifted ~1 m by the storm peak.
+TEST(SpectralROM, CouplingFluxZeroPerturbationAddsNothing) {
+    CouplingRig r;
+    const double hm = r.f.mesh.tri_cz[0] + 0.05 + 0.30;
+    std::vector<double> lagged(5, (hm - 0.07) / 0.3048), now(5, hm);
+    r.rom1d.seed(lagged.data());                  // stale reference, zero deviations
+    const auto a0 = r.f.rom.a_ensemble; const auto add0 = r.f.rom.a_add;
+    for (int step = 0; step < 20; ++step)
+        r.f.rom.applyCouplingFlux(r.cps, now.data(), r.f.mesh, 10.0, &r.rom1d, 0.3048);
+    EXPECT_EQ(r.maxChange(a0, add0), 0.0);
+}
+
+// Stability: where manhole and street levels are nearly equal the orifice slope
+// dQ/dh grows like 1/sqrt|dh|, and an explicit per-step update overshoots and
+// grows. Integrated implicitly, a member whose manhole sits a fixed amount above
+// the deterministic one can never be pushed past equalisation: its cell
+// deviation stays between 0 and that 1D deviation, step after step.
+TEST(SpectralROM, CouplingFluxImplicitExchangeNeverOvershoots) {
+    CouplingRig r(0.02);
+    const double z = r.f.mesh.tri_cz[0];
+    std::vector<double> heads(5, z + 0.02 + 1.0e-4);  // manhole 0.1 mm above the street
+    r.rom1d.seed(heads.data());
+    r.memberDeviation(0.01);                          // member i: manhole i cm higher
+    const int M = r.f.rom.n_ensemble;
+    const auto nk = static_cast<std::size_t>(r.f.rom.n_kept);
+    const auto nt = static_cast<std::size_t>(r.f.rom.n_tri);
+    auto cellDev = [&](int i) {
+        double d = 0.0;
+        for (std::size_t j = 0; j < nk; ++j) {
+            d += r.f.rom.basis->P[j * nt] * r.f.rom.a_ensemble[static_cast<std::size_t>(i) * nk + j];
+            if (!r.f.rom.a_add.empty())
+                d += r.f.rom.basis->P[j * nt] * r.f.rom.a_add[static_cast<std::size_t>(i) * nk + j];
+        }
+        return d;
+    };
+    for (int step = 0; step < 400; ++step) {
+        r.f.rom.applyCouplingFlux(r.cps, heads.data(), r.f.mesh, 60.0, &r.rom1d, 1.0);
+        for (int i = 0; i < M; ++i) {
+            const double dev = cellDev(i);
+            ASSERT_TRUE(std::isfinite(dev)) << "member " << i << " step " << step;
+            ASSERT_GE(dev, -1.0e-9) << "member " << i << " step " << step;
+            ASSERT_LE(dev, 0.01 * i + 1.0e-9) << "member " << i << " step " << step;
+        }
+    }
+    EXPECT_GT(cellDev(M - 1), 1.0e-4) << "the fixture must actually move water";
+}
+
 // When full_to_active maps the coupling node to -1 (outfall),
 // applyCouplingFlux must fall back to node_heads[cp.node_idx] regardless of rom1d.
 TEST(SpectralROM, CouplingFluxFallsBackForOutfallNode) {
@@ -2097,4 +2230,84 @@ TEST(QuantileGemm2D, GemmIsDefaultAndOrderPreserved) {
         EXPECT_LE(f.rom.q05[ut], f.rom.q50[ut]) << "cell " << t;
         EXPECT_LE(f.rom.q50[ut], f.rom.q95[ut]) << "cell " << t;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Exceedance probability (flood-risk reporting): P(depth > threshold) per cell
+// ---------------------------------------------------------------------------
+
+TEST(ExceedanceProbability2D, OffByDefaultAndConsistentWithQuantiles) {
+    Fixture f(/*N=*/6, /*k=*/10, /*M=*/30, /*m_pert=*/0.25, /*r_pert=*/0.25);
+    const int n = f.rom.n_tri;
+    std::vector<double> h0(static_cast<std::size_t>(n));
+    for (int t = 0; t < n; ++t) h0[static_cast<std::size_t>(t)] = 0.08 + 0.004 * (t % 17);
+    f.rom.seed(h0.data());
+    std::vector<double> rain(static_cast<std::size_t>(n));
+    std::vector<double> h_det = h0;
+    for (int step = 0; step < 40; ++step) {
+        for (int t = 0; t < n; ++t)
+            rain[static_cast<std::size_t>(t)] = 1.0e-5 * (1.0 + std::sin(0.08 * step + 0.3 * t));
+        f.rom.advance(30.0, 6.0, rain.data(), nullptr, h_det.data());
+    }
+
+    // Off by default: nothing is allocated or reported.
+    f.rom.computeQuantiles(h_det.data());
+    EXPECT_TRUE(f.rom.p_exceed.empty());
+
+    const double M = static_cast<double>(f.rom.n_ensemble);
+    const int idx05 = std::max(0, static_cast<int>(0.05 * (M - 1.0) + 0.5));
+    const int idx95 = std::min(f.rom.n_ensemble - 1, static_cast<int>(0.95 * (M - 1.0) + 0.5));
+
+    int mixed = 0;
+    for (bool naive : {true, false}) {
+        f.rom.rom_quantile_naive = naive;
+        f.rom.exceed_depth = 0.085;   // inside the depth range so cells straddle it
+        f.rom.computeQuantiles(h_det.data());
+        ASSERT_EQ(f.rom.p_exceed.size(), static_cast<std::size_t>(n));
+        for (int t = 0; t < n; ++t) {
+            const auto ut = static_cast<std::size_t>(t);
+            const double p = f.rom.p_exceed[ut];
+            EXPECT_GE(p, 0.0);
+            EXPECT_LE(p, 1.0);
+            // Members above the threshold sit strictly above its rank, so the
+            // order statistics bound the fraction from both sides.
+            if (f.rom.q05[ut] > f.rom.exceed_depth)
+                EXPECT_GE(p, (M - idx05) / M - 1e-12) << "cell " << t;
+            if (f.rom.q95[ut] <= f.rom.exceed_depth)
+                EXPECT_LE(p, (M - 1.0 - idx95) / M + 1e-12) << "cell " << t;
+            if (!naive && p > 0.0 && p < 1.0) ++mixed;
+        }
+    }
+    EXPECT_GT(mixed, 0) << "fixture never straddled the threshold; test proves nothing";
+
+    // A threshold above every member reports exactly zero; one below, exactly one.
+    f.rom.exceed_depth = 1.0e3;
+    f.rom.computeQuantiles(h_det.data());
+    for (double p : f.rom.p_exceed) EXPECT_EQ(p, 0.0);
+    f.rom.exceed_depth = 1.0e-12;
+    f.rom.computeQuantiles(h_det.data());
+    for (int t = 0; t < n; ++t)
+        if (f.rom.q05[static_cast<std::size_t>(t)] > 1.0e-12)
+            EXPECT_EQ(f.rom.p_exceed[static_cast<std::size_t>(t)], 1.0);
+}
+
+TEST(ExceedanceProbability2D, NaiveAndGemmPathsAgreeExactly) {
+    Fixture f(/*N=*/6, /*k=*/10, /*M=*/30, /*m_pert=*/0.25, /*r_pert=*/0.25);
+    const int n = f.rom.n_tri;
+    std::vector<double> h0(static_cast<std::size_t>(n), 0.09);
+    for (int t = 0; t < n; ++t) h0[static_cast<std::size_t>(t)] += 0.003 * (t % 11);
+    f.rom.seed(h0.data());
+    std::vector<double> rain(static_cast<std::size_t>(n), 1.2e-5);
+    std::vector<double> h_det = h0;
+    for (int step = 0; step < 30; ++step)
+        f.rom.advance(30.0, 6.0, rain.data(), nullptr, h_det.data());
+    f.rom.exceed_depth = 0.1;
+    f.rom.rom_quantile_naive = true;
+    f.rom.computeQuantiles(h_det.data());
+    const std::vector<double> naive = f.rom.p_exceed;
+    f.rom.rom_quantile_naive = false;
+    f.rom.computeQuantiles(h_det.data());
+    // Member values agree to ~1e-12; a count can only differ if a member sits
+    // within that of the threshold, which this fixture does not construct.
+    EXPECT_EQ(naive, f.rom.p_exceed);
 }

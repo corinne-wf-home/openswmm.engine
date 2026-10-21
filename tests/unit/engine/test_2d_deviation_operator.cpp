@@ -290,6 +290,148 @@ TEST(DeviationOperator2D, AdvectionContributesAntisymmetricPart) {
 }
 
 // ============================================================================
+// 3b. Energy-stable form (skew advection in the volume inner product)
+// ============================================================================
+
+namespace {
+// Structured mesh with x stretched quadratically so cell areas vary ~3x, and a
+// flow field converging on the centre -- the regime (ponds) where the plain
+// projection of upwind advection is unstable.
+MeshData makeStretchedMesh(int N, double domain_m = 10.0) {
+    MeshData mesh = makeStructuredMesh(N, domain_m);
+    for (std::size_t v = 0; v < mesh.vx.size(); ++v) {
+        const double x = mesh.vx[v] / domain_m;             // 0..1
+        mesh.vx[v] = domain_m * (0.25 * x + 0.75 * x * x);  // dx grows 4x across
+    }
+    buildMeshTopology(mesh);
+    return mesh;
+}
+
+// G = Pᵀ·diag(A)·P
+std::vector<double> volumeGram(const MeshEigenBasis& basis, const MeshData& mesh) {
+    const int k = basis.num_kept, n = mesh.n_triangles();
+    std::vector<double> G(static_cast<std::size_t>(k) * k, 0.0);
+    for (int p = 0; p < k; ++p)
+        for (int q = 0; q < k; ++q) {
+            double s = 0.0;
+            for (int t = 0; t < n; ++t)
+                s += basis.P[static_cast<std::size_t>(p) * n + t] * mesh.tri_area[static_cast<std::size_t>(t)]
+                   * basis.P[static_cast<std::size_t>(q) * n + t];
+            G[static_cast<std::size_t>(p) * k + q] = s;
+        }
+    return G;
+}
+
+// Smallest eigenvalue of S = sym(G·M), the energy form of the reduced operator
+// in the volume inner product (negative = a growing direction exists).
+// Cyclic Jacobi on the k×k symmetric matrix; k is O(10-100).
+double minEnergyEig(const std::vector<double>& G, const std::vector<double>& M, int k) {
+    const auto K = static_cast<std::size_t>(k);
+    std::vector<double> GM(K * K, 0.0), S(K * K, 0.0);
+    for (std::size_t p = 0; p < K; ++p)
+        for (std::size_t q = 0; q < K; ++q) {
+            double s = 0.0;
+            for (std::size_t r = 0; r < K; ++r) s += G[p * K + r] * M[r * K + q];
+            GM[p * K + q] = s;
+        }
+    for (std::size_t p = 0; p < K; ++p)
+        for (std::size_t q = 0; q < K; ++q) S[p * K + q] = 0.5 * (GM[p * K + q] + GM[q * K + p]);
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off = 0.0;
+        for (std::size_t p = 0; p < K; ++p)
+            for (std::size_t q = p + 1; q < K; ++q) off += S[p * K + q] * S[p * K + q];
+        if (off < 1e-30) break;
+        for (std::size_t p = 0; p < K; ++p)
+            for (std::size_t q = p + 1; q < K; ++q) {
+                const double apq = S[p * K + q];
+                if (std::fabs(apq) < 1e-300) continue;
+                const double theta = (S[q * K + q] - S[p * K + p]) / (2.0 * apq);
+                const double t = (theta >= 0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+                const double c = 1.0 / std::sqrt(t * t + 1.0), sn = t * c;
+                for (std::size_t r = 0; r < K; ++r) {   // rotate columns p, q
+                    const double arp = S[r * K + p], arq = S[r * K + q];
+                    S[r * K + p] = c * arp - sn * arq;
+                    S[r * K + q] = sn * arp + c * arq;
+                }
+                for (std::size_t r = 0; r < K; ++r) {   // rotate rows p, q
+                    const double apr = S[p * K + r], aqr = S[q * K + r];
+                    S[p * K + r] = c * apr - sn * aqr;
+                    S[q * K + r] = sn * apr + c * aqr;
+                }
+            }
+    }
+    double mn = 1e300;
+    for (std::size_t p = 0; p < K; ++p) mn = std::min(mn, S[p * K + p]);
+    return mn;
+}
+} // namespace
+
+TEST(DeviationOperator2D, EnergyStableFormHasNoGrowingModeOnConvergingFlow) {
+    auto mesh = makeStretchedMesh(10);
+    MeshEigenBasis basis;
+    ASSERT_TRUE(basis.build(mesh, 24));
+    const int k = basis.num_kept, nt = mesh.n_triangles();
+    double cx = 0.0;
+    for (int t = 0; t < nt; ++t) cx += mesh.tri_cx[static_cast<std::size_t>(t)];
+    cx /= nt;
+    // Flow converging on the line x = cx at 1 m/s from both sides: a sink line,
+    // the sharpest convergence a cell-centred field can hold (Bellinge's ponds).
+    std::vector<double> u(static_cast<std::size_t>(nt)), v(static_cast<std::size_t>(nt), 0.0);
+    for (int t = 0; t < nt; ++t)
+        u[static_cast<std::size_t>(t)] = (mesh.tri_cx[static_cast<std::size_t>(t)] < cx) ? 1.0 : -1.0;
+    const auto G = volumeGram(basis, mesh);
+
+    DeviationOperator2D plain;
+    plain.alpha_par = 0.62; plain.alpha_perp = 2.0; plain.c_factor = 5.0 / 3.0;
+    ASSERT_TRUE(plain.assemble(mesh, basis, 1.0e-3, nullptr, u.data(), v.data()));
+    // Energy form of the plain operator in the plain inner product: xᵀ·sym(M)·x.
+    std::vector<double> I(static_cast<std::size_t>(k) * k, 0.0);
+    for (int i = 0; i < k; ++i) I[static_cast<std::size_t>(i) * k + i] = 1.0;
+    const double plain_min = minEnergyEig(I, plain.M, k);
+    EXPECT_LT(plain_min, -1e-6)
+        << "fixture must make the plain upwind projection lose energy stability, or this test proves nothing"
+        << " (min eig " << plain_min << ")";
+
+    DeviationOperator2D stable;
+    stable.alpha_par = 0.62; stable.alpha_perp = 2.0; stable.c_factor = 5.0 / 3.0;
+    stable.skew_advection = true;
+    stable.volume_inner_product = true;
+    ASSERT_TRUE(stable.assemble(mesh, basis, 1.0e-3, nullptr, u.data(), v.data()));
+    ASSERT_EQ(stable.GinvArea.size(), static_cast<std::size_t>(k) * k);
+    const double stable_min = minEnergyEig(G, stable.M, k);
+    EXPECT_GE(stable_min, -1e-10 * G[0])
+        << "energy form of the stable operator must be non-negative for every direction (min eig "
+        << stable_min << ")";
+
+    // GinvArea really inverts the volume Gram.
+    double worst = 0.0;
+    for (int p = 0; p < k; ++p)
+        for (int q = 0; q < k; ++q) {
+            double s = 0.0;
+            for (int r = 0; r < k; ++r) s += stable.GinvArea[static_cast<std::size_t>(p) * k + r] * G[static_cast<std::size_t>(r) * k + q];
+            worst = std::max(worst, std::fabs(s - (p == q ? 1.0 : 0.0)));
+        }
+    EXPECT_LT(worst, 1e-9);
+}
+
+TEST(DeviationOperator2D, VolumeInnerProductReducesToPlainOnUniformAreas) {
+    auto mesh = makeStructuredMesh(6);
+    MeshEigenBasis basis;
+    ASSERT_TRUE(basis.build(mesh, 8));
+    const int nt = mesh.n_triangles();
+    std::vector<double> u(static_cast<std::size_t>(nt), 0.4), v(static_cast<std::size_t>(nt), -0.2);
+    DeviationOperator2D a, b;
+    a.alpha_par = b.alpha_par = 0.62; a.alpha_perp = b.alpha_perp = 2.0; a.c_factor = b.c_factor = 0.0;
+    ASSERT_TRUE(a.assemble(mesh, basis, 1.0, nullptr, u.data(), v.data()));
+    b.volume_inner_product = true;
+    ASSERT_TRUE(b.assemble(mesh, basis, 1.0, nullptr, u.data(), v.data()));
+    // Uniform areas: G = A·I, so G⁻¹·Pᵀ·A·L·P = Pᵀ·L·P exactly (to round-off).
+    double scale = 0.0;
+    for (double m : a.M) scale = std::max(scale, std::fabs(m));
+    EXPECT_LT(maxAbsDiff(a.M, b.M), 1e-10 * scale);
+}
+
+// ============================================================================
 // 4. SpectralROM matrix path ≡ legacy diagonal path at the coincidence point
 // ============================================================================
 

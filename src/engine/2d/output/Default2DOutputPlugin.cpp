@@ -145,6 +145,21 @@ void Default2DOutputPlugin::writeFaceEnvelope(hid_t ds, const double* data) {
     checkpointWriteStatus(H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, data));
 }
 
+void Default2DOutputPlugin::ensureRomExceedDataset(double threshold_m) {
+    if (ds_face_rom_pexceed_ != H5I_INVALID_HID) return;
+    hsize_t zero2[2]      = { 0, n_faces_ };
+    hsize_t face_chunk[2] = { 1, n_faces_ };
+    hid_t ds = createUnlimitedDataset("Mesh2_face_rom_p_exceed", 2, zero2, face_chunk);
+    writeStringAttr(ds, "long_name",
+                    "probability that overland depth exceeds threshold_depth_m "
+                    "(fraction of 2D uncertainty ROM members)");
+    writeStringAttr(ds, "units", "1");
+    writeStringAttr(ds, "mesh", "Mesh2");
+    writeStringAttr(ds, "location", "face");
+    writeDoubleAttr(ds, "threshold_depth_m", threshold_m);
+    ds_face_rom_pexceed_ = ds;
+}
+
 void Default2DOutputPlugin::ensureRomQuantileDatasets() {
     if (ds_face_rom_q50_ != H5I_INVALID_HID) return;  // created once, on first use
     hsize_t zero2[2]      = { 0, n_faces_ };
@@ -1012,6 +1027,10 @@ int Default2DOutputPlugin::update(const SimulationSnapshot& snap) {
         extendAndWrite2D(ds_face_rom_q05_, snap.surface_rom_q05.data(), n_faces_);
         extendAndWrite2D(ds_face_rom_q50_, snap.surface_rom_q50.data(), n_faces_);
         extendAndWrite2D(ds_face_rom_q95_, snap.surface_rom_q95.data(), n_faces_);
+        if (snap.surface_rom_p_exceed.size() == n_faces_) {
+            ensureRomExceedDataset(snap.surface_rom_exceed_depth);
+            extendAndWrite2D(ds_face_rom_pexceed_, snap.surface_rom_p_exceed.data(), n_faces_);
+        }
     }
 
     if(checkpoint_write_failed_)return 1;
@@ -1363,6 +1382,7 @@ void Default2DOutputPlugin::closeDatasets() noexcept {
     closeDS(ds_face_rom_q05_);
     closeDS(ds_face_rom_q50_);
     closeDS(ds_face_rom_q95_);
+    closeDS(ds_face_rom_pexceed_);
     closeDS(ds_face_max_depth_);
     closeDS(ds_face_max_velocity_);
     closeDS(ds_face_max_continuity_err_);

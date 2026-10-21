@@ -157,9 +157,17 @@ struct SpectralROM {
     /// a_add[i * n_kept + j]; zero and unused otherwise.
     std::vector<double> a_add;
 
-    /// Two-channel relative mode: the PLAIN reduced operator (k×k, 1/s) the
+    /// Two-channel relative mode: the reduced operator (k×k, 1/s) the
     /// additive channel propagates with. Empty = single-channel.
-    void setAdditiveOperator(const std::vector<double>& M_in);
+    /// @param Ginv_in  Optional k×k inverse of the volume Gram Pᵀ·A·P when
+    ///                 M_in was assembled in the volume inner product
+    ///                 (DeviationOperator2D::volume_inner_product). The
+    ///                 coupling exchange is then projected consistently:
+    ///                 a volume ΔV at cell c becomes G⁻¹·P[:,c]·ΔV, so one
+    ///                 cubic metre has the same modal footprint whatever the
+    ///                 size of the cell it enters. Empty = plain P[:,c]·ΔV/A_c.
+    void setAdditiveOperator(const std::vector<double>& M_in,
+                             const std::vector<double>& Ginv_in = {});
 
     /// True when relative mode runs the two-channel split.
     bool twoChannel() const noexcept {
@@ -246,6 +254,11 @@ struct SpectralROM {
     std::vector<double> q05;   ///< 5th-percentile depth per cell (m).
     std::vector<double> q50;   ///< Median depth per cell (m).
     std::vector<double> q95;   ///< 95th-percentile depth per cell (m).
+    /// Reporting threshold (m). > 0 makes computeQuantiles() also fill p_exceed.
+    double exceed_depth = 0.0;
+    /// Fraction of members with depth strictly above exceed_depth, per cell
+    /// (empty when exceed_depth <= 0). Empirical over the M members.
+    std::vector<double> p_exceed;
 
     // -------------------------------------------------------------------------
     // Coupling uncertainty diagnostics (filled by applyCouplingFlux())
@@ -389,27 +402,32 @@ struct SpectralROM {
      *                   rom1d->full_to_active must be populated for the lookup.
      */
     /**
-     * @param q_det  Optional per-point deterministic exchange flow (m³/s,
-     *               + = 2D→1D drain), indexed like @p cps. When supplied it
-     *               replaces the internally computed orifice estimate as the
-     *               reference each member's deviation is taken against.
+     * @param rom1d_head_scale  Factor converting @p rom1d heads into the 2D
+     *               length unit (metres). The 1D ROM reconstructs heads in the
+     *               engine's internal FEET, while @p node_heads and the mesh are
+     *               metres, so the router passes 0.3048.
      *
-     *               Prefer supplying it. The internal estimate re-derives Q_det
-     *               from the orifice formula, but the integrator applies its own
-     *               clamps and availability limits during the step, so the two
-     *               can disagree — and any disagreement is a spurious deviation
-     *               applied identically to every member, which walks the
-     *               ensemble median off the deterministic run. Passing the
-     *               exchange the integrator actually booked keeps the nominal
-     *               member at exactly zero deviation, which is what makes the
-     *               median track the deterministic solution by construction.
+     * Deviation form, kept exact: each member's exchange is compared with the
+     * SAME exchange law evaluated at the deterministic state, and the member's
+     * 1D head is the current deterministic head plus that member's 1D
+     * deviation. Identical members therefore receive exactly zero deviation.
+     * (Comparing against the exchange the 2D integrator booked, as before
+     * 2026-10-21, leaks every difference between the integrator's clamps and
+     * this law into all members alike: on Bellinge the zero-perturbation
+     * median drifted 4 cm before rain and ~1 m by the storm peak.)
+     *
+     * Each exchange is integrated IMPLICITLY over the step: the cell level at
+     * the end of the step satisfies h_new = h_old - Q(h_new)·dt/A. An explicit
+     * update overshoots where the manhole and street levels are close (the
+     * orifice slope dQ/dh grows like 1/sqrt|dh|), and on Bellinge that grew
+     * without bound after the storm peak.
      */
     void applyCouplingFlux(const std::vector<CouplingPoint>& cps,
                            const double* node_heads,
                            const MeshData& mesh,
                            double dt,
                            const openswmm::uncertainty::SpectralROM1D* rom1d = nullptr,
-                           const double* q_det = nullptr);
+                           double rom1d_head_scale = 1.0);
 
     /**
      * @brief Supply per-member runoff rates (m/s) from RunoffEnsemble.
@@ -639,6 +657,10 @@ struct SpectralROM {
 
     /// True when per-member reduced operators are installed (PR H15).
     bool hasPerMemberOperators() const noexcept { return !reduced_M_members_.empty(); }
+    /// Diagnostics: the installed reduced operators (k×k row-major, 1/s; empty
+    /// when not installed). reducedOperatorAdd() is the additive channel's.
+    const std::vector<double>& reducedOperator() const noexcept { return reduced_M_; }
+    const std::vector<double>& reducedOperatorAdd() const noexcept { return reduced_M_add_; }
 
 private:
     std::vector<double> reduced_M_;   ///< k×k row-major (1/s); empty = diagonal path.
@@ -652,6 +674,8 @@ private:
     std::vector<double> reduced_A_;
     openswmm::uncertainty::BatchPropagator reduced_batch_;
     std::vector<double> reduced_M_add_;   ///< additive-channel operator (k×k); empty = off
+    std::vector<double> add_ginv_;        ///< volume-Gram inverse for the additive projection; empty = plain
+    std::vector<double> add_proj_buf_;    ///< k scratch: G⁻¹·P[:,c]·A_c for one coupling point
     std::vector<double> reduced_A_add_;
     std::vector<double> reduced_g_add_;
     openswmm::uncertainty::BatchPropagator reduced_batch_add_;

@@ -216,7 +216,7 @@ ThresholdCsvSummary summarizeThresholdCsv(const fs::path& csv_path) {
     std::string line;
     std::getline(f, line);
     s.header_ok = (line == "time_s,node_name,threshold_kind,threshold_value,"
-                           "p_exceed,p_ctrl,modality_flag");
+                           "p_exceed,p_ctrl,modality_flag,rim_value,p_rim");
 
     double first_time = 0.0;
     bool   have_first = false;

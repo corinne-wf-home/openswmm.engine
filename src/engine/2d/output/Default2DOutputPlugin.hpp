@@ -328,6 +328,7 @@ private:
     hid_t ds_face_rom_q05_         = H5I_INVALID_HID;
     hid_t ds_face_rom_q50_         = H5I_INVALID_HID;
     hid_t ds_face_rom_q95_         = H5I_INVALID_HID;
+    hid_t ds_face_rom_pexceed_     = H5I_INVALID_HID; ///< optional: P(depth > threshold)
 
     // Cumulative envelopes — fixed [nFace], overwritten in place each update()
     hid_t ds_face_max_depth_          = H5I_INVALID_HID;
@@ -362,6 +363,8 @@ private:
     void writeFaceEnvelope(hid_t ds, const double* data);
     /// Create the three optional per-face 2D ROM quantile datasets on demand.
     void ensureRomQuantileDatasets();
+    /// Create the optional exceedance-probability dataset on demand.
+    void ensureRomExceedDataset(double threshold_m);
 };
 
 } // namespace openswmm::twoD

@@ -580,8 +580,18 @@ public:
     const SpectralROM* rom() const noexcept { return rom_.get(); }
     SpectralROM*       rom()       noexcept { return rom_.get(); }
 
+    /// Recompute the ROM quantiles (and exceedance probability) from the
+    /// current deterministic depth. The engine calls this at every report
+    /// boundary so the saved bands belong to the frame they are written with.
+    void refreshROMQuantiles();
+
     /// The eigenbasis the ROM projects onto (null until initialize()).
     const MeshEigenBasis* romBasis() const noexcept { return rom_basis_.get(); }
+
+    /// Diagnostics for operator probes: the grounding weights the reduced
+    /// operator and basis share, and the diffusivity scale it is assembled with.
+    const std::vector<double>& romGroundWeights() const noexcept { return rom_ground_w_; }
+    double romDiffusivityScale() const { return computeKEff() * options_.rom_diffusivity_scale; }
 
     /// Register the 1D network ROM so coupling fluxes use each member's own
     /// reconstructed 1D head instead of the shared deterministic head.
@@ -847,16 +857,6 @@ private:
     /// field. Seeding is deferred to the first advance so the ROM anchors on
     /// state the solver has actually stepped, matching h_det's definition.
     bool rom_seeded_ = false;
-
-    /// Sim time since the last quantile computation (report-scale cadence).
-    /// Quantiles are an O(M·n log M) sort — computing them every step would
-    /// dwarf the ROM's own O(M·k) advance, and nothing reads them between
-    /// report boundaries.
-    double rom_quantile_elapsed_ = 0.0;
-
-    /// Scratch: deterministic coupling flow (m³/s) per live coupling point,
-    /// derived from the solver's published ∫Q dt. Reused across steps.
-    std::vector<double> rom_coupling_q_det_;
 
     /// Scratch: 1D node heads converted to the 2D metre frame. Reused.
     std::vector<double> rom_node_head_buf_;

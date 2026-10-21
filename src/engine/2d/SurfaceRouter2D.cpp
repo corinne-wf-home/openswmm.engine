@@ -2234,13 +2234,13 @@ void SurfaceRouter2D::initROM(SimulationContext& ctx) {
     rom->mannings_pert       = options_.rom_mannings_pert;
     rom->rainfall_pert       = options_.rom_rainfall_pert;
     rom->cd_pert             = options_.rom_cd_pert;
+    rom->exceed_depth        = options_.rom_exceed_depth;
     rom->mode_drop_threshold = options_.rom_mode_drop_threshold;
     rom->initialize();
     if (!rom->is_ready()) return;
 
     rom_basis_ = std::move(basis);
     rom_       = std::move(rom);
-    rom_quantile_elapsed_ = 0.0;
 }
 
 
@@ -2352,12 +2352,7 @@ void SurfaceRouter2D::applyROMCoupling(SimulationContext& ctx, double dt) {
     if (!rom_ || !rom_seeded_ || dt <= 0.0) return;
     if (node_coupling_points_.empty()) return;
 
-    // Pass the LIVE point list, not coupling_points_: the ROM skips outfalls
-    // anyway, and node_coupling_points_ is exactly the ordering the marcher
-    // publishes its exchange in — so exch[k] lines up with point k with no
-    // index mapping to get wrong.
-    const std::vector<double>& exch = solver_->last_coupling_exchange();
-
+    // The live point list: the ROM skips outfalls anyway.
     // 1D node heads in the 2D metre frame. Used as the shared 1D head wherever
     // the 1D ROM has no per-member reconstruction for the node.
     const auto nn = static_cast<std::size_t>(ctx.nodes.count());
@@ -2365,23 +2360,8 @@ void SurfaceRouter2D::applyROMCoupling(SimulationContext& ctx, double dt) {
     for (std::size_t i = 0; i < nn; ++i)
         rom_node_head_buf_[i] = ctx.nodes.head[i] * options_.len_1d_to_2d;
 
-    // The marcher integrated ∫Q dt (m³) per live point over the batch it just
-    // advanced; the mean rate over the batch is the deterministic reference the
-    // per-member deviations are taken against. This is the windowless per-step
-    // path: the deterministic side books every batch, so the ensemble does too.
-    // There is no macro-window to smooth over and no coupling queue involved —
-    // the queue exists to spread the 1D *delivery*, not to define the exchange.
-    const double* q_det = nullptr;
-    if (exch.size() >= node_coupling_points_.size()) {
-        rom_coupling_q_det_.assign(node_coupling_points_.size(), 0.0);
-        const double inv_dt = 1.0 / dt;
-        for (std::size_t k = 0; k < node_coupling_points_.size(); ++k)
-            rom_coupling_q_det_[k] = exch[k] * inv_dt;
-        q_det = rom_coupling_q_det_.data();
-    }
-
     rom_->applyCouplingFlux(node_coupling_points_, rom_node_head_buf_.data(),
-                            mesh_, dt, rom1d_, q_det);
+                            mesh_, dt, rom1d_, options_.len_1d_to_2d);
 }
 
 
@@ -2409,12 +2389,19 @@ void SurfaceRouter2D::refreshROMOperator() {
     // operator; the Manning channel with the depth-weighted Galerkin one.
     rom_operator_.similarity_floor = rom_->relative_depth_floor;
     if (rom_->relative_deviation) {
+        // Energy-stable form for the additive channel (see the dials' note in
+        // DeviationOperator2D.hpp): the plain projection of upwind advection
+        // grew without bound where Bellinge's flow converges into ponds.
         rom_operator_.similarity_h = nullptr;
-        if (!rom_operator_.assemble(mesh_, *rom_basis_, D_scale, state_.depth.data(),
-                                    state_.face_vx.data(), state_.face_vy.data(),
-                                    rom_ground_w_.data()))
-            return;
-        rom_->setAdditiveOperator(rom_operator_.M);
+        rom_operator_.skew_advection = true;
+        rom_operator_.volume_inner_product = true;
+        const bool ok_add = rom_operator_.assemble(mesh_, *rom_basis_, D_scale, state_.depth.data(),
+                                                   state_.face_vx.data(), state_.face_vy.data(),
+                                                   rom_ground_w_.data());
+        rom_operator_.skew_advection = false;
+        rom_operator_.volume_inner_product = false;
+        if (!ok_add) return;
+        rom_->setAdditiveOperator(rom_operator_.M, rom_operator_.GinvArea);
     } else {
         rom_->setAdditiveOperator({});
     }
@@ -2492,18 +2479,15 @@ void SurfaceRouter2D::advanceROM(SimulationContext& ctx, double dt) {
 
     applyROMCoupling(ctx, dt);
     maybeReseedROM(sim_time_);
+}
 
-    // Quantiles are an O(M·n log M) sort per call and nothing reads them
-    // between report boundaries — match the output cadence, not the step rate.
-    rom_quantile_elapsed_ += dt;
-    const double report_dt = ctx.options.report_step > 0.0
-                                 ? ctx.options.report_step
-                                 : 30.0;
-    if (rom_quantile_elapsed_ >= report_dt) {
-        rom_->computeQuantiles(state_.depth.data(),
-                               options_.rom_parametric_tails);
-        rom_quantile_elapsed_ = 0.0;
-    }
+void SurfaceRouter2D::refreshROMQuantiles() {
+    // Called by the engine at each report boundary, against the depth the
+    // report writes. An own elapsed-time cadence drifted off the report frames
+    // (up to a full report step stale; on Bellinge's rising limb the median
+    // then lagged the written depth by ~2 m).
+    if (!rom_ || !rom_seeded_) return;
+    rom_->computeQuantiles(state_.depth.data(), options_.rom_parametric_tails);
 }
 #endif // OPENSWMM_HAS_2D
 

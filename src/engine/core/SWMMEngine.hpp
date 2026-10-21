@@ -720,6 +720,8 @@ private:
         double head = 0.0;      ///< Absolute head at which the node crosses
         bool   has_ctrl = false;///< Node is a sensor in a [CONTROLS] premise
         double ctrl_head = 0.0; ///< That rule's setpoint as an absolute head
+        bool   has_rim = false; ///< Node has a MaxDepth (rim) above its invert
+        double rim_head = 0.0;  ///< Absolute head at which the node floods
     };
     std::vector<Rom1dThreshold> rom1d_thresholds_;
     std::ofstream rom_threshold_csv_;      ///< PR H10 <rpt>.rom_threshold.csv

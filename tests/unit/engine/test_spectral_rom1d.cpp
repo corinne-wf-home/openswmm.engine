@@ -1850,6 +1850,52 @@ TEST(DeviationForm, ZeroPerturbationIsExact) {
     }
 }
 
+// A spilling node (pinned) reconstructs to the deterministic head in every
+// member; every other node is bit-identical to the unpinned run.
+TEST(DeviationForm, PinnedNodesReconstructToDeterministicHead) {
+    ROM1DFixture f;
+    f.rom.mannings_pert = 0.2;
+    f.rom.runoff_pert   = 0.0;
+    f.rom.initialize();
+    auto h0 = f.bump_head();
+    f.rom.seed(h0.data());
+    std::vector<double> h_det(static_cast<std::size_t>(f.N));
+    for (int step = 0; step < 60; ++step) {
+        for (int i = 0; i < f.N; ++i)
+            h_det[static_cast<std::size_t>(i)] = h0[static_cast<std::size_t>(i)] * (1.0 + 0.5 * std::sin(0.05 * step + 0.3 * i));
+        f.rom.advance(15.0, 0.1, h_det.data(), h_det.data());
+    }
+    const int n = f.rom.n_nodes;
+    f.rom.computeQuantiles(h_det.data(), nullptr);
+    const std::vector<double> q05 = f.rom.q05, q50 = f.rom.q50, q95 = f.rom.q95;
+    double spread = 0.0;
+    for (int i = 0; i < n; ++i) spread = std::max(spread, q95[static_cast<std::size_t>(i)] - q05[static_cast<std::size_t>(i)]);
+    ASSERT_GT(spread, 1.0e-6) << "fixture must have a band to pin, or the test proves nothing";
+
+    std::vector<char> pinned(static_cast<std::size_t>(n), 0);
+    const int pin = n / 2;
+    pinned[static_cast<std::size_t>(pin)] = 1;
+    f.rom.setPinnedNodes(&pinned);
+    f.rom.computeQuantiles(h_det.data(), nullptr);
+    for (int i = 0; i < n; ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        if (i == pin) {
+            EXPECT_EQ(f.rom.q05[ui], h_det[ui]);
+            EXPECT_EQ(f.rom.q50[ui], h_det[ui]);
+            EXPECT_EQ(f.rom.q95[ui], h_det[ui]);
+            for (int m = 0; m < f.rom.n_ensemble; ++m)
+                EXPECT_EQ(f.rom.reconstructHead(m, i), std::max(f.rom.detHead(i), 0.0));
+        } else {
+            EXPECT_EQ(f.rom.q05[ui], q05[ui]) << "node " << i;
+            EXPECT_EQ(f.rom.q50[ui], q50[ui]) << "node " << i;
+            EXPECT_EQ(f.rom.q95[ui], q95[ui]) << "node " << i;
+        }
+    }
+    f.rom.setPinnedNodes(nullptr);
+    f.rom.computeQuantiles(h_det.data(), nullptr);
+    for (int i = 0; i < n; ++i) EXPECT_EQ(f.rom.q95[static_cast<std::size_t>(i)], q95[static_cast<std::size_t>(i)]);
+}
+
 TEST(DeviationForm, MedianTracksDeterministic) {
     // pert = 0.2, M = 50: after 50 steps the median stays bracketed well
     // inside the spread around the deterministic reference (no drift).

@@ -1225,6 +1225,10 @@ std::string parse2DROMLine(const std::vector<std::string>& tokens,
         int v = tryParseInt(val, ok);
         if (!ok || v < 1) return "MODES must be integer >= 1";
         opts.rom_modes = v;
+    } else if (iequals(key, "EXCEED_DEPTH")) {
+        double v = tryParseDouble(val, ok);
+        if (!ok || v < 0.0) return "EXCEED_DEPTH must be >= 0 (metres; 0 = off)";
+        opts.rom_exceed_depth = v;
     } else if (iequals(key, "MANNINGS_PERT")) {
         double v = tryParseDouble(val, ok);
         if (!ok || v < 0.0) return "MANNINGS_PERT must be >= 0";

@@ -349,11 +349,15 @@ void SpectralROM::seed(const double* h_full) {
 // advance
 // ============================================================================
 
-void SpectralROM::setAdditiveOperator(const std::vector<double>& M_in) {
+void SpectralROM::setAdditiveOperator(const std::vector<double>& M_in,
+                                      const std::vector<double>& Ginv_in) {
     const auto kk = static_cast<std::size_t>(n_kept) * static_cast<std::size_t>(n_kept);
     if (!M_in.empty() && M_in.size() != kk)
         throw std::invalid_argument("SpectralROM::setAdditiveOperator: size mismatch");
+    if (!Ginv_in.empty() && Ginv_in.size() != kk)
+        throw std::invalid_argument("SpectralROM::setAdditiveOperator: Gram size mismatch");
     reduced_M_add_ = M_in;
+    add_ginv_ = M_in.empty() ? std::vector<double>{} : Ginv_in;
 }
 
 void SpectralROM::setRelativeGram(const std::vector<double>& Ginv) {
@@ -954,6 +958,14 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
     int idx50 = static_cast<int>(0.50 * (M - 1.0) + 0.5);
     int idx95 = std::min(n_ensemble - 1, static_cast<int>(0.95 * (M - 1.0) + 0.5));
 
+    const bool want_exceed = exceed_depth > 0.0;
+    if (want_exceed) p_exceed.assign(nt, 0.0); else p_exceed.clear();
+    auto exceedFraction = [&](const double* row) {
+        int n = 0;
+        for (std::size_t i = 0; i < M_sz; ++i) if (row[i] > exceed_depth) ++n;
+        return static_cast<double>(n) / static_cast<double>(M_sz);
+    };
+
     // Log-normal parametric upper tail helper (order-independent: a plain
     // sum over all M values, so it works identically whether the row is
     // fully sorted, nth_element-selected, or in raw reconstruction order).
@@ -1002,6 +1014,7 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
                 sort_buf_[static_cast<std::size_t>(i)] = std::max(h, 0.0);
             }
 
+            if (want_exceed) p_exceed[t] = exceedFraction(sort_buf_.data());
             // Sort to extract quantiles
             std::sort(sort_buf_.begin(), sort_buf_.end());
 
@@ -1052,6 +1065,8 @@ void SpectralROM::computeQuantiles(const double* h_det, bool parametric_tails) {
                 row[i] = std::max(h_det_t + row[i], 0.0);
         }
 
+        if (want_exceed) p_exceed[t] = exceedFraction(row);
+
         // Three independent std::nth_element selections instead of a full
         // sort: no downstream consumer needs the whole row in sorted order
         // (unlike SpectralROM1D::computeQuantiles(), whose sortedMemberValues()
@@ -1080,7 +1095,7 @@ void SpectralROM::applyCouplingFlux(
     const MeshData& mesh,
     double dt,
     const openswmm::uncertainty::SpectralROM1D* rom1d,
-    const double* q_det)
+    double rom1d_head_scale)
 {
     if (!is_ready() || cps.empty() || dt <= 0.0) return;
 
@@ -1088,7 +1103,6 @@ void SpectralROM::applyCouplingFlux(
     auto nk = static_cast<std::size_t>(n_kept);
 
     constexpr double G2     = 2.0 * 9.80665;
-    constexpr double dh_eps = 1.0e-12;
 
     // Initialise diagnostic output: 0.0 for all coupling points (outfalls stay 0).
     const auto n_cps = cps.size();
@@ -1104,27 +1118,42 @@ void SpectralROM::applyCouplingFlux(
         double tri_area = mesh.tri_area[ci];
         if (tri_area < 1.0e-30) continue;
 
-        // Orifice discharge (no Manning dependence): Q = Cd·mult · A · sign(dh)·sqrt(2g|dh|),
-        // capped by the draining depth so it cannot pull a cell below zero.
-        auto orifice_Q = [&](double h_2d, double h_1d, double cd_mult_i) -> double {
-            double dh = (cell_z + h_2d) - h_1d;
-            if (std::abs(dh) < dh_eps) return 0.0;
-            double sign = (dh > 0.0) ? 1.0 : -1.0;
-            double Q = sign * cp.cd * cd_mult_i * cp.area * std::sqrt(G2 * std::abs(dh));
-            if (Q > 0.0) Q = std::min(Q, h_2d * tri_area / dt);
-            return Q;
+        // Orifice exchange over one step, integrated implicitly (no Manning
+        // dependence): find the cell level h_new at the end of the step with
+        //   h_new = h_old - Q(h_new)·dt/A,  Q(h) = Cd·mult·a·sign(dh)·sqrt(2g|dh|),
+        //   dh = (z + h) - h_1d  (Q > 0 drains the surface into the pipe),
+        // and return the mean rate Q = (h_old - h_new)·A/dt. The residual is
+        // monotone in h_new, so the root is bracketed between h_old and the
+        // level where dh = 0 (or zero depth) and bisection always converges;
+        // a fixed iteration count keeps the result a pure function of its
+        // inputs, so identical members get identical exchanges. The level can
+        // only move towards equalisation and never past it, so the update is
+        // stable for any dt, unlike the explicit form whose slope dQ/dh grows
+        // without bound as dh -> 0.
+        auto orifice_Q = [&](double h_old, double h_1d, double cd_mult_i) -> double {
+            const double c = cp.cd * cd_mult_i * cp.area;
+            if (c <= 0.0) return 0.0;
+            const double h_eq = h_1d - cell_z;          // level where dh = 0
+            auto resid = [&](double h) {
+                const double dh = (cell_z + h) - h_1d;
+                const double q  = (dh >= 0.0 ? 1.0 : -1.0) * c * std::sqrt(G2 * std::abs(dh));
+                return h - h_old + q * dt / tri_area;
+            };
+            double lo, hi;
+            if (h_old >= h_eq) { lo = std::max(h_eq, 0.0); hi = h_old; }   // draining
+            else               { lo = h_old;               hi = h_eq;  }   // inflow
+            if (resid(lo) > 0.0) return (h_old - lo) * tri_area / dt;     // empties the cell
+            for (int it = 0; it < 60; ++it) {
+                const double mid = 0.5 * (lo + hi);
+                if (resid(mid) > 0.0) hi = mid; else lo = mid;
+            }
+            return (h_old - 0.5 * (lo + hi)) * tri_area / dt;
         };
 
-        // Deterministic reference flux. The deterministic exchange is already
-        // inside h_det via the coupling pipeline, so only Q_i − Q_det is applied
-        // to each member. Prefer the caller's measured value — what the
-        // integrator actually booked — over re-deriving it from the orifice
-        // formula, which ignores the clamps the integrator applied. See the
-        // q_det note on the declaration.
+        // Deterministic reference: the same law at the deterministic state.
         const double h_2d_det = std::max(h_det_last_[ci], 0.0);
         const double h_1d_det = node_heads[cp.node_idx];
-        const double Q_det    = q_det ? q_det[cp_idx]
-                                      : orifice_Q(h_2d_det, h_1d_det, 1.0);
+        const double Q_det    = orifice_Q(h_2d_det, h_1d_det, 1.0);
 
         // Pre-compute rom1d active index for this coupling node (if 1D ROM active).
         const bool use_rom1d = rom1d && rom1d->is_ready()
@@ -1138,15 +1167,34 @@ void SpectralROM::applyCouplingFlux(
         double q_min_cp = std::numeric_limits<double>::max();
         double q_max_cp = std::numeric_limits<double>::lowest();
 
+        // Projection of a unit depth change at this cell. Volume-consistent
+        // when the additive operator carries its Gram: G⁻¹·P[:,c]·A_c (see
+        // setAdditiveOperator); otherwise the plain column P[:,c].
+        const bool vol_proj = twoChannel() && !add_ginv_.empty();
+        if (vol_proj) {
+            add_proj_buf_.assign(nk, 0.0);
+            for (std::size_t p = 0; p < nk; ++p) {
+                double s = 0.0;
+                for (std::size_t j = 0; j < nk; ++j)
+                    s += add_ginv_[p * nk + j] * basis->P[j * nt + ci];
+                add_proj_buf_[p] = s * tri_area;
+            }
+        }
+
         for (int i = 0; i < n_ensemble; ++i) {
             auto    ui = static_cast<std::size_t>(i);
             double* ai = &a_ensemble[ui * nk];
 
             // Per-member 1D head: ROM1D reconstruction when available, else the
             // shared deterministic head (outfalls / unregistered nodes).
-            double h_1d_abs = (active_1d_idx >= 0)
-                              ? rom1d->reconstructHead(i, active_1d_idx)
-                              : node_heads[cp.node_idx];
+            // Per-member 1D head: the current deterministic head plus this
+            // member's 1D deviation (deviation form; never the member's
+            // absolute 1D reconstruction, whose reference may lag the head
+            // the 2D step used by one routing step).
+            double h_1d_abs = h_1d_det;
+            if (active_1d_idx >= 0)
+                h_1d_abs += (rom1d->reconstructHead(i, active_1d_idx)
+                             - rom1d->detHead(active_1d_idx)) * rom1d_head_scale;
 
             // Reconstruct per-member depth at the coupling cell. PR H16:
             // relative_deviation makes this a local fraction of h_2d_det
@@ -1173,8 +1221,10 @@ void SpectralROM::applyCouplingFlux(
             // two-channel mode, the single coefficient set otherwise.
             const double delta_h = -(Q - Q_det) * dt / tri_area;
             double* target = aadd ? aadd : ai;
-            for (std::size_t j = 0; j < nk; ++j)
-                target[j] += basis->P[j * nt + ci] * delta_h;
+            if (vol_proj && aadd)
+                for (std::size_t j = 0; j < nk; ++j) target[j] += add_proj_buf_[j] * delta_h;
+            else
+                for (std::size_t j = 0; j < nk; ++j) target[j] += basis->P[j * nt + ci] * delta_h;
         }
 
         // Commit bounds for this coupling point (guard against no-flux case).

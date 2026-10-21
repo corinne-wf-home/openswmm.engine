@@ -25,6 +25,40 @@ using openswmm::uncertainty::coo_to_csr;
 using openswmm::uncertainty::csr_matvec;
 
 // ============================================================================
+// invertSpd_ — Gauss-Jordan with partial pivoting on a small SPD matrix.
+// G is destroyed. Returns false on a (numerically) singular pivot.
+// ============================================================================
+
+bool DeviationOperator2D::invertSpd_(std::vector<double>& G, std::size_t nk,
+                                     std::vector<double>& Ginv) {
+    Ginv.assign(nk * nk, 0.0);
+    for (std::size_t i = 0; i < nk; ++i) Ginv[i * nk + i] = 1.0;
+    for (std::size_t c = 0; c < nk; ++c) {
+        std::size_t piv = c;
+        for (std::size_t r = c + 1; r < nk; ++r)
+            if (std::abs(G[r * nk + c]) > std::abs(G[piv * nk + c])) piv = r;
+        if (std::abs(G[piv * nk + c]) < 1e-300) return false;
+        if (piv != c)
+            for (std::size_t j = 0; j < nk; ++j) {
+                std::swap(G[c * nk + j], G[piv * nk + j]);
+                std::swap(Ginv[c * nk + j], Ginv[piv * nk + j]);
+            }
+        const double inv = 1.0 / G[c * nk + c];
+        for (std::size_t j = 0; j < nk; ++j) { G[c * nk + j] *= inv; Ginv[c * nk + j] *= inv; }
+        for (std::size_t r = 0; r < nk; ++r) {
+            if (r == c) continue;
+            const double f = G[r * nk + c];
+            if (f == 0.0) continue;
+            for (std::size_t j = 0; j < nk; ++j) {
+                G[r * nk + j]    -= f * G[c * nk + j];
+                Ginv[r * nk + j] -= f * Ginv[c * nk + j];
+            }
+        }
+    }
+    return true;
+}
+
+// ============================================================================
 // assemble
 // ============================================================================
 
@@ -44,6 +78,9 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
 
     const bool has_flow = (cell_u != nullptr) && (cell_v != nullptr);
     const bool advect   = has_flow && (c_factor != 0.0);
+    // Net outflow per cell (m²/s per unit depth) for the skew form.
+    std::vector<double> net_out;
+    if (advect && skew_advection) net_out.assign(static_cast<std::size_t>(n), 0.0);
 
     // Optional depth weighting: per-cell (h/h̄)^{5/3}, floored so a dry cell
     // cannot zero an edge outright (same floor role as the eigenbasis's
@@ -153,12 +190,25 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
                     // Outflow from i carries δh_i; inflow to j receives it.
                     coo[ui].emplace_back(i,  q / A_i);
                     coo[uj].emplace_back(i, -q / A_j);
+                    if (!net_out.empty()) { net_out[ui] += q; net_out[uj] -= q; }
                 } else if (un < 0.0) {
                     // Flow j→i: outflow from j carries δh_j; i receives it.
                     coo[uj].emplace_back(j, -q / A_j);
                     coo[ui].emplace_back(j,  q / A_i);
+                    if (!net_out.empty()) { net_out[uj] -= q; net_out[ui] += q; }
                 }
             }
+        }
+    }
+
+    // Skew form: subtract half the net outflow from each diagonal, so the
+    // advection's symmetric part is exactly the face dissipation (see header).
+    if (!net_out.empty()) {
+        for (int i = 0; i < n; ++i) {
+            const auto ui = static_cast<std::size_t>(i);
+            const double A_i = mesh.tri_area[ui];
+            if (A_i < 1e-30 || net_out[ui] == 0.0) continue;
+            coo[ui].emplace_back(i, -0.5 * net_out[ui] / A_i);
         }
     }
 
@@ -189,7 +239,8 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
     M.assign(nk * nk, 0.0);
 
     std::vector<double> y(nn, 0.0);
-    if (similarity_h == nullptr) {
+    if (similarity_h == nullptr && !volume_inner_product) {
+        GinvArea.clear();
         for (std::size_t q = 0; q < nk; ++q) {
             const double* Pq = &basis.P[q * nn];
             csr_matvec(L, Pq, y.data());
@@ -203,6 +254,34 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
         }
         return true;
     }
+    if (similarity_h == nullptr) {
+        // Volume inner product: A_v = Pᵀ·A·L·P, G = Pᵀ·A·P, M = G⁻¹·A_v.
+        std::vector<double> Av(nk * nk, 0.0), G(nk * nk, 0.0);
+        for (std::size_t q = 0; q < nk; ++q) {
+            const double* Pq = &basis.P[q * nn];
+            csr_matvec(L, Pq, y.data());
+            for (std::size_t p = 0; p < nk; ++p) {
+                const double* Pp = &basis.P[p * nn];
+                double a = 0.0, g = 0.0;
+                for (std::size_t t = 0; t < nn; ++t) {
+                    const double ap = mesh.tri_area[t] * Pp[t];
+                    a += ap * y[t];
+                    g += ap * Pq[t];
+                }
+                Av[p * nk + q] = a;
+                G[p * nk + q] = g;
+            }
+        }
+        if (!invertSpd_(G, nk, GinvArea)) return false;
+        for (std::size_t p = 0; p < nk; ++p)
+            for (std::size_t q = 0; q < nk; ++q) {
+                double s = 0.0;
+                for (std::size_t r = 0; r < nk; ++r) s += GinvArea[p * nk + r] * Av[r * nk + q];
+                M[p * nk + q] = s;
+            }
+        return true;
+    }
+    GinvArea.clear();
 
     // Relative coordinates, Galerkin in the trial space span(H·P):
     //   A = (HP)ᵀ·L·(HP),  G = (HP)ᵀ(HP),  M = G⁻¹·A.
@@ -226,32 +305,8 @@ bool DeviationOperator2D::assemble(const MeshData& mesh,
             G[p * nk + q] = g;
         }
     }
-    // Ginv by Gauss-Jordan with partial pivoting (G is SPD: H is floored
-    // positive and P has orthonormal columns). k is O(10-100).
-    Ginv.assign(nk * nk, 0.0);
-    for (std::size_t i = 0; i < nk; ++i) Ginv[i * nk + i] = 1.0;
-    for (std::size_t c = 0; c < nk; ++c) {
-        std::size_t piv = c;
-        for (std::size_t r = c + 1; r < nk; ++r)
-            if (std::abs(G[r * nk + c]) > std::abs(G[piv * nk + c])) piv = r;
-        if (std::abs(G[piv * nk + c]) < 1e-300) return false;
-        if (piv != c)
-            for (std::size_t j = 0; j < nk; ++j) {
-                std::swap(G[c * nk + j], G[piv * nk + j]);
-                std::swap(Ginv[c * nk + j], Ginv[piv * nk + j]);
-            }
-        const double inv = 1.0 / G[c * nk + c];
-        for (std::size_t j = 0; j < nk; ++j) { G[c * nk + j] *= inv; Ginv[c * nk + j] *= inv; }
-        for (std::size_t r = 0; r < nk; ++r) {
-            if (r == c) continue;
-            const double f = G[r * nk + c];
-            if (f == 0.0) continue;
-            for (std::size_t j = 0; j < nk; ++j) {
-                G[r * nk + j]    -= f * G[c * nk + j];
-                Ginv[r * nk + j] -= f * Ginv[c * nk + j];
-            }
-        }
-    }
+    // G is SPD (H floored positive, P orthonormal columns); k is O(10-100).
+    if (!invertSpd_(G, nk, Ginv)) return false;
     for (std::size_t p = 0; p < nk; ++p)
         for (std::size_t q = 0; q < nk; ++q) {
             double s = 0.0;

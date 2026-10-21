@@ -395,6 +395,10 @@ struct SimulationSnapshot {
     std::vector<double> surface_rom_q05; ///< 5th-percentile overland depth (m), per face
     std::vector<double> surface_rom_q50; ///< Median overland depth (m), per face
     std::vector<double> surface_rom_q95; ///< 95th-percentile overland depth (m), per face
+    /// Fraction of ROM members whose depth exceeds surface_rom_exceed_depth, per
+    /// face. Empty unless [2D_ROM] EXCEED_DEPTH > 0.
+    std::vector<double> surface_rom_p_exceed;
+    double surface_rom_exceed_depth = 0.0; ///< Threshold (m) behind surface_rom_p_exceed
 };
 
 } /* namespace openswmm */

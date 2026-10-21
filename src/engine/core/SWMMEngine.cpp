@@ -47,6 +47,7 @@
 #include "../hydraulics/ForceMain.hpp"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <cassert>
 #include <vector>
 #include "../hydraulics/TimestepController.hpp"
@@ -6608,6 +6609,9 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
         }
 
 #ifdef OPENSWMM_HAS_2D
+        // 2D ROM quantiles for this frame, against the depth it writes.
+        surface_router_.refreshROMQuantiles();
+
         // Compute 1D ROM head quantiles once per report boundary. This is
         // done up front (not inside the plugin-gated snapshot block below)
         // so the CSV sidecar is written correctly even when no output plugin
@@ -6694,6 +6698,15 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                         const double p_ctrl = th.has_ctrl
                             ? uncertainty::exceedanceFraction(row, M, th.ctrl_head)
                             : 0.0;
+                        // A spilling node is above its rim in every member by
+                        // definition (its head is pinned there, see
+                        // SpectralROM1D::setPinnedNodes); a strict comparison
+                        // of equal heads would call that zero risk.
+                        const bool spilling = static_cast<std::size_t>(ai) < rom1d_fs_pinned_.size()
+                                              && rom1d_fs_pinned_[static_cast<std::size_t>(ai)] != 0;
+                        const double p_rim = th.has_rim
+                            ? (spilling ? 1.0 : uncertainty::exceedanceFraction(row, M, th.rim_head))
+                            : std::numeric_limits<double>::quiet_NaN();
                         const auto mod = uncertainty::gapModality(
                             row, M, rom1d_modality_gap_ratio_, rom1d_modality_min_side_);
 
@@ -6706,7 +6719,10 @@ void SWMMEngine::postOutputSnapshot(double /*dt_step*/) noexcept {
                             << th.head                                           << ','
                             << p_exceed                                          << ','
                             << p_ctrl                                            << ','
-                            << (mod.flagged ? 1 : 0)                             << '\n';
+                            << (mod.flagged ? 1 : 0)                             << ','
+                            << (th.has_rim ? th.rim_head
+                                           : std::numeric_limits<double>::quiet_NaN()) << ','
+                            << p_rim                                             << '\n';
                     }
                 }
             }
@@ -7881,6 +7897,10 @@ void SWMMEngine::fillSurfaceSnapshot(SimulationSnapshot& snap) const noexcept {
         snap.surface_rom_q05 = rom->q05;
         snap.surface_rom_q50 = rom->q50;
         snap.surface_rom_q95 = rom->q95;
+        if (rom->p_exceed.size() == rom->q05.size()) {
+            snap.surface_rom_p_exceed = rom->p_exceed;
+            snap.surface_rom_exceed_depth = rom->exceed_depth;
+        }
     }
 #else
     (void)snap;
@@ -11755,7 +11775,7 @@ void SWMMEngine::buildROM1D() noexcept {
         rom_threshold_csv_.open(thr_path);
         if (rom_threshold_csv_.is_open()) {
             rom_threshold_csv_ << "time_s,node_name,threshold_kind,threshold_value,"
-                                  "p_exceed,p_ctrl,modality_flag\n";
+                                  "p_exceed,p_ctrl,modality_flag,rim_value,p_rim\n";
         }
     }
 
@@ -11792,6 +11812,14 @@ void SWMMEngine::buildRom1dThresholds() noexcept {
         const double invert = ctx_.nodes.invert_elev[ui];
         const double crown  = ctx_.nodes.crown_elev[ui];
         const double full   = ctx_.nodes.full_depth[ui];
+
+        // The flooding level is reported alongside whichever threshold ranks
+        // first, so a node with a crown still says how likely it is to
+        // overflow (rim_value / p_rim columns).
+        if (full > 0.0) {
+            th.has_rim = true;
+            th.rim_head = invert + full;
+        }
 
         if (crown > invert) {
             th.kind = uncertainty::ThresholdKind::CROWN;
@@ -11975,6 +12003,7 @@ bool SWMMEngine::computeRom1dFlowSource() noexcept {
             rom1d_fs_pinned_[static_cast<std::size_t>(a)] = 1;
     }
     uncertainty::solveFlowResponse(na, edges, rom1d_fs_phi_, 50, &rom1d_fs_pinned_);
+    rom1d_->setPinnedNodes(&rom1d_fs_pinned_);
     std::copy(rom1d_fs_phi_.begin(), rom1d_fs_phi_.end(), rom1d_sens_buf_.begin());
     return true;
 }

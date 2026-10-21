@@ -3613,3 +3613,181 @@ pins τ₀ < 0.1 h.
   the dh/dt work.
 - **Tails.** The band tails are wider (no-flow p90 0.55 → 7.6), while the MC
   shows the no-flow class moving from too narrow (0.333) to on width (0.998).
+
+# Coupled 1D–2D flooding on Bellinge (2026-10-21, demonstration run)
+
+First run of the sidecar on a real coupled network with a 2D surface:
+Bellinge's 1,020-node sewer with its 155,688-triangle terrain mesh, the
+29 June 2012 storm (58 mm, peak 06:23), 00:01–10:00, Manning's n ±20 % on
+pipes and surface, rainfall `NORMAL CV 0.20` through `[SOFT_RAINGAGES]` and a
+spread-only `[SOFT_RAINFALL_GRID]` (one member rank for both), 50 members,
+40 modes, `[2D_ROM] EXCEED_DEPTH 0.20`. Release build, bit-exact kernels.
+Data and scripts: `SWMM6/data/bellinge_demo/`,
+`scripts/uncertainty/bellinge_flood/`.
+
+## 1. Five defects found by three reference-free checks
+
+Before any Monte Carlo, three invariants that need no reference were checked
+on a 07:00 window: a zero-perturbation run must give a zero band and a median
+equal to the deterministic run, and the member coefficients must stay bounded
+through the event. All three failed, for five distinct reasons. None is in a
+regime any registered test enters.
+
+| # | Defect | Symptom on Bellinge | Fix | Test |
+|---|---|---|---|---|
+| 1 | Per-member 1D head entered the 2D exchange in internal feet against a metre mesh | 63,000 dry cells carried 0.2–42 m of water in every member before any rain | member head = deterministic head (m) + 1D deviation × 0.3048 (`SpectralROM1D::detHead()`) | `CouplingFluxConvertsRom1dFeetToMetres` |
+| 2 | Members compared with the exchange the 2D integrator booked, not the same law at the deterministic state (W2 design) | zero-perturbation median drifted 4 cm (p99) before rain, 0.46 m at 06:00, 1.9 m at 06:30 | reference = same orifice law at the deterministic state; `q_det` argument removed | `CouplingFluxZeroPerturbationAddsNothing` (fails on the absolute-head mutation) |
+| 3 | Explicit per-step orifice exchange | overshoot where manhole and street levels nearly agree (dQ/dh ∝ 1/√\|dh\|) | implicit exchange over the step (bisection, fixed 60 iterations) | `CouplingFluxImplicitExchangeNeverOvershoots` (fails on the explicit mutation) |
+| 4 | 2D quantiles on the router's own elapsed-time cadence | saved median lagged the saved depth by up to one report step (≈2 m on the rising limb) | `SurfaceRouter2D::refreshROMQuantiles()` at `output_due` | — (engine wiring) |
+| 5 | Additive channel's reduced operator | coefficients grew 15 → 7.6 × 10¹¹ between 05:45 and 07:00 | energy-stable form, §2 | `EnergyStableFormHasNoGrowingModeOnConvergingFlow` |
+
+Fixes 1–3 and 5 change the coupled path and the additive operator, so the
+W3/W4 2D cells and the 1D gates are to be re-measured before this merges
+(pending below).
+
+## 2. The additive operator on converging flow
+
+`rom_state_dump` wrote the mesh, basis and flow state at 05:30 and 06:30;
+`operator_variants.py` assembled six candidate reduced operators from it.
+Eigenvalues of the k = 40 operator (1/s; negative = growing):
+
+| Variant | 05:30 | 06:30 |
+|---|---|---|
+| engine's additive operator as installed | +2.4e-4 | **−5.9e-3** |
+| V1 plain Galerkin of upwind advection (current) | +4.1e-5 | **−6.2e-3** |
+| V2 Galerkin in the cell-volume inner product | −2.4e-4 | −4.8e-4 |
+| V3 volume inner product, diffusion only | +1.5e-7 | +1.2e-5 |
+| **V4 volume inner product + skew-form advection** | **+7.4e-5** | **+2.0e-4** |
+| V5 volume inner product + converging cells damped | +3.6e-2 | +4.4e-2 |
+| V6 plain Galerkin, skew-form advection | +6.3e-4 | −2.2e-3 |
+
+At 06:30, 79,000 of 155,688 cells have net inflow (ponds filling). The
+full-order upwind operator is an M-matrix (stable in the L1 sense) but its
+Galerkin projection in the plain inner product is not energy-stable: the
+quadratic form carries ½·Σ δh_i²·div_i, negative where flow converges, and the
+smooth modes can concentrate there. Writing advection in skew form (diagonal
+reduced by half the net outflow) makes the symmetric part exactly the face
+dissipation ½·Σ q·(δh_i − δh_j)², and projecting in the volume inner product
+preserves that bound. Shipped as V4 (`DeviationOperator2D::skew_advection`,
+`volume_inner_product`), for the additive channel only; the Manning channel's
+depth-weighted Galerkin form was stable throughout and is unchanged. Coupling
+volumes are projected consistently (G⁻¹·P[:,c]·ΔV). Rain and soft-rain
+forcings are still projected plainly; the volume Gram has condition 1.3 and 4 %
+off-diagonals on this mesh, so the inconsistency is small and is left for the
+Monte Carlo to judge. V5 is stable but over-damped; V3 loses the downhill
+transport of the extra water.
+
+## 3. After the fixes (07:00 window, perturbed run)
+
+| time | det cells > 20 cm | P>5 % / P>50 % / P>95 % cells | band width median / p99 / max (m) | \|q50 − det\| p99 / max (m) |
+|---|---|---|---|---|
+| 05:01 | 4,002 | 4,387 / 3,985 / 3,649 | 0.020 / 0.10 / 0.52 | 0.007 / 0.04 |
+| 06:01 | 23,698 | 24,604 / 23,635 / 22,732 | 0.024 / 0.18 / 1.0 | 0.013 / 0.09 |
+| 06:31 | 54,557 | 55,496 / 54,662 / 53,907 | 0.026 / 0.62 / 2.7 | 0.033 / 0.26 |
+| 06:51 | 47,137 | 47,763 / 47,116 / 46,622 | 0.023 / 0.96 / 3.2 | 0.021 / 0.14 |
+
+Bounded, median on the deterministic depth, probability classes bracketing the
+deterministic count. Zero-perturbation drift is now at round-off before rain.
+
+## 4. Against brute-force Monte Carlo (10 members, 05:00–10:00)
+
+Members: Latin hypercube over Manning's n (×0.82–1.18, pipes and surface
+together) and rainfall (×0.67–1.33 through the gage multiplier), full
+deterministic runs of `demo_norain.inp` (`mc_prepare.py`, `run_mc.sh`,
+9–21 min each single-threaded). Scored by `score_mc.py` at every 10-minute
+frame: member coverage of the ROM 5–95 band (nominal 0.90), ROM width over
+the members' Hazen 5–95 span, and the reliability of P(depth > 20 cm).
+
+**Flood probability (the risk map) is reliable.**
+
+| ROM class | members above 20 cm | cells |
+|---|---|---|
+| 0–5 % | 0.0 % | 1,602,882 |
+| 5–25 % | 1.1 % | 18,142 |
+| 25–50 % | 19.0 % | 2,890 |
+| 50–75 % | 63.7 % | 2,503 |
+| 75–95 % | 91.6 % | 2,130 |
+| > 95 % | 99.5 % | 49,352 |
+
+Brier score 0.0006 against 0.030 for the no-skill forecast.
+
+**2D depth bands are smeared** (coverage 0.992 overall, width ratio median
+3.2): by how much the members themselves disagree at the cell,
+
+| MC 5–95 span | samples | coverage | width ratio | class |
+|---|---|---|---|---|
+| 0.5–2 cm | 53,495 | 0.964 | 4.88 | conservative |
+| 2–5 cm | 36,813 | 0.884 | 2.56 | conservative |
+| 5–20 cm | 24,898 | 0.811 | 1.56 | conservative (ceiling 1.5) |
+| 20–100 cm | 3,308 | 0.521 | 0.46 | ranking only |
+| > 1 m | 29 | 0.228 | 0.23 | ranking only |
+
+Too wide on thin water, too narrow in the pond centres: the W4b mechanism
+(smooth modes carry the deep cells' deviation onto their shallow neighbours)
+plus the spill-volume leak of §6. The probabilities survive because the
+threshold sits where the band is right-sized.
+
+**1D pipe bands are conservative** (all manholes: coverage 0.938, width
+ratio median 5.4; trunk transect 0.911 / 6.9). 476 of 1,011 manholes spill in
+this storm; the members sit within 6 cm of the rim there while the unpinned
+ROM band ran 2.5 m below to 1.5 m above it. Pinning the reconstruction at
+spilling nodes (`SpectralROM1D::setPinnedNodes`, p_rim = 1 there) fixed those
+nodes but not their neighbours: the 433 surcharged manholes that do not spill
+are backed up by pinned nodes, the members disagree by 5–20 cm there, and the
+ROM band is 5–11× that. The storm overloads the network, and the surcharged,
+backwater-held regime is one the 1D ROM has not been calibrated in (H5's
+documented limitation, now with a number on a real network). Open.
+
+**What this means for the figures.** The probability map and the manhole
+overflow probabilities at spilling nodes can be read as probabilities. The
+depth bands are rankings with the stated bias. The manhole overflow
+probabilities at surcharged, non-spilling nodes are overstated.
+
+## 5. Rain on the mesh over-accumulates (deterministic engine, not the sidecar)
+
+The first full run used the model's `RAINFALL_MODE NATURAL_NEIGHBOUR`. Its own
+2D continuity block counts 22.3 × 10⁶ m³ of rainfall on the 34.9 km² mesh by
+10:00 — 640 mm — against 19–24 mm recorded at the two gages by then. The
+instantaneous mesh intensity matches the gage (≈ 210 mm/h at the 06:21 peak),
+so the rate is right and the accumulated volume is wrong, by a factor that
+grows through the storm (HDF5 `Mesh2_face_rain_cum` mean 19 mm at 06:01 vs
+4.1 mm at the gage; 54 vs 13 at 06:21; 101 vs 18 at 07:41). The result was a
+flat lake at 17.4 m over the whole trunk, 1,000 ha deeper than 20 cm. This is
+a defect in the marcher's rain accounting (volume applied per sub-step is the
+obvious candidate), outside the sidecar, reported to the model's authors and
+not touched here. The demonstration uses `RAINFALL_MODE NONE`, the engine's
+documented choice for models whose subcatchments already carry the storm to
+the sewer: the surface then floods only from what the sewer spills (0.64 ×
+10⁶ m³ spilled, 0.17 × 10⁶ m³ drained back, 0.51 × 10⁶ m³ left on the ground
+at 10:00; about 50 ha deeper than 20 cm, 4.3 m in the F74 pond).
+
+A second configuration finding: a spread-only `[SOFT_RAINFALL_GRID]` on the
+rainless mesh still forced the members (79 % of dry cells carried a 1–2 cm
+q95), because a `CV` spread is scaled by the gage rain in force rather than by
+the rain the mesh actually receives (zero under `RAINFALL_MODE NONE`). The
+demonstration drops the grid; rainfall uncertainty reaches the surface through
+the sewer spill. Worth a guard in `SurfaceRouter2D` (zero spread when no rain
+is applied to the mesh) — not done here.
+
+## 6. The demonstration run (`RAINFALL_MODE NONE`, no surface spread grid)
+
+Dry cells everywhere carry a uniform q95 of about 1.3 cm that does not decay
+with distance from the ponds (median 1.3 cm at 0–50 m and at 2–5 km): each
+member's extra or missing spill volume lands on the near-constant mode and is
+spread over the whole mesh (0.6 × 10⁶ m³ over 34.9 km² ≈ 1.7 cm). It is the
+2D analogue of the 1D truncation H17 fixed with the quasi-static residual; a
+per-coupling-cell residual is the candidate fix. The figures draw the 2D band
+only where the median has water.
+
+| time | det cells > 20 cm (ha) | P>5 % / P>50 % / P>95 % (ha) | band width median / p99 / max (m) | \|q50 − det\| p99 / max (m) |
+|---|---|---|---|---|
+| 06:01 | 6.6 | 37.3 / 6.6 / 5.1 | 0.044 / 0.22 / 0.59 | 0.022 / 0.04 |
+| 06:31 | 40.3 | 93.8 / 40.5 / 35.4 | 0.022 / 0.23 / 0.89 | 0.018 / 0.16 |
+| 07:01 | 41.8 | 48.3 / 41.9 / 38.1 | 0.018 / 0.14 / 1.36 | 0.013 / 0.08 |
+| 08:01 | 49.4 | 54.9 / 49.5 / 45.9 | 0.014 / 0.15 / 1.60 | 0.017 / 0.08 |
+| 09:01 | 51.9 | 55.0 / 51.6 / 47.8 | 0.023 / 0.16 / 1.67 | 0.013 / 0.05 |
+
+The "possible" zone (P > 5 %) is wide on the rising limb and converges on the
+deterministic extent afterwards. 1D: at 07:00, 44 manholes overflow in ≥ 95 %
+of members, 720 are uncertain (5–95 %), 247 in ≤ 5 %. Whether those 720 are
+real or over-wide surcharged bands is what §4's Monte Carlo decides.

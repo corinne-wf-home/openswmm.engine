@@ -146,6 +146,7 @@ Controls the ROM solver. All keywords are optional; defaults shown.
 | `RAINFALL_PERT` | `0.20` | ≥ 0 | Half-range for rainfall intensity. Overridden by `[UNCERTAINTY] 2D RAINFALL`. |
 | `MANNINGS_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for Manning's n field. 0 = uniform scalar per member (fast). |
 | `RAINFALL_CORR_LEN` | `0.0` | ≥ 0 | Spatial correlation length (m) for rainfall field. 0 = uniform scalar per member. |
+| `EXCEED_DEPTH` | `0.0` | ≥ 0 | Flood-risk reporting threshold (m). When > 0 the ROM also reports, per cell and report frame, the fraction of members whose depth exceeds it, as the HDF5 dataset `Mesh2_face_rom_p_exceed` (§7.10). A reporting choice: it changes no member and no deterministic result. 0 = off. |
 
 `WET_RESEED_FRACTION`, `WET_RESEED_MIN_INTERVAL`, `PARAMETRIC_TAILS` and `MODE_DROP_THRESHOLD`
 were retired on 2026-10-12 after measurement (VALIDATION.md "H17 §9"). A line that restates the
@@ -1022,7 +1023,7 @@ report:
 Schema:
 
 ```
-time_s,node_name,threshold_kind,threshold_value,p_exceed,p_ctrl,modality_flag
+time_s,node_name,threshold_kind,threshold_value,p_exceed,p_ctrl,modality_flag,rim_value,p_rim
 ```
 
 | Column | Description |
@@ -1034,6 +1035,8 @@ time_s,node_name,threshold_kind,threshold_value,p_exceed,p_ctrl,modality_flag
 | `p_exceed` | Fraction of ensemble members strictly above `threshold_value` |
 | `p_ctrl` | Fraction of members above this node's `[CONTROLS]` setpoint, if it is named as a sensor; `0` otherwise |
 | `modality_flag` | `1` when the ensemble looks bimodal at this node (see below), else `0` |
+| `rim_value` | The node's rim (invert + MaxDepth) as an absolute head in internal units; `nan` when the node has no MaxDepth |
+| `p_rim` | Fraction of members above `rim_value` — the probability the manhole overflows. Reported for every node, so a node whose first threshold is its crown (surcharge) still says how likely it is to flood; `nan` without a rim |
 
 **Why this file exists.** The decision-relevant question at a crown or a control
 setpoint is almost never "what is the 95th-percentile depth" — it is *what
@@ -1379,9 +1382,11 @@ interval via `update()` on the IO thread.
 **2D ROM quantile datasets** (written when the 2D ROM is active):
 
 ```
-/Mesh2_face_depth_q05    [nTime, nFace]   — 5th-percentile depth (m)
-/Mesh2_face_depth_q50    [nTime, nFace]   — Median depth (m)
-/Mesh2_face_depth_q95    [nTime, nFace]   — 95th-percentile depth (m)
+/Mesh2_face_rom_q05      [nTime, nFace]   — 5th-percentile depth (m)
+/Mesh2_face_rom_q50      [nTime, nFace]   — Median depth (m)
+/Mesh2_face_rom_q95      [nTime, nFace]   — 95th-percentile depth (m)
+/Mesh2_face_rom_p_exceed [nTime, nFace]   — P(depth > threshold), only with [2D_ROM] EXCEED_DEPTH > 0;
+                                            the threshold is the dataset attribute threshold_depth_m
 ```
 
 **1D ROM quantile datasets** (written when the 1D ROM is active, PR 12b):
@@ -1656,11 +1661,11 @@ readable by any CF-aware tool:
 ```python
 import xarray as xr
 ds = xr.open_dataset("results.h5", engine="netcdf4")
-spread = ds["Mesh2_face_depth_q95"] - ds["Mesh2_face_depth_q05"]
+spread = ds["Mesh2_face_rom_q95"] - ds["Mesh2_face_rom_q05"]
 ```
 
-For ParaView: open the `.h5` file, select `Mesh2_face_depth_q95` and subtract
-`Mesh2_face_depth_q05` via a Calculator filter to visualise the uncertainty band width.
+For ParaView: open the `.h5` file, select `Mesh2_face_rom_q95` and subtract
+`Mesh2_face_rom_q05` via a Calculator filter to visualise the uncertainty band width.
 
 ---
 

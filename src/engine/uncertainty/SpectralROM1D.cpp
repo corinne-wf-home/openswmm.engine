@@ -449,6 +449,14 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
         }
     }
 
+    // Spilling nodes: every member sits at the deterministic head (see
+    // setPinnedNodes()). Applied after every deviation term, before the
+    // reference is added, so the phase-shifted reference is also bypassed.
+    if (pinned_) {
+        for (std::size_t t = 0; t < nn && t < pinned_->size(); ++t)
+            if ((*pinned_)[t]) std::fill_n(&recon_buf_[t * M], M, 0.0);
+    }
+
     const bool phase_active = phase_cfg.enabled && !tbar_.empty() && !hist_.empty();
 
     // Add the deterministic (or, under H11, per-member phase-shifted)
@@ -460,7 +468,7 @@ void SpectralROM1D::computeQuantiles(const double* h_det_active,
         const double floor_t = invert_active ? invert_active[t] : 0.0;
         const int node_i = static_cast<int>(t);
 
-        if (!phase_active || tbar_[t] == 0.0) {
+        if (!phase_active || tbar_[t] == 0.0 || isPinned(static_cast<int>(t))) {
             // No phase field, disabled, or this node's own T̄ is zero (e.g.
             // the source of the deterministic flow) -- every member's
             // reference is h_det, exactly the pre-H11 behavior.
@@ -751,6 +759,7 @@ double SpectralROM1D::reconstructHead(int member, int active_node) const noexcep
     auto nn = static_cast<std::size_t>(n_nodes);
     const double* ai = &a_ensemble[ui * nk];
     double h = h_det_last_[uk];   // deterministic reference (last advance/seed)
+    if (isPinned(active_node)) return std::max(h, 0.0);   // spilling: rim holds every member
     for (std::size_t j = 0; j < nk; ++j) {
         if (!mode_active[j]) continue;
         h += basis->P[j * nn + uk] * ai[j];

@@ -539,6 +539,11 @@ struct SolverOptions2D {
     double rom_mannings_pert = 0.20; ///< Manning's n half-range: n ∈ [1±p]·base.
     double rom_rainfall_pert = 0.20; ///< Rainfall half-range: r ∈ [1±p]·base.
     double rom_cd_pert       = 0.00; ///< Coupling Cd half-range; 0 = disabled.
+    /*! Reporting threshold (m): when > 0 the ROM also reports, per cell, the
+     *  fraction of ensemble members whose depth exceeds it (a flood-risk
+     *  probability). A reporting choice, not a tuning dial: it changes no
+     *  member and no deterministic result. 0 = off. */
+    double rom_exceed_depth  = 0.0;
 
     /*! Deviation decay coefficient K_eff [m^(4/3)/s]. 0 (default) = AUTO:
      *  SurfaceRouter2D derives it each advance from mesh Manning/slope and the

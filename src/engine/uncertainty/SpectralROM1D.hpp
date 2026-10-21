@@ -478,6 +478,31 @@ struct SpectralROM1D {
      */
     double reconstructHead(int member, int active_node) const noexcept;
 
+    /// Deterministic head the deviations are taken against at @p active_node
+    /// (same frame and units as reconstructHead(): internal feet). A member's
+    /// head deviation is reconstructHead(i, k) - detHead(k).
+    double detHead(int active_node) const noexcept {
+        return h_det_last_[static_cast<std::size_t>(active_node)];
+    }
+
+    /**
+     * @brief Nodes whose head is set by a spill (overflowing at the rim), per
+     *        active node; non-owning, may be null. At such a node every member
+     *        reconstructs to the deterministic head: no roughness or inflow
+     *        change can move a head that the rim holds, and the Monte Carlo
+     *        says so (Bellinge 2026-10-21: 476 spilling manholes, members
+     *        within 6 cm of the rim, the unpinned band 2.5 m below to 1.5 m
+     *        above it). The engine already pins the deviation TARGETS there;
+     *        this pins the reconstruction too, because the slow modes keep the
+     *        deviation built up before the spill for hours. Members that would
+     *        stop spilling are not represented; see VALIDATION.md.
+     */
+    void setPinnedNodes(const std::vector<char>* pinned_active) noexcept { pinned_ = pinned_active; }
+    bool isPinned(int active_node) const noexcept {
+        return pinned_ && static_cast<std::size_t>(active_node) < pinned_->size()
+               && (*pinned_)[static_cast<std::size_t>(active_node)] != 0;
+    }
+
     /// true if initialize() succeeded.
     bool is_ready() const noexcept { return n_kept > 0 && !a_ensemble.empty(); }
 
@@ -488,6 +513,7 @@ private:
     /// Deterministic head passed to the most recent advance()/seed() call
     /// (length n_nodes). Used by reconstructHead().
     std::vector<double> h_det_last_;
+    const std::vector<char>* pinned_ = nullptr;   ///< see setPinnedNodes()
     std::vector<double> mass_;        ///< H18: storage S at the last generalized rebuild (empty = identity)
     std::vector<double> projP_;       ///< H18: S*P column by column (projection matrix; empty = P)
     std::vector<double> mode_rates_;  ///< H18: per-mode rates overriding the eigenvalues (empty = eigenvalues)
